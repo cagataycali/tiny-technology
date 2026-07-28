@@ -27,20 +27,23 @@ export const FALLBACKS: Record<string, string[]> = {
   // dropped (deprecated, retirement date passed — offering it 404s);
   // fable-5 added (current flagship; note it needs 30-day data retention).
   anthropic: [
-    'claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5',
-    'claude-haiku-4-5', 'claude-sonnet-4-5',
+    'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5',
+    'claude-haiku-4-5',
   ],
   bedrock: [
-    'global.anthropic.claude-sonnet-4-6',
+    'global.anthropic.claude-fable-5',
+    'global.anthropic.claude-opus-5',
+    'global.anthropic.claude-sonnet-5',
     'global.anthropic.claude-opus-4-8',
+    'global.anthropic.claude-opus-4-7',
     'us.anthropic.claude-haiku-4-5-v1:0',
     'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
     'amazon.nova-pro-v1:0', 'amazon.nova-lite-v1:0', 'amazon.nova-micro-v1:0',
     'meta.llama3-3-70b-instruct-v1:0',
   ],
   openrouter: [
-    'anthropic/claude-opus-4.8', 'anthropic/claude-sonnet-4.5',
-    'openai/gpt-5', 'openai/gpt-5-mini',
+    'anthropic/claude-opus-5', 'anthropic/claude-sonnet-5',
+    'openai/gpt-5.6-sol', 'openai/gpt-5.6-luna',
     'google/gemini-2.5-pro', 'google/gemini-2.5-flash',
     'meta-llama/llama-3.3-70b-instruct', 'mistralai/mistral-large',
     'deepseek/deepseek-chat', 'x-ai/grok-2', 'perplexity/sonar-pro',
@@ -54,7 +57,7 @@ export const FALLBACKS: Record<string, string[]> = {
     'mistral-large-latest', 'mistral-small-latest',
     'pixtral-large-latest', 'codestral-latest', 'ministral-8b-latest',
   ],
-  xai: ['grok-2-latest', 'grok-2-1212', 'grok-2-vision-1212', 'grok-beta'],
+  xai: ['grok-4.5'],
   perplexity: ['sonar-pro', 'sonar', 'sonar-reasoning-pro', 'sonar-reasoning'],
   gemini: [
     'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash',

@@ -260,11 +260,11 @@ class ModelConfigStore(context: Context) {
          */
         val PROVIDER_PRESETS: Map<String, Preset> = linkedMapOf(
             "default" to Preset("Tiny (free, rate-limited)", "", "gpt-5.6-luna", "No key needed"),
-            "openai" to Preset("OpenAI", "", "gpt-5-mini-2025-08-07", "sk-..."),
-            "anthropic" to Preset("Anthropic", "https://api.anthropic.com/v1/", "claude-sonnet-4-5", "sk-ant-..."),
+            "openai" to Preset("OpenAI", "", "gpt-5.6-sol", "sk-..."),
+            "anthropic" to Preset("Anthropic", "https://api.anthropic.com/v1/", "claude-opus-5", "sk-ant-..."),
             // No base URL — Bedrock routes through ConverseStream server-side.
-            "bedrock" to Preset("Amazon Bedrock (API key)", "", "global.anthropic.claude-opus-4-8", "bedrock-api-key..."),
-            "openrouter" to Preset("OpenRouter", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-4.5", "sk-or-..."),
+            "bedrock" to Preset("Amazon Bedrock (API key)", "", "global.anthropic.claude-opus-5", "bedrock-api-key..."),
+            "openrouter" to Preset("OpenRouter", "https://openrouter.ai/api/v1", "anthropic/claude-sonnet-5", "sk-or-..."),
             "groq" to Preset("Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "gsk_..."),
             "deepseek" to Preset("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat", "sk-..."),
             "mistral" to Preset("Mistral", "https://api.mistral.ai/v1", "mistral-large-latest", "..."),

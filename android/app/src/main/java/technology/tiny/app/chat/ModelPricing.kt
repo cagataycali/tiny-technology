@@ -63,7 +63,7 @@ object ModelPricing {
      *
      * Both sides are folded, because needles carry dots too (`gemini-2.5-pro`).
      * Dots separating NAME parts fold harmlessly:
-     * `global.anthropic.claude-sonnet-4-6` still contains its needle after.
+     * `global.anthropic.claude-sonnet-5` still contains its needle after.
      */
     fun foldVersionSeparators(s: String): String = s.lowercase(Locale.US).replace('.', '-')
 

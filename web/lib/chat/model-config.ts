@@ -56,7 +56,7 @@ export const PROVIDER_PRESETS: Record<
   anthropic: {
     label: "Anthropic",
     baseUrl: "https://api.anthropic.com/v1/",
-    modelPlaceholder: "claude-sonnet-4-5",
+    modelPlaceholder: "claude-sonnet-5",
     keyPlaceholder: "sk-ant-...",
   },
   bedrock: {
@@ -64,13 +64,13 @@ export const PROVIDER_PRESETS: Record<
     // No base URL — Bedrock goes through the edge-safe ConverseStream model
     // server-side (Claude models are NOT on Bedrock's /openai/v1 endpoint).
     baseUrl: "",
-    modelPlaceholder: "global.anthropic.claude-opus-4-8",
+    modelPlaceholder: "global.anthropic.claude-opus-5",
     keyPlaceholder: "bedrock-api-key... (Console → Bedrock → API keys)",
   },
   openrouter: {
     label: "OpenRouter",
     baseUrl: "https://openrouter.ai/api/v1",
-    modelPlaceholder: "anthropic/claude-sonnet-4.5",
+    modelPlaceholder: "anthropic/claude-sonnet-5",
     keyPlaceholder: "sk-or-...",
   },
   groq: {
@@ -94,7 +94,7 @@ export const PROVIDER_PRESETS: Record<
   xai: {
     label: "xAI (Grok)",
     baseUrl: "https://api.x.ai/v1",
-    modelPlaceholder: "grok-2-latest",
+    modelPlaceholder: "grok-4.5",
     keyPlaceholder: "xai-...",
   },
   perplexity: {

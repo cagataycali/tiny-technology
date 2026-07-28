@@ -5,8 +5,8 @@ import { FALLBACKS } from '../lib/model-registry'
 
 describe('rateFor', () => {
   it('matches by substring — Bedrock-prefixed ids resolve', () => {
-    expect(rateFor('global.anthropic.claude-sonnet-4-6')).toEqual({ input: 3, output: 15 })
-    expect(rateFor('claude-sonnet-4-6')).toEqual({ input: 3, output: 15 })
+    expect(rateFor('global.anthropic.claude-sonnet-5')).toEqual({ input: 3, output: 15 })
+    expect(rateFor('claude-sonnet-5')).toEqual({ input: 3, output: 15 })
   })
 
   it('current-generation Claude rates (list prices, verified 2026-07)', () => {
@@ -34,9 +34,9 @@ describe('rateFor', () => {
 describe('estimateCost', () => {
   it('computes per-million rates', () => {
     // 1M in + 1M out on sonnet = $3 + $15
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: 1_000_000, outputTokens: 1_000_000 })).toBe(18)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: 1_000_000, outputTokens: 1_000_000 })).toBe(18)
     // typical turn: 5K in, 500 out on sonnet = 0.015 + 0.0075
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: 5000, outputTokens: 500 })).toBeCloseTo(0.0225, 6)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: 5000, outputTokens: 500 })).toBeCloseTo(0.0225, 6)
   })
 
   it('null for unpriced models', () => {
@@ -45,18 +45,18 @@ describe('estimateCost', () => {
 
   it('discounts cached input reads (10% of input rate)', () => {
     // sonnet input $3/M: 1M input of which 1M cached → 1M * 3 * 0.1 = $0.30
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: 1_000_000, outputTokens: 0, cacheReadInputTokens: 1_000_000 })).toBeCloseTo(0.3, 6)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: 1_000_000, outputTokens: 0, cacheReadInputTokens: 1_000_000 })).toBeCloseTo(0.3, 6)
     // half cached: 500K fresh @ $3 + 500K cached @ $0.30 = 1.5 + 0.15 = $1.65
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: 1_000_000, outputTokens: 0, cacheReadInputTokens: 500_000 })).toBeCloseTo(1.65, 6)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: 1_000_000, outputTokens: 0, cacheReadInputTokens: 500_000 })).toBeCloseTo(1.65, 6)
   })
 
   it('no cache field → all input at full rate (unchanged behavior)', () => {
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: 1_000_000, outputTokens: 0 })).toBe(3)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: 1_000_000, outputTokens: 0 })).toBe(3)
   })
 
   it('clamps cache reads to input tokens (never negative fresh)', () => {
     // bogus cacheRead > input: charge everything at the cached rate, no negative
-    const c = estimateCost('claude-sonnet-4-6', { inputTokens: 1000, outputTokens: 0, cacheReadInputTokens: 999999 })!
+    const c = estimateCost('claude-sonnet-5', { inputTokens: 1000, outputTokens: 0, cacheReadInputTokens: 999999 })!
     expect(c).toBeGreaterThanOrEqual(0)
     expect(c).toBeCloseTo((1000 * 3 * 0.1) / 1_000_000, 9)
   })
@@ -65,13 +65,13 @@ describe('estimateCost', () => {
     // A partial/garbled usage event can carry a negative count; `Number(x)||0`
     // alone would pass it through and emit a NEGATIVE "cost" that drags down the
     // Chat.tsx `usd += c` accumulator. Android/iOS floor at 0 — web must too.
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: -5000, outputTokens: 0 })).toBe(0)
-    expect(estimateCost('claude-sonnet-4-6', { inputTokens: 0, outputTokens: -5000 })).toBe(0)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: -5000, outputTokens: 0 })).toBe(0)
+    expect(estimateCost('claude-sonnet-5', { inputTokens: 0, outputTokens: -5000 })).toBe(0)
     // a negative cacheRead floors to 0 → all input billed at the full rate
-    const c = estimateCost('claude-sonnet-4-6', { inputTokens: 1000, outputTokens: 0, cacheReadInputTokens: -999 })!
+    const c = estimateCost('claude-sonnet-5', { inputTokens: 1000, outputTokens: 0, cacheReadInputTokens: -999 })!
     expect(c).toBeCloseTo((1000 * 3) / 1_000_000, 9)
     // mixed: negative input floored, positive output still charged, never negative
-    const m = estimateCost('claude-sonnet-4-6', { inputTokens: -100, outputTokens: 500 })!
+    const m = estimateCost('claude-sonnet-5', { inputTokens: -100, outputTokens: 500 })!
     expect(m).toBeGreaterThanOrEqual(0)
     expect(m).toBeCloseTo((500 * 15) / 1_000_000, 9)
   })
@@ -79,9 +79,9 @@ describe('estimateCost', () => {
   it('never returns NaN when a provider omits a token field (would poison /cost)', () => {
     // A partial usage object (one field undefined) must not yield NaN — the
     // /cost accumulator adds the result and NaN there corrupts the whole total.
-    const a = estimateCost('claude-sonnet-4-6', { outputTokens: 500 } as any)
-    const b = estimateCost('claude-sonnet-4-6', { inputTokens: 5000 } as any)
-    const c = estimateCost('claude-sonnet-4-6', {} as any)
+    const a = estimateCost('claude-sonnet-5', { outputTokens: 500 } as any)
+    const b = estimateCost('claude-sonnet-5', { inputTokens: 5000 } as any)
+    const c = estimateCost('claude-sonnet-5', {} as any)
     for (const v of [a, b, c]) {
       expect(v).not.toBeNull()
       expect(Number.isFinite(v as number)).toBe(true)
@@ -119,7 +119,7 @@ describe('a version separator must not change the price', () => {
   it('the fold does not break ids whose dots separate NAME parts', () => {
     // Bedrock's dotted namespace, and Google's dotted version, are both real
     // shipped spellings — folding must not cost either of them their row.
-    expect(rateFor('global.anthropic.claude-sonnet-4-6')).toEqual({ input: 3, output: 15 })
+    expect(rateFor('global.anthropic.claude-sonnet-5')).toEqual({ input: 3, output: 15 })
     expect(rateFor('us.anthropic.claude-haiku-4-5-v1:0')).toEqual({ input: 1, output: 5 })
     expect(rateFor('gemini-2.5-pro')).toEqual({ input: 1.25, output: 10 })
     expect(rateFor('google/gemini-2.5-flash-lite')).toEqual({ input: 0.1, output: 0.4 })

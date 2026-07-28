@@ -34,15 +34,15 @@ const COMPAT_BASE_URLS: Record<string, string> = {
 }
 
 const DEFAULT_IDS: Record<string, string> = {
-  openai: 'gpt-5-mini-2025-08-07',
-  ollama: 'qwen3:1.7b',
-  bedrock: 'global.anthropic.claude-sonnet-4-6',
-  anthropic: 'claude-sonnet-4-6',
-  openrouter: 'anthropic/claude-sonnet-4.6',
+  openai: 'gpt-5.6-sol',
+  ollama: 'qwen3.6:latest',
+  bedrock: 'global.anthropic.claude-opus-5',
+  anthropic: 'claude-opus-5',
+  openrouter: 'anthropic/claude-opus-5',
   groq: 'llama-3.3-70b-versatile',
   deepseek: 'deepseek-chat',
   mistral: 'mistral-large-latest',
-  xai: 'grok-4',
+  xai: 'grok-4.5',
 }
 
 export interface LocalModelResult {

@@ -52,7 +52,41 @@ export const WITHDRAW_DEBIT_SQL =
          >= ?6
      AND COALESCE((SELECT SUM(amount_micro) FROM withdrawals WHERE user_id = ?1 AND status != 'failed' AND created > unixepoch() - 86400),0) + ?6 <= ?7`;
 
-/** The withdrawable figure the error path reports — same exclusion as the debit. */
+/**
+ * The excluded total the error path reports — **the same expression the debit
+ * subtracts**, which is the whole point and was NOT true before c35.
+ *
+ * ⚠️ It must be `TRIAL_DEPOSITS_SUM_SQL` itself, not a hand-written copy of one
+ * of its terms. This statement used to spell out only the DEPOSIT half:
+ *
+ *     SUM(delta_micro) … kind='deposit' AND counterparty IN (…)
+ *
+ * while the debit above subtracts deposits **+ taint** (migration 0024's
+ * `trial_taint`, the value trial money carried to somebody ELSE's balance). For
+ * a payee whose earnings are tainted, the two disagreed — and the report was the
+ * loose one, so it over-promised. Measured, $2.00 of tainted `invoke_credit` and
+ * nothing else: the debit refuses $1.50, and the reported figure was $2.00.
+ *
+ * That figure is not diagnostic decoration. `app/api/wallet/withdraw` turns this
+ * ONE error into the sentence all three clients render, and it branches on
+ * `balance > withdrawable` to decide whether to say "trial credits aren't
+ * withdrawable". With the taint term missing, `balance === withdrawable`, so the
+ * user was told **"You can withdraw $2.00 right now. Lower the amount or add
+ * funds."** — a figure that is refused, advice that cannot succeed at any amount,
+ * and the one explanation that would have made sense suppressed. A tainted payee
+ * could only conclude the payout was broken.
+ *
+ * Keyed on `?1` because the shared fragment is (every guarded statement here
+ * binds the user id there); the call site binds positionally to match.
+ */
+export const TRIAL_EXCLUDED_SQL =
+  `SELECT ${TRIAL_DEPOSITS_SUM_SQL} AS v`;
+
+/**
+ * @deprecated The DEPOSIT half alone — kept only because it is the honest name
+ * for what it computes. Never use it to report withdrawable balance: it omits
+ * the taint term the debit enforces. Prefer `TRIAL_EXCLUDED_SQL`.
+ */
 export const TRIAL_BALANCE_SQL =
   `SELECT COALESCE(SUM(delta_micro),0) AS v FROM ledger WHERE user_id = ? AND kind='deposit' AND counterparty IN (${TRIAL_COUNTERPARTY_SQL_LIST})`;
 
@@ -234,11 +268,17 @@ export class WithdrawRequestCall extends OpenAPIRoute {
     if (!debited) {
       const [balRow, trialRow, dayRow] = await Promise.all([
         env.DB.prepare("SELECT COALESCE(SUM(delta_micro),0) AS v FROM ledger WHERE user_id = ?").bind(String(userId)).first(),
-        env.DB.prepare(TRIAL_BALANCE_SQL).bind(String(userId)).first(),
+        // The SAME exclusion the debit just enforced (deposits + taint), not the
+        // deposit half of it — see TRIAL_EXCLUDED_SQL. Reporting the looser term
+        // told a tainted payee they could withdraw a sum the debit refuses.
+        env.DB.prepare(TRIAL_EXCLUDED_SQL).bind(String(userId)).first(),
         env.DB.prepare("SELECT COALESCE(SUM(amount_micro),0) AS v FROM withdrawals WHERE user_id = ? AND status != 'failed' AND created > unixepoch() - 86400").bind(String(userId)).first(),
       ]);
       const balance = Number(balRow?.v || 0);
-      const withdrawable = isTrialNetwork(network) ? balance : Math.max(0, balance - Number(trialRow?.v || 0));
+      // `trialFactor`, not a second `isTrialNetwork(network)` read: the reported
+      // figure has to be the debit's own arithmetic, and the debit multiplies the
+      // exclusion by exactly this. Re-deriving it is how the two halves drift.
+      const withdrawable = Math.max(0, balance - trialFactor * Number(trialRow?.v || 0));
       if (Number(dayRow?.v || 0) + amount > WITHDRAW_DAILY_CAP_MICRO) {
         return json({ error: `daily withdrawal cap is $${WITHDRAW_DAILY_CAP_MICRO / 1_000_000}` }, 429);
       }

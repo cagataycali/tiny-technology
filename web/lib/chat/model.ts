@@ -53,7 +53,7 @@ export const DEFAULT_MODEL_IDS: Record<ProviderName, string> = {
   // Free-tier default (keyless requests resolve here via normalizeProvider →
   // 'openai'). Overridable per-deployment with OPENAI_MODEL_ID.
   openai: 'gpt-5.6-luna',
-  bedrock: 'global.anthropic.claude-sonnet-4-6',
+  bedrock: 'global.anthropic.claude-sonnet-5',
   google: 'gemini-2.5-flash',
   vercel: 'openai/gpt-5-mini',
 }

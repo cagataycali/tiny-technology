@@ -60,8 +60,8 @@ const PRICING: [string, Rate][] = [
  * Both sides are normalized, because needles carry dots too (`gemini-2.5-pro`) —
  * folding only the id would have broken every Google row to fix the Anthropic
  * ones. Dots that separate NAME parts rather than version parts survive the fold
- * harmlessly: `global.anthropic.claude-sonnet-4-6` becomes
- * `global-anthropic-claude-sonnet-4-6`, which still contains its needle.
+ * harmlessly: `global.anthropic.claude-sonnet-5` becomes
+ * `global-anthropic-claude-sonnet-5`, which still contains its needle.
  */
 function foldVersionSeparators(s: string): string {
   return s.toLowerCase().replace(/\./g, '-')

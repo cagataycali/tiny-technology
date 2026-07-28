@@ -61,7 +61,7 @@ enum ModelPricing {
     ///
     /// Both sides are folded, because needles carry dots too (`gemini-2.5-pro`).
     /// Dots separating NAME parts fold harmlessly:
-    /// `global.anthropic.claude-sonnet-4-6` still contains its needle after.
+    /// `global.anthropic.claude-sonnet-5` still contains its needle after.
     static func foldVersionSeparators(_ s: String) -> String {
         s.lowercased().replacingOccurrences(of: ".", with: "-")
     }

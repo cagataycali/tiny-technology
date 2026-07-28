@@ -114,7 +114,7 @@ class ModelPricingTest {
 
     /** Folding must not cost a row to a dotted NAMESPACE or a dotted NEEDLE. */
     @Test fun `folding keeps dotted namespaces and dotted needles priced`() {
-        assertEquals(15.0, ModelPricing.estimateCost("global.anthropic.claude-sonnet-4-6", 0, 1_000_000, 0)!!, EPS)
+        assertEquals(15.0, ModelPricing.estimateCost("global.anthropic.claude-sonnet-5", 0, 1_000_000, 0)!!, EPS)
         assertEquals(10.0, ModelPricing.estimateCost("gemini-2.5-pro", 0, 1_000_000, 0)!!, EPS)
         assertEquals(0.4, ModelPricing.estimateCost("google/gemini-2.5-flash-lite", 0, 1_000_000, 0)!!, EPS)
         assertEquals(2.0, ModelPricing.estimateCost("gpt-5-mini-2025-08-07", 0, 1_000_000, 0)!!, EPS)
