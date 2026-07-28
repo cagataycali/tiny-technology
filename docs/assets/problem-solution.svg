@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 480" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="pr-fw" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="pr-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .pr-dead{fill:#0c0f0e;stroke:#3a4a44;stroke-width:1.4}
+      .pr-live{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .pr-lbl{fill:#E8FFF3;font-size:13px;font-weight:600}
+      .pr-sub{fill:#9FDFC0;font-size:10px}
+      .pr-gone{fill:#7f8c88;font-size:13px;font-weight:600}
+      .pr-gonesub{fill:#5a6864;font-size:10px}
+      .pr-fw{stroke:#00FF88;stroke-width:1.6;fill:none}
+      .pr-x{stroke:#c2493d;stroke-width:2;fill:none}
+    </style>
+  </defs>
+  <rect width="920" height="480" fill="#020604"/>
+  <text x="460" y="32" text-anchor="middle" class="pr-lbl" font-size="18">A chatbot is a session. Your AI should be an entity.</text>
+  <text x="460" y="51" text-anchor="middle" class="pr-sub">the same four deficits that make a chatbot disposable become the four attributes that make a tiny durable — created by one conversation</text>
+
+  <!-- LEFT: the chatbot's four deficits (dead / struck) -->
+  <text x="176" y="86" text-anchor="middle" class="pr-gone" font-size="14" opacity="0.8">Conversational AI today</text>
+  <g>
+    <rect class="pr-dead" x="40" y="104" width="272" height="60" rx="12"/>
+    <text x="60" y="130" class="pr-gone">🧠 Amnesiac</text>
+    <text x="60" y="150" class="pr-gonesub">sessions die with the tab</text>
+    <line class="pr-x" x1="52" y1="119" x2="300" y2="149"/>
+
+    <rect class="pr-dead" x="40" y="176" width="272" height="60" rx="12"/>
+    <text x="60" y="202" class="pr-gone">📱 Disembodied</text>
+    <text x="60" y="222" class="pr-gonesub">can't touch your actual devices</text>
+    <line class="pr-x" x1="52" y1="191" x2="300" y2="221"/>
+
+    <rect class="pr-dead" x="40" y="248" width="272" height="60" rx="12"/>
+    <text x="60" y="274" class="pr-gone">🔗 Addressless</text>
+    <text x="60" y="294" class="pr-gonesub">can't link, follow, or pay someone's AI</text>
+    <line class="pr-x" x1="52" y1="263" x2="300" y2="293"/>
+
+    <rect class="pr-dead" x="40" y="320" width="272" height="60" rx="12"/>
+    <text x="60" y="346" class="pr-gone">💸 Economically inert</text>
+    <text x="60" y="366" class="pr-gonesub">creators can't price, agents can't transact</text>
+    <line class="pr-x" x1="52" y1="335" x2="300" y2="365"/>
+  </g>
+
+  <!-- MIDDLE: the transform — create by chatting -->
+  <g>
+    <circle cx="460" cy="242" r="44" fill="url(#pr-orb)"><animate attributeName="r" values="40;48;40" dur="2.6s" repeatCount="indefinite"/></circle>
+    <text x="460" y="238" text-anchor="middle" font-size="13" font-weight="800" fill="#020604">create</text>
+    <text x="460" y="254" text-anchor="middle" font-size="10" font-weight="700" fill="#053">by chatting</text>
+  </g>
+  <text x="460" y="322" text-anchor="middle" class="pr-sub" font-size="11">"create an ai named…"</text>
+  <path class="pr-fw" d="M320,242 L410,242" marker-end="url(#pr-fw)"/>
+  <path class="pr-fw" d="M510,242 L600,242" marker-end="url(#pr-fw)"/>
+  <circle r="4" fill="url(#pr-orb)"><animateMotion dur="1.5s" repeatCount="indefinite" path="M324,242 L406,242"/></circle>
+  <circle r="4" fill="url(#pr-orb)"><animateMotion dur="1.5s" repeatCount="indefinite" path="M514,242 L596,242"/></circle>
+
+  <!-- RIGHT: the entity's four attributes (live) -->
+  <text x="744" y="86" text-anchor="middle" class="pr-lbl" font-size="14" fill="#00FF88">A durable entity</text>
+  <g>
+    <rect class="pr-live" x="608" y="104" width="272" height="60" rx="12"/>
+    <text x="628" y="130" class="pr-lbl">🧠 Remembers &amp; revises</text>
+    <text x="628" y="150" class="pr-sub">a bitemporal graph — nothing deleted</text>
+
+    <rect class="pr-live" x="608" y="176" width="272" height="60" rx="12"/>
+    <text x="628" y="202" class="pr-lbl">📱 Has a body</text>
+    <text x="628" y="222" class="pr-sub">acts &amp; speaks through your device fleet</text>
+
+    <rect class="pr-live" x="608" y="248" width="272" height="60" rx="12"/>
+    <text x="628" y="274" class="pr-lbl">🔗 Is addressable</text>
+    <text x="628" y="294" class="pr-sub">a URL · PWA · card · MCP · Telegram</text>
+
+    <rect class="pr-live" x="608" y="320" width="272" height="60" rx="12"/>
+    <text x="628" y="346" class="pr-lbl">💵 Earns &amp; pays</text>
+    <text x="628" y="366" class="pr-sub">priced per message · USDC · x402 both ways</text>
+  </g>
+
+  <!-- fan lines from the transform to each remedy -->
+  <path class="pr-fw" d="M500,224 C560,180 570,135 606,134" opacity="0.5"/>
+  <path class="pr-fw" d="M504,238 C566,215 574,207 606,206" opacity="0.5"/>
+  <path class="pr-fw" d="M504,246 C566,270 574,278 606,278" opacity="0.5"/>
+  <path class="pr-fw" d="M500,260 C560,305 570,349 606,350" opacity="0.5"/>
+
+  <text x="460" y="446" text-anchor="middle" fill="#3f6f57" font-size="11">Same four axes, opposite answers — Identity · Memory · Body · Economy (with Society &amp; Agency across all four); the fix isn't a better session, it's an entity you own.</text>
+</svg>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="lazy">
+  <!-- lazy — 2017 teach-it chatbot, tiny's ancestor. A drowsy speech bubble with "Zzz" and a
+       slow blink, warm amber. -->
+  <rect width="120" height="120" rx="26" fill="#1a1200"/>
+  <!-- speech bubble, gently bobbing -->
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0 -2;0 3;0 -2" dur="4.5s" repeatCount="indefinite"/>
+    <path d="M28 34h64a10 10 0 0 1 10 10v30a10 10 0 0 1-10 10H54l-16 14v-14h-10a10 10 0 0 1-10-10V44a10 10 0 0 1 10-10z" fill="#ffb400"/>
+    <!-- sleepy closed eyes (blink open occasionally) -->
+    <g stroke="#1a1200" stroke-width="3.5" stroke-linecap="round" fill="none">
+      <path d="M40 58q6 5 12 0"><animate attributeName="d" values="M40 58q6 5 12 0;M40 58q6 5 12 0;M40 55q6 -3 12 0;M40 58q6 5 12 0" dur="5s" keyTimes="0;0.7;0.8;1" repeatCount="indefinite"/></path>
+      <path d="M62 58q6 5 12 0"><animate attributeName="d" values="M62 58q6 5 12 0;M62 58q6 5 12 0;M62 55q6 -3 12 0;M62 58q6 5 12 0" dur="5s" keyTimes="0;0.7;0.8;1" repeatCount="indefinite"/></path>
+    </g>
+  </g>
+  <!-- Zzz rising -->
+  <g fill="#ffd873" font-family="ui-sans-serif,system-ui" font-weight="700">
+    <text x="80" y="40" font-size="14">z<animate attributeName="opacity" values="0;1;0" dur="3s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 4;0 -6" dur="3s" repeatCount="indefinite"/></text>
+    <text x="90" y="30" font-size="18">z<animate attributeName="opacity" values="0;1;0" dur="3s" begin="1s" repeatCount="indefinite"/>
+      <animateTransform attributeName="transform" type="translate" values="0 4;0 -8" dur="3s" begin="1s" repeatCount="indefinite"/></text>
+  </g>
+</svg>

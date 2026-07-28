@@ -1,0 +1,68 @@
+-- 🖊️→💸 SENT: the authorization LEFT US. A reverse is no longer the caller's word.
+--
+-- `/pay/spend` reserves a user's balance so the platform hot wallet can front
+-- real USDC to an x402 service; `/pay/spend-reverse` undoes that reservation
+-- "when no USDC moved". But the worker had no way to know whether any USDC
+-- moved. It checked three things — that spend rows exist, that no `spend_refund`
+-- row exists yet, and that the caller holds the internal key — none of which is
+-- about settlement. Whether the money moved was purely the CALLER's claim, an
+-- open finding since the deposit double-mint arc ("safety is purely
+-- caller-contract").
+--
+-- c46 fixed all three callers: the payer route now refunds only on a positive
+-- `settlement: not_settled` from our own receiver, and never on a third-party
+-- 402 or a timeout. That is what makes this table worth adding rather than
+-- redundant — it stops being a duplicate of a correct caller and becomes the
+-- LAST line of defence, against a caller nobody has written yet. The reverse is
+-- the one money path here whose entire safety argument lived outside the worker.
+--
+-- What we can actually know, and where the line falls:
+--
+--   An EIP-3009 `transferWithAuthorization` signature is a BEARER INSTRUMENT.
+--   The instant it leaves us, anyone holding it can submit it — the payee, the
+--   facilitator, an observer. So the honest question is not "did it settle?"
+--   (unknowable from here, and unknowable at the moment of asking even on-chain,
+--   since a pending tx can confirm later) but "could it have settled?" — and
+--   that has a crisp answer the caller knows FIRST-HAND and cannot be wrong
+--   about: did we hand the signed header to anyone?
+--
+--   Before the send  → nothing can settle. Reverse freely. (Terms changed, the
+--                      signing itself threw: both existing reverse sites.)
+--   After the send   → it may settle at any time, forever. Never auto-reverse.
+--
+-- So the marker is `spend_sent`, written by the payer route in the same breath
+-- as the send, and a reverse must find it ABSENT. This mirrors the withdraw
+-- route's rule exactly ("txHash unset → refund; set → never refund") and the
+-- inbound settlement classifier from c46 (chain/settle-outcome.mjs): three money
+-- paths, one doctrine — an irreversible instrument that has left our process is
+-- never refunded on a guess.
+--
+-- Why its own table and not a ledger kind — the same reason migrations 0022
+-- (reputation) and 0024 (trial_taint) gave: balance is `SUM(delta_micro)` over
+-- ALL kinds at five money-critical sites, so any row in `ledger` would inflate
+-- every balance, guard and reported figure. "We handed out a signature" is an
+-- ANNOTATION on a reservation, not a movement of money. It must not be summable
+-- as currency.
+--
+-- The asymmetry is deliberate and matches c46's: refusing to reverse a spend
+-- that genuinely never sent is a stuck reservation, visible in the ledger and
+-- releasable by an operator. Reversing one that DID send is the platform paying
+-- real USDC and handing the money back too — unrecoverable. So on any doubt,
+-- refuse.
+CREATE TABLE IF NOT EXISTS spend_sent (
+  ref     TEXT PRIMARY KEY,          -- the /pay/spend reservation ref (x402pay:…)
+  user_id TEXT NOT NULL,             -- whose reservation it is
+  payee   TEXT,                      -- where the authorization was pointed
+  created INTEGER DEFAULT (unixepoch())
+);
+-- `ref` is the PRIMARY KEY, not a (user, ref) pair: the ref is what a reverse
+-- names, and the fact that a signature escaped is a fact about the SIGNATURE,
+-- not about who asked for it. A per-user key would let a reverse for user B slip
+-- past a mark written under user A for the same ref — the exact shape of the
+-- claimed_txs vs idx_ledger_idem mismatch migration 0021 had to fix (a uniqueness
+-- guard keyed on one column does not interlock with an index keyed on another).
+--
+-- Backfill: deliberately NONE. Every pre-existing reservation has already
+-- resolved one way or the other (the payer route is synchronous), so marking
+-- historical refs would only freeze reverses that are no longer coming. New
+-- reservations are marked from the first request after deploy.

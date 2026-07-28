@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 500" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="wn-fw" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="wn-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .wn-box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .wn-lbl{fill:#E8FFF3;font-size:13.5px;font-weight:700}
+      .wn-sub{fill:#9FDFC0;font-size:10.5px}
+      .wn-ship{fill:#00FF88;font-size:10.5px;font-weight:700;font-family:ui-monospace,Menlo,monospace}
+      .wn-fw{stroke:#00FF88;stroke-width:1.6;fill:none}
+      .wn-when{fill:#7CFFC4;font-size:10px;font-weight:700}
+    </style>
+  </defs>
+  <rect width="920" height="500" fill="#020604"/>
+  <text x="460" y="32" text-anchor="middle" class="wn-lbl" font-size="18">Why now — three tailwinds just standardized, and tiny ships all three</text>
+  <text x="460" y="51" text-anchor="middle" class="wn-sub">the window is open: the protocols that make a persistent, embodied, paying AI possible all landed — and most players ship none of them</text>
+
+  <!-- THREE TAILWIND CARDS (left) -->
+  <!-- 1: agent-to-agent payments -->
+  <g>
+    <rect class="wn-box" x="40" y="90" width="330" height="96" rx="12"/>
+    <text x="58" y="114" class="wn-lbl">💸 Agent-to-agent payments standardized</text>
+    <text x="58" y="132" class="wn-when">2024–25 · x402 · ERC-8004</text>
+    <text x="58" y="152" class="wn-sub">machines can now pay machines over open rails —</text>
+    <text x="58" y="168" class="wn-ship">✓ tiny ships BOTH sides: pay in AND pay out</text>
+  </g>
+  <!-- 2: on-device AI -->
+  <g>
+    <rect class="wn-box" x="40" y="202" width="330" height="96" rx="12"/>
+    <text x="58" y="226" class="wn-lbl">🧠 On-device AI got real</text>
+    <text x="58" y="244" class="wn-when">Apple Intelligence · WebGPU / WebLLM</text>
+    <text x="58" y="264" class="wn-sub">the user's own silicon is a first-class target —</text>
+    <text x="58" y="280" class="wn-ship">✓ tiny runs on the Neural Engine + in-browser</text>
+  </g>
+  <!-- 3: MCP -->
+  <g>
+    <rect class="wn-box" x="40" y="314" width="330" height="96" rx="12"/>
+    <text x="58" y="338" class="wn-lbl">🧩 MCP is becoming the USB of AI</text>
+    <text x="58" y="356" class="wn-when">Model Context Protocol · every agent speaks it</text>
+    <text x="58" y="376" class="wn-sub">one plug reaches every agent host —</text>
+    <text x="58" y="392" class="wn-ship">✓ every tiny is already an MCP server</text>
+  </g>
+
+  <!-- CONVERGENCE ARROWS into the window -->
+  <path class="wn-fw" d="M370,138 C470,150 500,220 588,236" marker-end="url(#wn-fw)"/>
+  <path class="wn-fw" d="M370,250 L588,250" marker-end="url(#wn-fw)"/>
+  <path class="wn-fw" d="M370,362 C470,350 500,280 588,264" marker-end="url(#wn-fw)"/>
+  <!-- travelling pulses -->
+  <circle r="4" fill="url(#wn-orb)"><animateMotion dur="1.9s" repeatCount="indefinite" path="M370,138 C470,150 500,220 585,236"/></circle>
+  <circle r="4" fill="url(#wn-orb)"><animateMotion dur="1.9s" begin="0.5s" repeatCount="indefinite" path="M370,250 L585,250"/></circle>
+  <circle r="4" fill="url(#wn-orb)"><animateMotion dur="1.9s" begin="1s" repeatCount="indefinite" path="M370,362 C470,350 500,280 585,264"/></circle>
+
+  <!-- THE OPEN WINDOW (right) -->
+  <g>
+    <circle cx="700" cy="250" r="98" fill="none" stroke="#00FF8833" stroke-width="1.5">
+      <animate attributeName="r" values="92;104;92" dur="3.2s" repeatCount="indefinite"/></circle>
+    <circle cx="700" cy="250" r="78" fill="url(#wn-orb)">
+      <animate attributeName="r" values="74;82;74" dur="3.2s" repeatCount="indefinite"/></circle>
+    <text x="700" y="238" text-anchor="middle" fill="#020604" font-size="17" font-weight="800">the window</text>
+    <text x="700" y="260" text-anchor="middle" fill="#020604" font-size="17" font-weight="800">is open</text>
+    <text x="700" y="282" text-anchor="middle" fill="#053" font-size="10.5" font-weight="700">a persistent, embodied,</text>
+    <text x="700" y="296" text-anchor="middle" fill="#053" font-size="10.5" font-weight="700">paying AI is finally buildable</text>
+  </g>
+  <text x="820" y="140" text-anchor="middle" class="wn-sub" font-style="italic">first-mover on</text>
+  <text x="820" y="156" text-anchor="middle" class="wn-ship">all three at once</text>
+
+  <!-- divider + payoff -->
+  <line x1="40" y1="432" x2="880" y2="432" stroke="#0c3" stroke-opacity="0.3" stroke-width="1"/>
+  <text x="460" y="460" text-anchor="middle" class="wn-lbl" font-size="14">Everyone can see the window — <tspan fill="#00FF88">most players ship none of these three</tspan>. tiny already ships all three, on six surfaces.</text>
+  <text x="460" y="480" text-anchor="middle" fill="#3f6f57" font-size="11">grounded in BUSINESS.md §Why now · comparison.md — x402 payer+payee · ERC-8004 registration · Apple Neural Engine + WebLLM · MCP-native</text>
+</svg>

@@ -1,0 +1,57 @@
+-- 🔍 THE TERMINAL STATE — what lets the reconciler's queue DRAIN.
+--
+-- 0026 gave a frozen reservation an identity, so the chain can be asked whether
+-- the instrument was redeemed. The resolver (payments.ts `reconcileSentSpends`)
+-- now asks, on the per-minute cron, and acts on the answer:
+--
+--   false past the signed deadline ⟹ it can never settle ⟹ refund (spend_refund)
+--   true                           ⟹ it WAS consumed ⟹ the debit stands
+--   no answer                      ⟹ leave it open, ask next tick
+--
+-- Only ONE of those three outcomes writes anything. The refund case is self-
+-- terminating: `SPEND_SENT_OPEN_SQL` already excludes any ref with a spend_refund
+-- row, so the very write that resolves it removes it from the queue.
+--
+-- The `true` case writes NOTHING — and that is the problem this migration fixes.
+-- A settled row is fully resolved and requires no correction, but it still
+-- matches every clause of the open query, so the resolver would re-ask the chain
+-- about it every single minute, forever, and the queue's depth would stop meaning
+-- "work outstanding". THAT NUMBER IS THE ALARM: a growing queue is how anyone
+-- would notice payments going unreconciled, and a queue permanently full of
+-- already-settled rows is an alarm that is always on, i.e. no alarm at all.
+--
+-- ⚠️ WHY A COLUMN AND NOT `valid_before = NULL`. Nulling the deadline would
+-- retire the row using a column the queue already filters on — no migration, very
+-- tempting, and wrong twice over. First, `valid_before` is the SIGNED deadline:
+-- it is the entire license for reading absence as a verdict (0026), so erasing it
+-- destroys the evidence for the decision that was just made. Second, it would
+-- manufacture exactly the half-set identity row that this table's invariant
+-- forbids — payer and nonce present, deadline gone — the shape /pay/spend-sent
+-- refuses to write and the tests assert can never exist. A retired row would then
+-- report `resolvable: false` from /pay/spend-reverse's 409, telling a human
+-- "nobody can ever resolve this" about the one row that just WAS resolved.
+--
+-- So the outcome gets recorded as itself: WHEN it was resolved, and WHICH WAY.
+-- `resolution` is not derivable from the rest of the row — "settled" would have to
+-- be inferred from the ABSENCE of a spend_refund row, and this arc keeps deleting
+-- exactly that kind of inference (c48 deleted the last GUESS). When a support
+-- ticket asks where $0.03 went, `resolved=<ts>, resolution=settled` is the answer;
+-- an absence is not.
+--
+-- Values written: 'settled' (authorizationState → true, the debit is correct) and
+-- 'no_reservation' (nothing was ever debited under this ref — already reversed by
+-- hand, or a mark whose reservation never committed). The refunded case
+-- deliberately does NOT set these: its spend_refund ledger row is the record, and
+-- writing a second source of truth for the same fact is the split authority this
+-- arc keeps closing.
+--
+-- Nullable, no backfill, no default: every existing row is genuinely unresolved.
+--
+-- ⚠️ OPERATOR NOTE: `ADD COLUMN` has no `IF NOT EXISTS` in sqlite/D1 (see 0020,
+-- 0026) — applying this twice throws `duplicate column name: resolved`, loudly,
+-- before touching data. Order after 0025 and 0026. Unlike 0026 this migration is
+-- NOT load-bearing for the money path: the only code that reads these columns is
+-- the reconciler, whose queue read is wrapped in a try that logs and no-ops, so
+-- worker code deployed ahead of the migration simply reconciles nothing.
+ALTER TABLE spend_sent ADD COLUMN resolved INTEGER;
+ALTER TABLE spend_sent ADD COLUMN resolution TEXT;

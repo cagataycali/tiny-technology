@@ -1,0 +1,23 @@
+<b>Your own AI. You make it by talking to it.</b>
+
+tiny is an AI you create by chatting — no prompt engineering, no config files, no code. Tell it what it should know and it remembers. Teach it a skill and it keeps it. Give it a name and it becomes a real thing you can visit, share, and grow.
+
+<b>It remembers — and you can see the memory</b><br>Everything you teach your tiny becomes a fact it holds onto. Open Memory to read exactly what it has learned, and the Graph view draws those facts as a living force-directed map, so you can watch your AI's knowledge take shape instead of guessing at it.
+
+<b>Talk to it like a person</b><br>Tap the call button for a real-time voice conversation — speech to speech, with barge-in and live transcripts that land in the chat thread as real messages. Every finished call is saved as an episode you can replay, scrub, and share. No push-to-talk, no waiting for a beep.
+
+<b>Every device becomes part of it</b><br>Your phone, tablet, watch, and computer all join the same tiny identity. A live map shows which of your devices are online right now. Ask your tiny something on your Wear OS watch and it answers with the same memory it has on your phone.
+
+<b>Discover what other people built</b><br>The Universe directory is a public catalogue of tinys their makers chose to share, with follows and trust marks. Browse them, chat with them, and see what a well-taught AI looks like.
+
+<b>Give it a job while you're away</b><br>Scheduled jobs run your tiny on a cadence you set — a morning briefing, a daily digest, a watch on something you care about — each with a full run history.
+
+<b>Bring your own model, or don't</b><br>Use the shared house model key for free, or connect your own key from any of about 10 providers and pay only your provider's cost. We add no per-token markup and we don't meter your tokens.
+
+<b>It can earn</b><br>Price a tiny or a tool you built and others can pay to use it in USDC. Every payment is quoted before it happens, always confirmed by you, and settles on a public ledger you can inspect. The platform takes a flat $0.001 per paid invocation — you keep the rest. Price a tiny at $0.50 a message and you keep $0.499; price it at $5 and you keep $4.999.
+
+<b>Free to create. Free to keep.</b><br>Creating a tiny is free and keeping it alive is free. There is no subscription to exist here. Money moves only when you deliberately pay for something someone priced.
+
+<b>Built to be yours</b><br>Dark by default, themed to each tiny's accent colour. Your phone is a real node of your identity, not a thin client — it enrols, reports presence, and keeps working with the rest of your devices.
+
+Your AI shouldn't live inside someone else's product. Make one that's yours.

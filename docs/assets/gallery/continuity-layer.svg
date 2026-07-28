@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="cl-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="cl-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <radialGradient id="cl-glow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .cl-title{fill:#00FF88;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+      .cl-kicker{fill:#9FDFC0;font-size:12px}
+      .cl-step{fill:#7CFFC4;font-size:11px;font-weight:800;letter-spacing:1px}
+      .cl-lbl{fill:#E8FFF3;font-size:14px;font-weight:700}
+      .cl-sub{fill:#9FDFC0;font-size:11px}
+      .cl-card{fill:#06160E;stroke:#00FF8844;stroke-width:1.3}
+      .cl-store{fill:#04110A;stroke:#00FF8866;stroke-width:1.4}
+      .cl-mono{fill:#7CFFC4;font-size:11px;font-family:ui-monospace,Menlo,monospace}
+      .cl-monosm{fill:#7CFFC4;font-size:10px;font-family:ui-monospace,Menlo,monospace}
+      .cl-wire{stroke:#00FF8866;stroke-width:1.6;fill:none}
+      .cl-surf{fill:#E8FFF3;font-size:11.5px;font-weight:700}
+      .cl-reset{fill:none;stroke:#C2405A;stroke-width:1.3;stroke-dasharray:5 4}
+      .cl-resetlbl{fill:#E28399;font-size:10.5px;font-weight:700}
+      .cl-strike{stroke:#C2405A;stroke-width:1.6}
+      .cl-foot{fill:#7CFFC4;font-size:12.5px;font-weight:700}
+      .cl-footsub{fill:#9FDFC0;font-size:11px}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+
+  <!-- header -->
+  <text x="40" y="44" class="cl-title">The local continuity layer — your tiny never opens on a blank page.</text>
+  <text x="40" y="65" class="cl-kicker">Every turn, each client writes a turn log + memories to a per-tiny file, then replays them as one system message next request.</text>
+
+  <!-- STEP 1: per-surface local store -->
+  <text x="40" y="104" class="cl-step">01 · WRITTEN LOCALLY, EVERY TURN — one format, three clients</text>
+
+  <!-- three surfaces sharing one store shape -->
+  <g>
+    <rect x="40" y="120" width="250" height="58" rx="12" class="cl-card"/>
+    <text x="58" y="145" class="cl-surf">🌐 Web · localStorage</text>
+    <text x="58" y="167" class="cl-monosm">components/chat/continuity.ts</text>
+
+    <rect x="40" y="188" width="250" height="58" rx="12" class="cl-card"/>
+    <text x="58" y="213" class="cl-surf">iOS · app-group Documents</text>
+    <text x="58" y="235" class="cl-monosm">Continuity.swift (byte-compatible port)</text>
+
+    <rect x="40" y="256" width="250" height="58" rx="12" class="cl-card"/>
+    <text x="58" y="281" class="cl-surf">Android · files dir</text>
+    <text x="58" y="303" class="cl-monosm">Continuity.kt (same headers)</text>
+  </g>
+
+  <!-- the shared store schema -->
+  <path d="M292,171 L336,171" class="cl-wire" marker-end="url(#cl-mk)"/>
+  <path d="M292,217 L336,217 336,196 L332,196" class="cl-wire" marker-end="url(#cl-mk)"/>
+  <path d="M292,285 L336,285 336,210 L332,210" class="cl-wire" marker-end="url(#cl-mk)"/>
+
+  <rect x="338" y="128" width="214" height="186" rx="14" class="cl-store"/>
+  <text x="354" y="152" class="cl-lbl">per-tiny local store</text>
+  <text x="354" y="172" class="cl-monosm">tiny_turnlog_&lt;name&gt;</text>
+  <text x="354" y="188" class="cl-sub">last 200 turns · inject 20</text>
+  <text x="354" y="212" class="cl-monosm">tiny_memories_&lt;name&gt;</text>
+  <text x="354" y="228" class="cl-sub">up to 100 · remember / forget</text>
+  <line x1="354" y1="244" x2="536" y2="244" class="cl-wire"/>
+  <text x="354" y="266" class="cl-sub">scoped by tiny name · scrubbed on</text>
+  <text x="354" y="282" class="cl-sub">a different login (no identity leak)</text>
+  <text x="354" y="302" class="cl-monosm">write on every appendTurn()</text>
+
+  <!-- STEP 2: survives the resets -->
+  <text x="602" y="104" class="cl-step">02 · SURVIVES WHAT BLANKS A CHATBOT</text>
+  <g>
+    <rect x="602" y="120" width="278" height="40" rx="10" class="cl-card"/>
+    <text x="620" y="145" class="cl-resetlbl">/clear chat</text>
+    <line x1="700" y1="140" x2="770" y2="140" class="cl-strike"/>
+    <text x="792" y="145" class="cl-mono">kept</text>
+
+    <rect x="602" y="168" width="278" height="40" rx="10" class="cl-card"/>
+    <text x="620" y="193" class="cl-resetlbl">page reload / app relaunch</text>
+    <line x1="760" y1="188" x2="770" y2="188" class="cl-strike"/>
+    <text x="792" y="193" class="cl-mono">kept</text>
+
+    <rect x="602" y="216" width="278" height="40" rx="10" class="cl-card"/>
+    <text x="620" y="241" class="cl-resetlbl">server's 31-message trim</text>
+    <line x1="748" y1="236" x2="770" y2="236" class="cl-strike"/>
+    <text x="792" y="241" class="cl-mono">kept</text>
+  </g>
+  <rect x="602" y="272" width="278" height="42" rx="10" class="cl-reset"/>
+  <text x="741" y="298" text-anchor="middle" class="cl-sub">the file is the memory — the transcript is disposable</text>
+
+  <!-- STEP 3: inject as one system message -->
+  <text x="40" y="358" class="cl-step">03 · REPLAYED AS ONE SYSTEM MESSAGE — the model never sees a blank context window</text>
+
+  <circle cx="98" cy="418" r="30" fill="url(#cl-orb)"/>
+  <text x="98" y="414" text-anchor="middle" fill="#020604" font-size="10.5" font-weight="800">build</text>
+  <text x="98" y="428" text-anchor="middle" fill="#020604" font-size="10.5" font-weight="800">Context</text>
+  <path d="M130,418 L188,418" class="cl-wire" marker-end="url(#cl-mk)"/>
+
+  <rect x="190" y="382" width="330" height="72" rx="12" class="cl-card"/>
+  <text x="206" y="404" class="cl-monosm">## Persistent Memories (survives resets)</text>
+  <text x="206" y="424" class="cl-monosm">## Continuous Turn Log (last 20 turns)</text>
+  <text x="206" y="444" class="cl-sub">identical section headers on every surface</text>
+
+  <path d="M522,418 L580,418" class="cl-wire" marker-end="url(#cl-mk)"/>
+  <circle cx="640" cy="418" r="150" fill="url(#cl-glow)"/>
+  <rect x="582" y="386" width="298" height="64" rx="12" class="cl-store"/>
+  <text x="598" y="410" class="cl-lbl">folded into the agent prompt, every request</text>
+  <text x="598" y="432" class="cl-sub">so one identity spans web · iOS · Android · watch · widget · Telegram</text>
+
+  <!-- footer -->
+  <line x1="40" y1="474" x2="880" y2="474" class="cl-wire"/>
+  <text x="40" y="498" class="cl-foot">Continuity isn't a server feature you can lose — it's a file on your device, replayed every turn.
+    <tspan class="cl-footsub">One format, six surfaces: a multi-year head start of parity engineering.</tspan>
+  </text>
+</svg>

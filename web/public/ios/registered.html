@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device registered — tiny</title>
+<style>
+  body { background:#0a0a0a; color:#e5e5e5; font-family:-apple-system,system-ui,sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center;
+         min-height:100vh; margin:0; padding:24px; text-align:center; }
+  h1 { font-size:1.8rem; margin:.2em 0; }
+  p { color:#999; max-width:420px; line-height:1.5; }
+  code { background:#1a1a1a; padding:4px 10px; border-radius:8px; font-size:.8em;
+         word-break:break-all; display:inline-block; margin:8px 0; color:#22c55e; }
+  .note { font-size:.8rem; color:#666; }
+</style>
+</head>
+<body>
+  <div style="font-size:64px">✅</div>
+  <h1>Device registered!</h1>
+  <p>Your device ID has been sent to tiny.technology:</p>
+  <code id="udid">…</code>
+  <p>The next signed build will include your device. Check back at
+     <strong>tiny.technology/ios</strong> soon — you'll be able to install directly.</p>
+  <p class="note">You can now delete the registration profile:<br>
+     Settings → General → VPN &amp; Device Management.</p>
+  <script>
+    const u = new URLSearchParams(location.search).get('udid');
+    if (u) document.getElementById('udid').textContent = u;
+  </script>
+</body>
+</html>

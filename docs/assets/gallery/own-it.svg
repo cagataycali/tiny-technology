@@ -1,0 +1,139 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="ow-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <marker id="ow-mk2" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#7CFFC4"/>
+    </marker>
+    <radialGradient id="ow-key" cx="50%" cy="40%" r="62%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <radialGradient id="ow-tok" cx="50%" cy="40%" r="66%">
+      <stop offset="0%" stop-color="#00FF88"/>
+      <stop offset="100%" stop-color="#00FF8800"/>
+    </radialGradient>
+    <style>
+      .ow-title{fill:#00FF88;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+      .ow-kicker{fill:#9FDFC0;font-size:12px}
+      .ow-step{fill:#7CFFC4;font-size:11px;font-weight:800;letter-spacing:1px}
+      .ow-lbl{fill:#E8FFF3;font-size:14.5px;font-weight:700}
+      .ow-sub{fill:#9FDFC0;font-size:11px}
+      .ow-card{fill:#06160E;stroke:#00FF8844;stroke-width:1.3}
+      .ow-tokcard{fill:#08211A;stroke:#00FF88;stroke-width:1.6}
+      .ow-toklbl{fill:#00FF88;font-size:13px;font-weight:800;letter-spacing:0.5px}
+      .ow-mono{fill:#7CFFC4;font-size:11px;font-family:ui-monospace,Menlo,monospace}
+      .ow-surf{fill:#0A2417;stroke:#00FF8855;stroke-width:1}
+      .ow-surflbl{fill:#E8FFF3;font-size:11px;font-weight:700}
+      .ow-surfsub{fill:#9FDFC0;font-size:9.5px}
+      .ow-wire{stroke:#00FF8866;stroke-width:1.6;fill:none}
+      .ow-wired{stroke:#7CFFC4;stroke-width:1.6;fill:none;stroke-dasharray:5 4}
+      .ow-guardlbl{fill:#7CFFC4;font-size:9.5px;font-weight:800;letter-spacing:0.5px}
+      .ow-plan{fill:#E2C083;font-size:9.5px;font-weight:700}
+      .ow-planbox{fill:#1A140A;stroke:#E2C08366;stroke-width:1}
+      .ow-key{fill:#00FF88;font-size:12px;font-weight:800}
+      .ow-foot{fill:#7CFFC4;font-size:12.5px;font-weight:700}
+      .ow-footsub{fill:#9FDFC0;font-size:11px}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+
+  <!-- header -->
+  <text x="40" y="44" class="ow-title">You own it — one login, proven everywhere.</text>
+  <text x="40" y="65" class="ow-kicker">GitHub OAuth mints one signed session; a passkey re-opens it with no roundtrip; the same token proves you on the web, the CLI, and the app — one verifier, one identity.</text>
+
+  <!-- STEP 01 OAUTH -->
+  <text x="40" y="104" class="ow-step">01 · SIGN IN</text>
+  <rect x="40" y="114" width="176" height="104" rx="16" class="ow-card"/>
+  <circle cx="74" cy="152" r="16" fill="url(#ow-key)"/>
+  <text x="74" y="156" text-anchor="middle" fill="#020604" font-size="9" font-weight="800">GH</text>
+  <text x="100" y="148" class="ow-lbl">GitHub</text>
+  <text x="100" y="165" class="ow-lbl">OAuth</text>
+  <text x="56" y="190" class="ow-sub">state-nonce CSRF guard,</text>
+  <text x="56" y="205" class="ow-sub">then upsert your user row</text>
+
+  <path d="M216,166 L242,166" class="ow-wire" marker-end="url(#ow-mk)"/>
+
+  <!-- STEP 02 SESSION -->
+  <text x="244" y="104" class="ow-step">02 · MINT A SESSION</text>
+  <rect x="244" y="114" width="176" height="104" rx="16" class="ow-card"/>
+  <text x="260" y="139" class="ow-lbl">A signed JWT</text>
+  <text x="260" y="160" class="ow-mono">HS256 · sub = your uuid</text>
+  <text x="260" y="178" class="ow-sub">30-day httpOnly cookie —</text>
+  <text x="260" y="193" class="ow-sub">the D1 user id IS the owner</text>
+  <text x="260" y="211" class="ow-mono">owner === session.sub</text>
+
+  <path d="M420,166 L446,166" class="ow-wire" marker-end="url(#ow-mk)"/>
+
+  <!-- STEP 03 PASSKEY -->
+  <text x="448" y="104" class="ow-step">03 · ADD A PASSKEY</text>
+  <rect x="448" y="114" width="176" height="104" rx="16" class="ow-card"/>
+  <text x="464" y="139" class="ow-lbl">Biometric login</text>
+  <text x="464" y="160" class="ow-sub">WebAuthn passkey tied to</text>
+  <text x="464" y="175" class="ow-sub">your user id — Face/Touch ID</text>
+  <text x="464" y="197" class="ow-key">no GitHub roundtrip</text>
+  <text x="464" y="212" class="ow-sub">sign-count checked each time</text>
+
+  <!-- arrow down from SESSION into token band -->
+  <path d="M332,218 L332,258" class="ow-wire" marker-end="url(#ow-mk)"/>
+  <text x="340" y="243" class="ow-key">one verifier</text>
+
+  <!-- STEP 04 token band -->
+  <text x="40" y="250" class="ow-step">04 · ONE TOKEN, EVERY SURFACE — cookie OR bearer, verified the same way (aud ignored)</text>
+  <rect x="40" y="260" width="584" height="164" rx="18" class="ow-tokcard"/>
+  <circle cx="96" cy="330" r="30" fill="url(#ow-tok)"/>
+  <text x="96" y="327" text-anchor="middle" fill="#020604" font-size="10" font-weight="800">verify</text>
+  <text x="96" y="340" text-anchor="middle" fill="#020604" font-size="9" font-weight="800">Session</text>
+
+  <text x="150" y="286" class="ow-toklbl">getSession() — cookie or Authorization: Bearer</text>
+  <text x="150" y="304" class="ow-sub">the CLI &amp; app get a 90-day aud:'tiny-cli' token; verifySession ignores aud, so it passes everywhere a browser cookie does.</text>
+
+  <!-- three surface chips -->
+  <rect x="150" y="316" width="148" height="52" rx="10" class="ow-surf"/>
+  <text x="164" y="337" class="ow-surflbl">🌐 web</text>
+  <text x="164" y="353" class="ow-surfsub">tiny_session cookie</text>
+  <text x="164" y="364" class="ow-surfsub">httpOnly · Secure · Lax</text>
+
+  <rect x="306" y="316" width="148" height="52" rx="10" class="ow-surf"/>
+  <text x="320" y="337" class="ow-surflbl">⌨ npx tiny-tech</text>
+  <text x="320" y="353" class="ow-surfsub">loopback consent code</text>
+  <text x="320" y="364" class="ow-surfsub">→ 127.0.0.1 · bearer token</text>
+
+  <rect x="462" y="316" width="148" height="52" rx="10" class="ow-surf"/>
+  <text x="476" y="337" class="ow-surflbl">📱 iOS app</text>
+  <text x="476" y="353" class="ow-surfsub">tinyapp:// deep-link code</text>
+  <text x="476" y="364" class="ow-surfsub">→ bearer token in Keychain</text>
+
+  <!-- planned strip -->
+  <rect x="150" y="378" width="460" height="30" rx="9" class="ow-planbox"/>
+  <text x="164" y="397" class="ow-plan">PLANNED, not yet enforced — the CLI/app token carries a jti for a future KV revocation denylist; browser sessions are unaffected.</text>
+
+  <!-- RIGHT rail: guards -->
+  <rect x="648" y="114" width="232" height="310" rx="16" class="ow-card"/>
+  <text x="664" y="139" class="ow-lbl">Guarded on the way</text>
+
+  <text x="664" y="167" class="ow-guardlbl">CSRF STATE NONCE</text>
+  <text x="664" y="182" class="ow-sub">OAuth state checked against</text>
+  <text x="664" y="197" class="ow-sub">an httpOnly cookie.</text>
+
+  <text x="664" y="225" class="ow-guardlbl">OPEN-REDIRECT GUARD</text>
+  <text x="664" y="240" class="ow-sub">safeReturnPath() — only a</text>
+  <text x="664" y="255" class="ow-sub">same-origin path; //evil.com</text>
+  <text x="664" y="270" class="ow-sub">falls back to '/'.</text>
+
+  <text x="664" y="298" class="ow-guardlbl">SCOPED APP-SCHEME</text>
+  <text x="664" y="313" class="ow-sub">scheme is an allowlist of one</text>
+  <text x="664" y="328" class="ow-sub">('tinyapp') — never a client</text>
+  <text x="664" y="343" class="ow-sub">URL; loopback is integer-only.</text>
+
+  <text x="664" y="371" class="ow-guardlbl">10s FAIL-FAST</text>
+  <text x="664" y="386" class="ow-sub">every identity round-trip to</text>
+  <text x="664" y="401" class="ow-sub">the worker is bounded — a</text>
+  <text x="664" y="416" class="ow-sub">hang dies fast, never opaque.</text>
+
+  <!-- footer -->
+  <line x1="40" y1="446" x2="880" y2="446" class="ow-wire"/>
+  <text x="40" y="472" class="ow-foot">Android is a session consumer — it carries a token minted by these flows; it doesn't yet mint its own passkey.</text>
+  <text x="40" y="494" class="ow-footsub">Ownership isn't a setting you toggle — it's a signature: your tiny answers to the one identity that signed in, on every surface, and to no one else.</text>
+</svg>

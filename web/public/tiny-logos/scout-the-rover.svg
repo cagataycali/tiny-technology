@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="scout-the-rover">
+  <!-- scout 🛞 — FrodoBots Earth Rover. "MOVE, DON'T TALK." A little rover with a camera eye
+       that scans, wheels that roll, and a curiosity-orange body. Family pulse-ring DNA. -->
+  <rect width="120" height="120" rx="26" fill="#160d05"/>
+  <!-- ground motion lines -->
+  <g stroke="#ff8c1a" stroke-width="3" stroke-linecap="round" opacity="0.55">
+    <line x1="16" y1="96" x2="34" y2="96"><animate attributeName="opacity" values="0;0.7;0" dur="1s" repeatCount="indefinite"/></line>
+    <line x1="10" y1="86" x2="24" y2="86"><animate attributeName="opacity" values="0;0.7;0" dur="1s" begin="0.3s" repeatCount="indefinite"/></line>
+  </g>
+  <!-- rover body -->
+  <rect x="34" y="46" width="54" height="30" rx="9" fill="#ff8c1a"/>
+  <!-- camera mast + scanning eye -->
+  <line x1="61" y1="46" x2="61" y2="32" stroke="#ffb066" stroke-width="4" stroke-linecap="round"/>
+  <circle cx="61" cy="30" r="8" fill="#160d05" stroke="#ffb066" stroke-width="3"/>
+  <circle cx="61" cy="30" r="3.4" fill="#ffe0b8">
+    <animate attributeName="cx" values="58;64;58" dur="2.6s" repeatCount="indefinite"/>
+  </circle>
+  <!-- wheels rolling -->
+  <g fill="#0b0603" stroke="#ffe0b8" stroke-width="2.5">
+    <g><animateTransform attributeName="transform" type="rotate" from="0 44 82" to="360 44 82" dur="1.2s" repeatCount="indefinite"/>
+      <circle cx="44" cy="82" r="11"/><line x1="44" y1="73" x2="44" y2="91" stroke-width="2"/></g>
+    <g><animateTransform attributeName="transform" type="rotate" from="0 78 82" to="360 78 82" dur="1.2s" repeatCount="indefinite"/>
+      <circle cx="78" cy="82" r="11"/><line x1="78" y1="73" x2="78" y2="91" stroke-width="2"/></g>
+  </g>
+</svg>

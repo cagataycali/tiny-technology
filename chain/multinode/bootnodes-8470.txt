@@ -1,0 +1,18 @@
+# Bootnodes for tiny chain 8470.
+#
+# One enode:// URL per line; blank lines and #comments are ignored.
+# join-tiny-chain.sh reads this file when no --bootnodes is passed.
+#
+# A bootnode is only an INTRODUCTION. It tells your node where to find peers; it
+# cannot decide what your node accepts, and it has no authority over consensus
+# (QBFT round-robins the proposer among staked validators). If every address here
+# is unreachable you are not blocked from the chain — you are just unable to find
+# it, and any other peer's enode works instead.
+#
+# ⚠️ These are the LOCAL DEVNET's enodes: 127.0.0.1, reachable only on the machine
+# running the devnet. They are correct for anyone testing the joiner path today and
+# useless from another host. Publishing routable addresses is part of the P6/P7
+# public-launch work, and writing plausible-looking public enodes here before they
+# exist would be worse than an empty file: a joiner would blame their own network
+# for a peer that was never there.
+enode://24c83c24f73ae8cf0ce72c05fc2b33d703e4786bdefff0246a466e461fe9c7a1ba0ca19011adad2475b47cfd3bd98ea70ed09ba19eb427d71137f3f3c470d3d3@127.0.0.1:30401

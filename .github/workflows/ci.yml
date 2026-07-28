@@ -1,0 +1,81 @@
+# CI — the fresh-clone rehearsal, mechanized: exactly what a stranger runs.
+#
+# No path filters on purpose: the web suite reads sources from every sibling
+# directory (worker/, chain/, ios/, android/, docs/ — the cross-surface parity
+# tests), so a change anywhere can break it. Docs get their own strict gate in
+# docs.yml; store builds live in release.yml. chain/'s e2e suites need foundry
+# and a running node, so its guards run here through the web suite
+# (web/tests/{dev-keys,settle-policy,rpc-proxy,chain-backup}.test.ts) rather
+# than as a separate job.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            worker/package-lock.json
+      # web's test suite imports the worker's sources, which need its deps
+      - run: npm ci
+        working-directory: worker
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      # `next build` typechecks the app graph only — the files it can reach from
+      # a route. web/tests/ (209 suites) is not in that graph, and vitest strips
+      # types instead of checking them, so before this step a type error inside
+      # a test file passed BOTH gates. It happened: a `for (const [i, x] of
+      # arr.entries())` needs `downlevelIteration` under this tsconfig's es5
+      # target, and the commit carrying one was green on build + test with
+      # `tsc --noEmit` failing. Runs LAST: a type error is the least urgent of
+      # the three failures, so let build and test report first.
+      - run: npm run typecheck
+        working-directory: web
+
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: worker/package-lock.json
+      - run: npm ci
+        working-directory: worker
+      - run: npx tsc --noEmit
+        working-directory: worker
+
+  # tiny-tech is the CLI/daemon; its `npm test` runs `tsc` then node --test,
+  # so this one step is both the typecheck and the suite. macOS runner, not
+  # ubuntu: the daemon's desktop tools are darwin-first (sips, osascript,
+  # pbcopy, say) and the suite HANGS on linux — the standalone repo's ubuntu
+  # CI had no green run since 5c718588 for exactly that reason. The timeout
+  # is the hang turned into a failure with a name.
+  tiny-tech:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tiny-tech/package-lock.json
+      - run: npm ci
+        working-directory: tiny-tech
+      - run: npm test
+        working-directory: tiny-tech

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_status_desc">Devices online and unread messages, at a glance.</string>
+    <string name="widget_last_answer_desc">tiny\'s newest reply on your home screen.</string>
+    <string name="widget_memory_desc">Your remembered facts rotate on the home screen.</string>
+    <string name="widget_ask_desc">One tap opens voice mode — speak, pause, sent.</string>
+    <string name="widget_briefing_desc">One tap runs your briefing — no app open; the answer lands in Last answer.</string>
+
+    <!-- Launcher long-press shortcuts (analog to iOS App Shortcuts) -->
+    <string name="shortcut_ask_short">ask tiny</string>
+    <string name="shortcut_ask_long">Ask tiny anything</string>
+    <string name="shortcut_voice_short">ask by voice</string>
+    <string name="shortcut_voice_long">Ask tiny by voice</string>
+    <string name="shortcut_memory_short">memories</string>
+    <string name="shortcut_memory_long">Your remembered facts</string>
+    <string name="shortcut_messages_short">messages</string>
+    <string name="shortcut_messages_long">Direct messages</string>
+</resources>

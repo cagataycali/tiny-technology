@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 300" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="cj-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="cj-pulse" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .cj-box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .cj-lbl{fill:#E8FFF3;font-size:14px;font-weight:600}
+      .cj-sub{fill:#9FDFC0;font-size:10.5px}
+      .cj-n{fill:#00FF88;font-size:11px;font-weight:700}
+      .cj-flow{stroke:#00FF88;stroke-width:2;fill:none;stroke-dasharray:6 6}
+      .cj-tag{fill:#7CFFC4;font-size:12px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="920" height="300" fill="#020604"/>
+  <text x="460" y="32" text-anchor="middle" class="cj-lbl" font-size="18">The creator's path — idea to a live, earning AI</text>
+
+  <!-- six stages, evenly spaced across the pipeline -->
+  <!-- stage 1 -->
+  <g><rect class="cj-box" x="26" y="86" width="130" height="90" rx="13"/>
+    <text x="40" y="106" class="cj-n">01</text>
+    <text x="91" y="124" text-anchor="middle" class="cj-lbl">Create</text>
+    <text x="91" y="142" text-anchor="middle" class="cj-sub">chat it into</text>
+    <text x="91" y="156" text-anchor="middle" class="cj-sub">existence · a URL</text></g>
+  <!-- stage 2 -->
+  <g><rect class="cj-box" x="172" y="86" width="130" height="90" rx="13"/>
+    <text x="186" y="106" class="cj-n">02</text>
+    <text x="237" y="124" text-anchor="middle" class="cj-lbl">Remember</text>
+    <text x="237" y="142" text-anchor="middle" class="cj-sub">bitemporal</text>
+    <text x="237" y="156" text-anchor="middle" class="cj-sub">knowledge graph</text></g>
+  <!-- stage 3 -->
+  <g><rect class="cj-box" x="318" y="86" width="130" height="90" rx="13"/>
+    <text x="332" y="106" class="cj-n">03</text>
+    <text x="383" y="124" text-anchor="middle" class="cj-lbl">Embody</text>
+    <text x="383" y="142" text-anchor="middle" class="cj-sub">device fleet ·</text>
+    <text x="383" y="156" text-anchor="middle" class="cj-sub">visible traces</text></g>
+  <!-- stage 4 -->
+  <g><rect class="cj-box" x="464" y="86" width="130" height="90" rx="13"/>
+    <text x="478" y="106" class="cj-n">04</text>
+    <text x="529" y="124" text-anchor="middle" class="cj-lbl">Skill</text>
+    <text x="529" y="142" text-anchor="middle" class="cj-sub">OpenAPI · forge ·</text>
+    <text x="529" y="156" text-anchor="middle" class="cj-sub">install · cron</text></g>
+  <!-- stage 5 -->
+  <g><rect class="cj-box" x="610" y="86" width="130" height="90" rx="13"/>
+    <text x="624" y="106" class="cj-n">05</text>
+    <text x="675" y="124" text-anchor="middle" class="cj-lbl">Price</text>
+    <text x="675" y="142" text-anchor="middle" class="cj-sub">per message ·</text>
+    <text x="675" y="156" text-anchor="middle" class="cj-sub">USDC on Base</text></g>
+  <!-- stage 6 -->
+  <g><rect class="cj-box" x="756" y="86" width="138" height="90" rx="13" stroke="#00FF88" stroke-width="2"/>
+    <text x="770" y="106" class="cj-n">06</text>
+    <text x="825" y="124" text-anchor="middle" class="cj-lbl">Publish</text>
+    <text x="825" y="142" text-anchor="middle" class="cj-sub">marketplace ·</text>
+    <text x="825" y="156" text-anchor="middle" class="cj-sub">humans + agents</text></g>
+
+  <!-- forward flow arrows between stages -->
+  <path class="cj-flow" d="M156,131 L170,131" marker-end="url(#cj-mk)"><animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/></path>
+  <path class="cj-flow" d="M302,131 L316,131" marker-end="url(#cj-mk)"><animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/></path>
+  <path class="cj-flow" d="M448,131 L462,131" marker-end="url(#cj-mk)"><animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/></path>
+  <path class="cj-flow" d="M594,131 L608,131" marker-end="url(#cj-mk)"><animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/></path>
+  <path class="cj-flow" d="M740,131 L754,131" marker-end="url(#cj-mk)"><animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/></path>
+
+  <!-- reputation loop: publish feeds back to create (compounding distribution) -->
+  <path class="cj-flow" d="M825,176 Q825,252 460,252 Q91,252 91,178" marker-end="url(#cj-mk)" stroke-dasharray="3 5" opacity="0.8"/>
+  <text x="460" y="245" text-anchor="middle" class="cj-tag">every paid consult writes a public trust edge — reputation compounds with distribution</text>
+
+  <!-- travelling pulse along the pipeline -->
+  <circle r="6" fill="url(#cj-pulse)">
+    <animateMotion dur="4s" repeatCount="indefinite"
+      path="M91,131 L237,131 L383,131 L529,131 L675,131 L825,131"/>
+  </circle>
+
+  <text x="460" y="284" text-anchor="middle" fill="#3f6f57" font-size="12">no app code · no app store · no server — you describe what you want, and it's live</text>
+</svg>

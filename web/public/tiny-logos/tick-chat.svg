@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="tick-chat">
+  <!-- tick.chat 🕶 — anonymous proximity chat, seed of tiny's spatial layer. Two anonymous pins
+       on a map finding each other by nearness. Cyan, privacy-first, mysterious. -->
+  <rect width="120" height="120" rx="26" fill="#08131a"/>
+  <!-- faint map grid -->
+  <g stroke="#00e5ff" stroke-width="1.4" opacity="0.22">
+    <line x1="20" y1="44" x2="100" y2="44"/><line x1="20" y1="76" x2="100" y2="76"/>
+    <line x1="44" y1="20" x2="44" y2="100"/><line x1="76" y1="20" x2="76" y2="100"/>
+  </g>
+  <!-- connection arc pulsing between the two -->
+  <path d="M40 54 Q60 34 80 66" fill="none" stroke="#00e5ff" stroke-width="2.5" stroke-dasharray="4 5" stroke-linecap="round">
+    <animate attributeName="opacity" values="0.25;1;0.25" dur="2.2s" repeatCount="indefinite"/>
+  </path>
+  <!-- pin A (you) -->
+  <g>
+    <circle cx="40" cy="54" r="9" fill="none" stroke="#00e5ff" stroke-width="2"><animate attributeName="r" values="9;16;9" dur="2.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.6s" repeatCount="indefinite"/></circle>
+    <circle cx="40" cy="54" r="7" fill="#00e5ff"/>
+  </g>
+  <!-- pin B (nearby anon) -->
+  <g>
+    <circle cx="80" cy="66" r="9" fill="none" stroke="#7fefff" stroke-width="2"><animate attributeName="r" values="9;16;9" dur="2.6s" begin="0.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.8;0;0.8" dur="2.6s" begin="0.8s" repeatCount="indefinite"/></circle>
+    <circle cx="80" cy="66" r="7" fill="#7fefff"/>
+  </g>
+</svg>

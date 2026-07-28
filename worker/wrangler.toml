@@ -1,0 +1,118 @@
+# ── tiny worker ──────────────────────────────────────────────────────────────
+# This file is a TEMPLATE: every `id` below must be YOUR resource's id.
+# worker/README.md walks through creating each resource; the create commands
+# print the ids to paste here. `wrangler deploy` fails loudly on the
+# placeholders, which is the intended behavior for an unprovisioned clone.
+name = "tiny-worker"
+main = "src/index.ts"
+compatibility_date = "2023-04-07"
+compatibility_flags = ["nodejs_compat"]
+
+kv_namespaces = [
+  { binding = "tiny", id = "replace-with-your-kv-id" },   # personas (system prompt, knowledge, tools)
+  { binding = "post", id = "replace-with-your-kv-id" },   # shared/published posts
+  { binding = "stats", id = "replace-with-your-kv-id" },  # counters
+]
+
+logpush = false
+
+[vars]
+# tiny-chain — your self-hosted EVM node (see chain/README.md). Point
+# TINY_CHAIN_RPC_URL at YOUR public RPC proxy; the values below are placeholders.
+# On base / base-sepolia instead, set PAYMENTS_NETWORK accordingly and the
+# TINY_CHAIN_* vars are unused.
+TINY_CHAIN_ID = "31337"
+TINY_CHAIN_USDC_ADDRESS = "replace-with-your-deployment.json-address"
+TINY_CHAIN_RPC_URL = "https://chain.example.com"
+PAYMENTS_NETWORK = "tiny"
+# 🚨 RECONCILE_ALARM_USER — the users.id that x402 reconciliation pages when a
+# blocked row persists (src/reconcile-alarm.ts). DELIBERATELY UNSET here rather
+# than set to "": a value that only exists in one env is a rail that silently
+# doesn't exist in the other, and an unset destination is a silent OFF switch.
+# So `GET /pay/reconcile-status` reports `alarm.configured: false` out loud until
+# it is set, and the cron still runs, still decides and still logs the page it
+# would have sent. Set per-env with `wrangler secret put RECONCILE_ALARM_USER`
+# (or add it to that env's [vars]); pages land on that user's event ring and,
+# when they have an enabled bot, their own Telegram allowlisted chats.
+
+[triggers]
+crons = ["* * * * *"]
+
+[[vectorize]]
+binding = "VECTOR_INDEX"
+index_name = "tiny-v2"
+
+[[vectorize]]
+binding = "MEMORY"
+index_name = "memory"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tiny-v2"
+database_id = "replace-with-your-d1-id"
+
+# Device-generated media (images, voice-call recordings)
+[[r2_buckets]]
+binding = "MEDIA"
+bucket_name = "tiny-media"
+
+# Voice sessions — one Durable Object instance per live call relays client
+# mic ⇄ realtime speech API and journals audio+events to R2 (MEDIA) + D1
+# (voice_sessions, migration 0018).
+[[durable_objects.bindings]]
+name = "VOICE"
+class_name = "VoiceSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["VoiceSession"]
+
+# ── production env ────────────────────────────────────────────────────────────
+# wrangler envs do NOT inherit: every binding and var must be repeated here.
+# The npm `deploy` script deploys both envs; delete this block (and
+# deploy:production) if you only run one.
+[env.production]
+name = "tiny"
+logpush = false
+kv_namespaces = [
+  { binding = "tiny", id = "replace-with-your-kv-id" },
+  { binding = "post", id = "replace-with-your-kv-id" },
+  { binding = "stats", id = "replace-with-your-kv-id" },
+]
+
+# Secrets (set via `wrangler secret put <NAME> --env production`) — the full
+# list with what each does is in worker/README.md.
+
+[env.production.vars]
+TINY_CHAIN_ID = "31337"
+TINY_CHAIN_USDC_ADDRESS = "replace-with-your-deployment.json-address"
+TINY_CHAIN_RPC_URL = "https://chain.example.com"
+PAYMENTS_NETWORK = "tiny"
+
+[env.production.triggers]
+crons = ["* * * * *"]
+
+[[env.production.vectorize]]
+binding = "VECTOR_INDEX"
+index_name = "tiny-v2"
+
+[[env.production.vectorize]]
+binding = "MEMORY"
+index_name = "memory"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "tiny-v2"
+database_id = "replace-with-your-d1-id"
+
+[[env.production.r2_buckets]]
+binding = "MEDIA"
+bucket_name = "tiny-media"
+
+[[env.production.durable_objects.bindings]]
+name = "VOICE"
+class_name = "VoiceSession"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["VoiceSession"]

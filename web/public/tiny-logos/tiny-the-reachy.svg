@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="tiny-the-reachy">
+  <!-- tiny-the-reachy — Pollen Reachy Mini. No arms/legs: personality = head + body + antennas.
+       Round head, two wiggling antennas, expressive. Brand sprout-green (it's "tiny"). -->
+  <defs>
+    <radialGradient id="r-g" cx="50%" cy="45%" r="55%">
+      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.22"/><stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="120" height="120" rx="26" fill="#020604"/>
+  <rect width="120" height="120" rx="26" fill="url(#r-g)"/>
+  <!-- antennas, wiggling independently -->
+  <g stroke="#00FF88" stroke-width="4" stroke-linecap="round">
+    <g><animateTransform attributeName="transform" type="rotate" values="-14 46 46;6 46 46;-14 46 46" dur="2.2s" repeatCount="indefinite"/>
+      <line x1="46" y1="46" x2="38" y2="22"/></g>
+    <g><animateTransform attributeName="transform" type="rotate" values="12 74 46;-6 74 46;12 74 46" dur="2.6s" repeatCount="indefinite"/>
+      <line x1="74" y1="46" x2="82" y2="22"/></g>
+  </g>
+  <circle cx="38" cy="20" r="4.5" fill="#7dffc0"/>
+  <circle cx="82" cy="20" r="4.5" fill="#7dffc0"/>
+  <!-- head (tilts, curious) -->
+  <g>
+    <animateTransform attributeName="transform" type="rotate" values="-6 60 62;6 60 62;-6 60 62" dur="4s" repeatCount="indefinite"/>
+    <rect x="36" y="44" width="48" height="40" rx="18" fill="#eafff4"/>
+    <!-- eyes blink -->
+    <circle cx="51" cy="62" r="4.5" fill="#020604"><animate attributeName="ry" values="4.5;0.5;4.5" dur="3.5s" keyTimes="0;0.06;0.12" repeatCount="indefinite"/></circle>
+    <circle cx="69" cy="62" r="4.5" fill="#020604"><animate attributeName="ry" values="4.5;0.5;4.5" dur="3.5s" keyTimes="0;0.06;0.12" repeatCount="indefinite"/></circle>
+    <!-- happy mouth -->
+    <path d="M52 73q8 7 16 0" stroke="#00b45f" stroke-width="3" fill="none" stroke-linecap="round"/>
+  </g>
+  <!-- body base -->
+  <rect x="46" y="86" width="28" height="14" rx="7" fill="#00b45f"/>
+</svg>

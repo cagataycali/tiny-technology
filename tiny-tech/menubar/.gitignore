@@ -1,0 +1,6 @@
+# SwiftPM build products — 300+ MB of them, and every byte is regenerable by
+# `swift build`. Scoped to this package rather than the repo root so it travels
+# with the thing it describes.
+.build/
+*.xcodeproj
+.swiftpm/

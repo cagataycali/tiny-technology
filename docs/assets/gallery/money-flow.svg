@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 320" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="mf" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="coin" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .lbl{fill:#E8FFF3;font-size:15px;font-weight:600}
+      .sub{fill:#9FDFC0;font-size:11px}
+      .flow{stroke:#00FF88;stroke-width:2;fill:none;stroke-dasharray:6 6}
+      .fee{fill:#7CFFC4;font-size:12px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="920" height="320" fill="#020604"/>
+  <text x="460" y="34" text-anchor="middle" class="lbl" font-size="18">The tiny economy — value over open rails</text>
+
+  <!-- payer -->
+  <g><rect class="box" x="40" y="120" width="170" height="80" rx="14"/>
+    <text x="125" y="152" text-anchor="middle" class="lbl">Payer</text>
+    <text x="125" y="172" text-anchor="middle" class="sub">person · agent · another tiny</text>
+    <text x="125" y="188" text-anchor="middle" class="sub">x402 · ERC-8004 discovery</text></g>
+
+  <!-- ledger core -->
+  <g><rect class="box" x="375" y="105" width="170" height="110" rx="16" stroke="#00FF88" stroke-width="2"/>
+    <text x="460" y="140" text-anchor="middle" class="lbl">USDC Ledger</text>
+    <text x="460" y="160" text-anchor="middle" class="sub">on Base · append-only</text>
+    <text x="460" y="177" text-anchor="middle" class="sub">idempotent by ref</text>
+    <text x="460" y="197" text-anchor="middle" class="fee">flat $0.001 platform fee</text></g>
+
+  <!-- creator -->
+  <g><rect class="box" x="710" y="120" width="170" height="80" rx="14"/>
+    <text x="795" y="152" text-anchor="middle" class="lbl">Creator / tiny</text>
+    <text x="795" y="172" text-anchor="middle" class="sub">priced per message</text>
+    <text x="795" y="188" text-anchor="middle" class="sub">withdraw to wallet</text></g>
+
+  <!-- flows -->
+  <path class="flow" d="M210,150 L370,150" marker-end="url(#mf)">
+    <animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/>
+  </path>
+  <text x="290" y="138" text-anchor="middle" class="sub">pay (settle first)</text>
+
+  <path class="flow" d="M545,168 L708,168" marker-end="url(#mf)">
+    <animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/>
+  </path>
+  <text x="626" y="156" text-anchor="middle" class="sub">credit</text>
+
+  <!-- refund loop -->
+  <path class="flow" d="M370,195 Q290,250 210,195" marker-end="url(#mf)" stroke-dasharray="3 5" opacity="0.7"/>
+  <text x="290" y="255" text-anchor="middle" class="sub">refund if zero output</text>
+
+  <!-- coins -->
+  <circle cx="290" cy="150" r="7" fill="url(#coin)">
+    <animate attributeName="cx" values="220;360" dur="1.6s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="626" cy="168" r="6" fill="url(#coin)">
+    <animate attributeName="cx" values="552;700" dur="1.6s" repeatCount="indefinite"/>
+  </circle>
+
+  <text x="460" y="300" text-anchor="middle" fill="#3f6f57" font-size="12">settle-before-serve · debit-before-sign · never auto-reverse after broadcast</text>
+</svg>

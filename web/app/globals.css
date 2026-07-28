@@ -1,0 +1,483 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* ⚠️ These shadcn-style tokens LOOK like dead config but are LIVE:
+     the `* { @apply border-border }` and `body { @apply bg-background
+     text-foreground }` rules below consume them, and tailwind.config.js
+     remaps rounded-lg/md/sm onto --radius. Removing them changes every
+     default border color and radius. (The old `.dark { }` variant block
+     WAS dead — next-themes sets data-theme, nothing sets class="dark" —
+     and was removed; these are the values that actually serve.) */
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 0 0% 3.9%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 0 0% 3.9%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 0 0% 3.9%;
+
+    --primary: 0 0% 9%;
+    --primary-foreground: 0 0% 98%;
+
+    --secondary: 0 0% 96.1%;
+    --secondary-foreground: 0 0% 9%;
+
+    --muted: 0 0% 96.1%;
+    --muted-foreground: 0 0% 45.1%;
+
+    --accent: 0 0% 96.1%;
+    --accent-foreground: 0 0% 9%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+
+    --border: 0 0% 89.8%;
+    --input: 0 0% 89.8%;
+    --ring: 0 0% 3.9%;
+
+    --radius: 0.5rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+  /* Mobile tap flash follows the accent instead of the OS gray/blue.
+     Tinted, not transparent — touch users still get press feedback. */
+  -webkit-tap-highlight-color: rgba(var(--tiny-accent-rgb), 0.15);
+}
+
+/* 📱 iOS home-indicator clearance — the composer's pb-safe class was
+   referenced but never defined (dead class since it shipped). Needs
+   viewport-fit=cover in the viewport meta for env() to be non-zero. */
+.pb-safe {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* 👆 44px hit area without 44px visuals (WCAG 2.5.8 / Apple HIG): the
+   pseudo-element extends the TOUCH rectangle around a compact pill — copy
+   buttons and network radios on the money surfaces measured 22–30px, and a
+   missed "which network" tap is a permanent-400 class of mistake. Where two
+   extended targets overlap (adjacent narrow radios), the later sibling wins
+   the overlap strip — still strictly better than the dead gap it replaces. */
+.tap-target {
+  position: relative;
+}
+.tap-target::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, 44px);
+  height: max(100%, 44px);
+}
+
+/* Touch press feedback for the shared interactive classes — hover states
+   don't exist on touch; :active is the equivalent beat. */
+.neon-chip:active,
+.neon-card:active {
+  background: rgba(var(--tiny-accent-rgb), 0.18);
+}
+
+/* 🖨️ Print — conversations as documents. Browsers strip dark backgrounds
+   by default (white page + white text = blank output), the fixed header/
+   composer would overlap content on every page, and chrome (buttons,
+   banners) is meaningless on paper. Flip to dark-on-white, hide chrome,
+   let bubbles flow. */
+@media print {
+  * {
+    background: transparent !important;
+    color: #111 !important;
+    text-shadow: none !important;
+    box-shadow: none !important;
+  }
+  header,
+  .fixed,
+  button,
+  [role="dialog"],
+  [data-sonner-toaster] {
+    display: none !important;
+  }
+  main {
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
+  }
+  .msg-bubble-user,
+  .msg-bubble-assistant {
+    border: 1px solid #ccc !important;
+    break-inside: avoid;
+  }
+  a {
+    color: #111 !important;
+    text-decoration: underline;
+  }
+  /* Paper can't click "Read more" — print the full knowledge text */
+  .knowledge-clamped .msg-md {
+    max-height: none !important;
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
+  }
+  /* Scroll-capped payloads (tool results, reasoning, tables) can't
+     scroll on paper either — let them flow to full height */
+  .max-h-56 {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+}
+
+/* ♿ Reduced motion — one global switch instead of per-element guards.
+   Kills Tailwind's animate-* keyframes, hover/active scale transforms,
+   and smooth scrolling for users who ask the OS for less motion.
+   (The scroll-neon listener in Chat.tsx also early-returns on this.) */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* Spinners are the one exception: clamping animate-spin to 0.01ms freezes
+     the rotation on a random frame, and a two-tone/border-t-transparent ring
+     stuck at one angle reads as a broken lopsided arc, not "busy". Swap the
+     rotation for a gentle opacity pulse — still a motion cue, but symmetric,
+     so it never freezes into a partial shape. Pulse is well under the
+     vestibular-trigger threshold (no transform, slow fade). */
+  .animate-spin {
+    animation: reduced-motion-pulse 1.4s ease-in-out infinite !important;
+  }
+}
+
+@keyframes reduced-motion-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+
+a {
+  font-weight: bolder;
+  text-decoration: underline;
+}
+
+/* Bottom banners (InstallPrompt) enter from below. translate-x preserved:
+   the element is centered with -translate-x-1/2. */
+@keyframes slideInUp {
+  from {
+    transform: translate(-50%, 16px);
+    opacity: 0;
+  }
+  to {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+}
+.animate-slideInUp {
+  animation: slideInUp 0.3s ease-out;
+}
+
+/* Exit mirror for slideInUp (centered elements — keeps the -50% x). */
+@keyframes slideOutDown {
+  from {
+    transform: translate(-50%, 0);
+    opacity: 1;
+  }
+  to {
+    transform: translate(-50%, 16px);
+    opacity: 0;
+  }
+}
+.animate-slideOutDown {
+  animation: slideOutDown 0.2s ease-in forwards;
+}
+
+/* Same enter for LEFT-ALIGNED status banners (no centering translate —
+   slideInUp's -50% would yank a w-fit element sideways). */
+@keyframes riseIn {
+  from {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+.animate-riseIn {
+  animation: riseIn 0.25s ease-out;
+}
+
+/* Exit mirror for riseIn — overlays that rose in settle back down before
+   unmounting. `forwards` holds the faded end frame so the unmount (fired
+   on animationend) never flashes the fully-visible state. Exits run
+   slightly faster than enters — leaving needs less ceremony. */
+@keyframes riseOut {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(8px);
+    opacity: 0;
+  }
+}
+.animate-riseOut {
+  animation: riseOut 0.2s ease-in forwards;
+}
+
+/* Text selection follows the theme accent — lightblue/darkblue was the
+   one surface still wearing browser-default colors. Translucent so
+   syntax-highlighted code stays readable when selected. */
+::selection {
+  background-color: rgba(var(--tiny-accent-rgb), 0.35);
+  color: #fff;
+}
+
+::-moz-selection {
+  background-color: rgba(var(--tiny-accent-rgb), 0.35);
+  color: #fff;
+}
+
+body {
+    background: black;
+    overflow: auto;
+    /* dvh, not vh: on mobile 100vh is the LARGEST viewport (URL bar
+       retracted), so with the bar showing the body box is taller than the
+       visible area and body-internal scrolling fights the address-bar
+       collapse. dvh tracks the live viewport. Matches the dvh sheets
+       elsewhere (MessagesHUD/MemoryPanel/JobsPanel). */
+    height: 100dvh;
+}
+
+/* 🎨 Tiny theme engine (careless theme-engine pattern) — the agent's
+   set_theme tool and the Appearance settings write these. Defaults are
+   the classic tiny green-on-black; rgb triplet exists so rgba() alpha
+   variants keep working: rgba(var(--tiny-accent-rgb), 0.2). */
+:root {
+  --tiny-accent: #00FF88;
+  --tiny-accent-rgb: 0, 255, 136;
+  --tiny-bg: #000000;
+  /* One destructive red for the whole app. Delete/revoke/disconnect text,
+     danger-button fills, and validation errors used to drift across four
+     values (#ff5050, #ff6b6b, #ff4444, red-400 #f87171) — most visible when
+     a red-400 "Delete" opened a ConfirmDialog whose oranger #ff5050 danger
+     button sat right beside it. red-400 (#f87171) was already the majority;
+     rgb triplet so rgba() alpha variants work like --tiny-accent-rgb. */
+  --tiny-danger: #f87171;
+  --tiny-danger-rgb: 248, 113, 113;
+  /* One warning orange, same rule. A warning is NOT an error: recoverable
+     refusals (faucet cooldown "come back tomorrow", claim "try again in a
+     minute") read deliberately calmer than danger red. Was inlined as
+     #ff9d6b at three wallet status lines — token'd in c21 before a fourth
+     copy could drift. */
+  --tiny-warn: #ff9d6b;
+  --tiny-warn-rgb: 255, 157, 107;
+}
+
+/* When a theme is active, surfaces that hardcode black follow --tiny-bg */
+html[data-tiny-theme] .bg-black {
+  background-color: var(--tiny-bg) !important;
+}
+
+/* 🗺️ map-mode (agi-diy grammar) — while the 📍 toggle is on, a live map sits
+   at z-index:-1 and the page-level black goes translucent so it reads
+   through. Same specificity as the theme rule above; later in source so the
+   map wins while active (the tint keeps a hint of --tiny-bg's hue). */
+html.map-mode .bg-black {
+  /* 0.55 → 0.38: with the accent multiply grade on the map itself
+     (MapBackground), the wash no longer has to carry all the darkness —
+     the streets get to actually show (iOS 0.32 sibling). */
+  background-color: rgba(0, 0, 0, 0.38) !important;
+  transition: background-color 0.8s ease-in-out;
+}
+
+/* Spotlight: while the agent presents on the map (fly/tour — MapBackground
+   sets the class for ~8s), the wash thins so the map comes forward. */
+html.map-mode.map-spotlight .bg-black {
+  background-color: rgba(0, 0, 0, 0.15) !important;
+}
+
+/* the agi-diy .pulse-ring on the ambient map's "you" (MapBackground) */
+@keyframes tiny-map-pulse {
+  from {
+    transform: scale(1);
+    opacity: 1;
+  }
+  to {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+/* 🖤 Scrollbars follow the glass theme — stock gray tracks were the last
+   default chrome. Thin + translucent accent; hover brightens. Firefox
+   gets the two-value shorthand. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(var(--tiny-accent-rgb), 0.25) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(var(--tiny-accent-rgb), 0.25);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--tiny-accent-rgb), 0.45);
+}
+
+/* ⌨️ Keyboard focus — one consistent neon ring, everywhere. :focus-visible
+   only fires for keyboard/AT navigation, so mouse clicks stay clean even
+   on elements that used to suppress outlines with focus:outline-none
+   (which kills keyboard focus too — this rule wins specificity over it). */
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible {
+  outline: 2px solid rgba(var(--tiny-accent-rgb), 0.7) !important;
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+
+/* Text fields: offset ring looks detached on large boxes — hug instead */
+input:focus-visible,
+textarea:focus-visible {
+  outline-offset: 0;
+}
+
+/* 🔤 Rounded display voice — the iOS wordmark/title treatment
+   (Views.swift:26 uses SF Rounded for brand moments only, never body).
+   ui-rounded resolves to SF Rounded on Apple platforms; elsewhere it
+   falls back to the system stack, which is the correct native voice. */
+.font-rounded {
+  font-family: ui-rounded, "SF Pro Rounded", system-ui, -apple-system, sans-serif;
+}
+
+/* 💊 Neon chips (starter/followup/tiny pills) — shared hover: scale is
+   already per-element; this adds the missing fill+border feedback so
+   hover reads as "pressable", not just "bigger". Idle fill/stroke match
+   the iOS capsule chips (accent 0.12 fill, 0.35 stroke — Views.swift
+   starter chips) so a tiny reads identically on web and the native app. */
+.neon-chip {
+  background: rgba(var(--tiny-accent-rgb), 0.12);
+  border-color: rgba(var(--tiny-accent-rgb), 0.35);
+  color: var(--tiny-accent);
+}
+.neon-chip:hover {
+  background: rgba(var(--tiny-accent-rgb), 0.18);
+  border-color: rgba(var(--tiny-accent-rgb), 0.55);
+}
+
+/* 🃏 Neon cards (profile tinys grid, community cards) — same "pressable"
+   hover feedback as chips, tuned down for large surfaces: border sharpens
+   and a soft glow lifts, scale stays subtle (1.02 set per-element).
+   Surface is a white-over-black elevation (iOS secondarySystemBackground
+   equivalent) instead of translucent black, with the iOS hairline stroke
+   (accent 0.15 — Theme.swift tinyCard): cards now sit ABOVE the page the
+   way native cards do, and stay legible over themed --tiny-bg colors. */
+.neon-card {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(var(--tiny-accent-rgb), 0.15);
+}
+.neon-card:hover {
+  border-color: rgba(var(--tiny-accent-rgb), 0.45);
+  box-shadow: 0 0 16px rgba(var(--tiny-accent-rgb), 0.12);
+}
+
+/* 🫁 Figural composer — the ONLY animated glow on the page (von Restorff:
+   one element must differ to anchor the eye). 6s breathe, subtle range so
+   it reads as alive, not blinking. Reduced-motion kills it via the global
+   media query (animation-duration 0.01ms). */
+@keyframes composer-breathe {
+  0%, 100% { box-shadow: 0 0 12px rgba(var(--tiny-accent-rgb), 0.10); }
+  50%      { box-shadow: 0 0 24px rgba(var(--tiny-accent-rgb), 0.28); }
+}
+.composer-breathe {
+  animation: composer-breathe 6s ease-in-out infinite;
+}
+/* While the user is typing (focus inside), hold the glow steady at full —
+   attention is already captured; breathing would distract from writing.
+   The border sharpens too (iOS ramps 0.22→0.55 on focus, Views.swift:2239);
+   !important because the idle 0.3 is an inline style on the composer div. */
+.composer-breathe:focus-within {
+  animation: none;
+  box-shadow: 0 0 24px rgba(var(--tiny-accent-rgb), 0.28);
+  border-color: rgba(var(--tiny-accent-rgb), 0.55) !important;
+}
+
+/* ⚡ Scroll neon mode — while scrolling (html[data-scrolling], set by a
+   rAF-throttled listener in Chat.tsx), message bubbles invert to
+   border-only neon wireframes. Debounce restores them 180ms after the
+   scroll ends; the transition makes both directions feel intentional. */
+.msg-bubble-user,
+.msg-bubble-assistant {
+  transition: background-color 0.25s ease, color 0.25s ease,
+              border-color 0.25s ease, box-shadow 0.25s ease;
+}
+
+html[data-scrolling] .msg-bubble-user {
+  background: transparent !important;
+  color: var(--tiny-accent) !important;
+  border-color: var(--tiny-accent) !important;
+  box-shadow: 0 0 12px rgba(var(--tiny-accent-rgb), 0.25),
+              inset 0 0 12px rgba(var(--tiny-accent-rgb), 0.08) !important;
+}
+
+html[data-scrolling] .msg-bubble-assistant {
+  background: transparent !important;
+  border-color: rgba(var(--tiny-accent-rgb), 0.7) !important;
+  box-shadow: 0 0 12px rgba(var(--tiny-accent-rgb), 0.15),
+              inset 0 0 12px rgba(var(--tiny-accent-rgb), 0.05) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-bubble-user,
+  .msg-bubble-assistant {
+    transition: none;
+  }
+}
+
+
+/* 📖 Seeded knowledge message — clamped to ~3 lines with a fade until the
+   user expands it (design agenda item 4). The masked fade avoids a hard
+   cut mid-glyph; the toggle button stays fully visible below the mask.
+   The max-height transition eases the expand (2000px ≈ "auto" for any
+   realistic knowledge text); mask fades via the same transition. */
+/* .msg-md is the markdown wrapper inside every bubble (Chat.tsx) — these
+   selectors targeted .prose until 02609a7 removed that class as a phantom,
+   which silently disabled the clamp (full system knowledge rendered on
+   every tiny page until c28 caught it). */
+.knowledge-expandable .msg-md {
+  transition: max-height 0.35s ease;
+  max-height: 2000px; /* ≈ auto for any realistic knowledge text */
+}
+.knowledge-clamped .msg-md {
+  max-height: 4.9em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+}

@@ -1,0 +1,35 @@
+node_modules/
+.dev.vars
+.wrangler/
+.env*
+!.env.example
+# chain
+artifacts/
+cache/
+deployment.json
+# ios
+ios/build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+# android
+.gradle/
+.kotlin/
+build/
+local.properties
+*.keystore
+*.jks
+.DS_Store
+# web
+.next/
+.vercel/
+tsconfig.tsbuildinfo
+web/public/android/*.apk
+web/public/ios/*.ipa
+
+# docs — `mkdocs build` output. NEVER commit this: it is ~12MB of rendered HTML
+# plus a copy of every asset, regenerated on every content change, and git keeps
+# each copy forever. CI builds it from docs/ and uploads it straight to Pages,
+# so nothing needs it in the tree. (Same rule as the app binaries above: sources
+# are committed, build products are not.)
+site/

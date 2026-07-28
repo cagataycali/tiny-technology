@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="uni-news-notifier">
+  <!-- uni-news-notifier — notifies students the moment their university posts. A graduation cap
+       with a ringing notification bell. Student-blue. -->
+  <rect width="120" height="120" rx="26" fill="#0a1524"/>
+  <!-- grad cap -->
+  <path d="M60 30 L96 46 L60 62 L24 46 Z" fill="#4a9eff"/>
+  <path d="M40 53 v14 c0 6 40 6 40 0 v-14" fill="none" stroke="#4a9eff" stroke-width="4"/>
+  <!-- tassel -->
+  <line x1="96" y1="46" x2="96" y2="66" stroke="#cfe4ff" stroke-width="3"/>
+  <circle cx="96" cy="69" r="4" fill="#ffd23f"><animate attributeName="cy" values="67;71;67" dur="2s" repeatCount="indefinite"/></circle>
+  <!-- ringing bell -->
+  <g>
+    <animateTransform attributeName="transform" type="rotate" values="-12 60 78;12 60 78;-12 60 78" dur="0.8s" repeatCount="indefinite"/>
+    <path d="M60 70a13 13 0 0 1 13 13c0 8 3 10 3 10H44s3-2 3-10a13 13 0 0 1 13-13z" fill="#ffd23f"/>
+    <circle cx="60" cy="70" r="3" fill="#ffd23f"/>
+    <circle cx="60" cy="98" r="4" fill="#ffd23f"/>
+  </g>
+</svg>

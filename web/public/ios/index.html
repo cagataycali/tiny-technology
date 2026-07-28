@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tiny for iOS</title>
+<style>
+  body { background:#0a0a0a; color:#e5e5e5; font-family:-apple-system,system-ui,sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center;
+         min-height:100vh; margin:0; padding:24px; text-align:center; }
+  h1 { font-size:2.2rem; margin:.2em 0; }
+  p { color:#999; max-width:440px; line-height:1.5; }
+  a.btn { display:inline-block; background:#22c55e; color:#000; font-weight:600;
+          padding:14px 28px; border-radius:14px; text-decoration:none; margin:10px 6px 4px; }
+  a.btn.alt { background:transparent; color:#22c55e; border:1px solid rgba(34,197,94,.4); }
+  .step { display:flex; gap:10px; align-items:flex-start; max-width:440px; text-align:left;
+          margin:8px 0; color:#bbb; font-size:.9rem; }
+  .step b { color:#22c55e; }
+  .note { font-size:.8rem; color:#666; max-width:440px; }
+</style>
+</head>
+<body>
+  <div style="font-size:64px">🌱</div>
+  <h1>tiny for iOS</h1>
+  <p>Your AI in your pocket. Chat, voice mode, the universe, jobs, memory —
+     and your phone becomes a live node of your tiny identity.</p>
+
+  <p style="margin:4px 0"><strong style="color:#22c55e">Private beta — only 100 devices.</strong>
+     <span id="spots" style="color:#888; font-size:.9em"></span></p>
+
+  <a class="btn" href="itms-services://?action=download-manifest&url=https://tiny.technology/ios/manifest.plist">Install tiny</a>
+  <a class="btn alt" href="/api/udid?profile=1">Join the beta</a>
+
+  <div style="margin-top:20px">
+    <div class="step"><b>1.</b><span><strong>New device?</strong> Tap "Join the beta" → Settings installs a one-time registration profile → your spot is reserved automatically.</span></div>
+    <div class="step"><b>2.</b><span>Your device joins the next signed build <strong>automatically</strong> (builds go out daily). First come, first served.</span></div>
+    <div class="step"><b>3.</b><span>Come back and tap "Install tiny." Done — no cable, no computer.</span></div>
+  </div>
+
+  <p class="note">Open this page in <strong>Safari on your iPhone</strong>.
+     The registration profile is unsigned (iOS shows a warning) — it contains
+     only a callback URL, sends UDID once, and can be deleted right after.</p>
+<script>
+  fetch('/api/udid?count=1').then(r => r.json()).then(d => {
+    if (d && typeof d.enrolled === 'number') {
+      const left = Math.max(0, (d.cap || 100) - d.enrolled);
+      document.getElementById('spots').textContent =
+        left > 0 ? `${left} spots left` : 'Beta full — waitlist only';
+    }
+  }).catch(() => {});
+</script>
+</body>
+</html>

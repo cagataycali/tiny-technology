@@ -1,0 +1,79 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 380" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="pt-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="pt-core" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .pt-box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .pt-lbl{fill:#E8FFF3;font-size:14px;font-weight:600}
+      .pt-sub{fill:#9FDFC0;font-size:10.5px}
+      .pt-tag{fill:#7CFFC4;font-size:11px;font-weight:600}
+      .pt-mono{fill:#7CFFC4;font-size:9.5px;font-family:ui-monospace,Menlo,monospace}
+      .pt-flow{stroke:#00FF88;stroke-width:2;fill:none;stroke-dasharray:7 7}
+      .pt-attr{fill:#7CFFC4;font-size:10px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="920" height="380" fill="#020604"/>
+  <text x="460" y="30" text-anchor="middle" class="pt-lbl" font-size="18">Three paths into the universe — one entity at the end of each</text>
+  <text x="460" y="49" text-anchor="middle" class="pt-sub">creator · developer · team — different doors, the same five-attribute tiny you own</text>
+
+  <!-- three entry doors on the left -->
+  <!-- creator -->
+  <g><rect class="pt-box" x="26" y="82" width="196" height="66" rx="13" stroke="#00FF88" stroke-width="2"/>
+    <text x="42" y="104" class="pt-tag">CREATOR · no code</text>
+    <text x="42" y="122" class="pt-sub">chat an AI into existence</text>
+    <text x="42" y="138" class="pt-mono">"create an ai named…"</text></g>
+  <!-- developer -->
+  <g><rect class="pt-box" x="26" y="158" width="196" height="66" rx="13" stroke="#00FF88" stroke-width="2"/>
+    <text x="42" y="180" class="pt-tag">DEVELOPER · MCP</text>
+    <text x="42" y="198" class="pt-sub">mount it into any agent</text>
+    <text x="42" y="214" class="pt-mono">npx tiny-tech · claude mcp add</text></g>
+  <!-- team -->
+  <g><rect class="pt-box" x="26" y="234" width="196" height="66" rx="13" stroke="#00FF88" stroke-width="2"/>
+    <text x="42" y="256" class="pt-tag">TEAM · private</text>
+    <text x="42" y="274" class="pt-sub">a universe your org owns</text>
+    <text x="42" y="290" class="pt-mono">private by default · BYOK · sovereign</text></g>
+
+  <!-- converging flows to the entity -->
+  <path class="pt-flow" d="M222,115 C330,120 360,170 452,185" marker-end="url(#pt-mk)"/>
+  <path class="pt-flow" d="M222,191 C320,191 360,191 452,191" marker-end="url(#pt-mk)"/>
+  <path class="pt-flow" d="M222,267 C330,262 360,212 452,197" marker-end="url(#pt-mk)"/>
+
+  <!-- travelling pulses down each path -->
+  <circle r="4" fill="url(#pt-core)"><animateMotion dur="2.4s" repeatCount="indefinite" path="M222,115 C330,120 360,170 452,185"/></circle>
+  <circle r="4" fill="url(#pt-core)"><animateMotion dur="2.4s" begin="0.8s" repeatCount="indefinite" path="M222,191 C320,191 360,191 452,191"/></circle>
+  <circle r="4" fill="url(#pt-core)"><animateMotion dur="2.4s" begin="1.6s" repeatCount="indefinite" path="M222,267 C330,262 360,212 452,197"/></circle>
+
+  <!-- the entity core -->
+  <g>
+    <circle cx="530" cy="191" r="66" fill="none" stroke="#00FF8833" stroke-width="1.5">
+      <animate attributeName="r" values="62;70;62" dur="3.2s" repeatCount="indefinite"/></circle>
+    <circle cx="530" cy="191" r="46" fill="url(#pt-core)" opacity="0.9">
+      <animate attributeName="r" values="44;50;44" dur="3.2s" repeatCount="indefinite"/></circle>
+    <text x="530" y="188" text-anchor="middle" fill="#020604" font-size="14" font-weight="700">tiny</text>
+    <text x="530" y="204" text-anchor="middle" fill="#053" font-size="9.5" font-weight="600">you own it</text>
+  </g>
+
+  <!-- the five attributes radiating from the entity -->
+  <g>
+    <text x="700" y="96" text-anchor="middle" class="pt-tag">every path ends in the same entity</text>
+    <rect class="pt-box" x="636" y="106" width="128" height="26" rx="8"/><text x="700" y="123" text-anchor="middle" class="pt-attr">◈ Identity — URL · PWA · MCP</text>
+    <rect class="pt-box" x="636" y="138" width="128" height="26" rx="8"/><text x="700" y="155" text-anchor="middle" class="pt-attr">◈ Memory — survives · revises</text>
+    <rect class="pt-box" x="636" y="170" width="128" height="26" rx="8"/><text x="700" y="187" text-anchor="middle" class="pt-attr">◈ Body — your device fleet</text>
+    <rect class="pt-box" x="636" y="202" width="128" height="26" rx="8"/><text x="700" y="219" text-anchor="middle" class="pt-attr">◈ Society — follow · consult</text>
+    <rect class="pt-box" x="636" y="234" width="128" height="26" rx="8"/><text x="700" y="251" text-anchor="middle" class="pt-attr">◈ Economy — priced · pays</text>
+  </g>
+  <!-- entity → attributes connectors -->
+  <path class="pt-flow" d="M596,191 C616,150 616,130 634,119" marker-end="url(#pt-mk)"/>
+  <path class="pt-flow" d="M596,191 C616,175 616,160 634,151" marker-end="url(#pt-mk)"/>
+  <path class="pt-flow" d="M596,191 L634,183" marker-end="url(#pt-mk)"/>
+  <path class="pt-flow" d="M596,191 C616,207 616,220 634,215" marker-end="url(#pt-mk)"/>
+  <path class="pt-flow" d="M596,191 C616,232 616,252 634,247" marker-end="url(#pt-mk)"/>
+
+  <text x="460" y="344" text-anchor="middle" class="pt-mono">build-guide.md → integrate.md → enterprise.md — three docs, three audiences, one thing you own</text>
+  <text x="460" y="366" text-anchor="middle" fill="#3f6f57" font-size="11">No path is a lock-in: GitHub-login ownership, BYOK or on-device, open source, no load-bearing app store — the exit is a door too.</text>
+</svg>

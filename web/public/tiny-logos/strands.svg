@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="strands">
+  <!-- strands — harness-first agent framework. Three woven strands (threads) braiding through
+       the agent loop, in a sharp teal. -->
+  <defs>
+    <linearGradient id="s-a" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#2dd4bf"/><stop offset="100%" stop-color="#5eead4"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="26" fill="#04110f"/>
+  <g fill="none" stroke-width="5" stroke-linecap="round">
+    <path d="M30 92 C50 70 70 50 90 28" stroke="url(#s-a)" opacity="0.95">
+      <animate attributeName="d"
+        values="M30 92 C50 70 70 50 90 28;M30 92 C70 70 50 50 90 28;M30 92 C50 70 70 50 90 28"
+        dur="4s" repeatCount="indefinite"/>
+    </path>
+    <path d="M30 78 C55 62 65 58 90 42" stroke="#2dd4bf" opacity="0.6">
+      <animate attributeName="d"
+        values="M30 78 C55 62 65 58 90 42;M30 78 C55 74 65 46 90 42;M30 78 C55 62 65 58 90 42"
+        dur="4s" repeatCount="indefinite"/>
+    </path>
+    <path d="M30 64 C60 58 60 62 90 56" stroke="#0d9488" opacity="0.8">
+      <animate attributeName="d"
+        values="M30 64 C60 58 60 62 90 56;M30 64 C60 68 60 52 90 56;M30 64 C60 58 60 62 90 56"
+        dur="4s" repeatCount="indefinite"/>
+    </path>
+  </g>
+  <!-- loop node the strands feed -->
+  <circle cx="30" cy="78" r="7" fill="#5eead4"/>
+  <circle cx="90" cy="42" r="7" fill="#2dd4bf">
+    <animate attributeName="r" values="6;8;6" dur="4s" repeatCount="indefinite"/>
+  </circle>
+</svg>

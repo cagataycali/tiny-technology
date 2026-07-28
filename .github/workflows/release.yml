@@ -1,0 +1,157 @@
+# 🚀 Release — build & attach binaries to a GitHub Release on every version tag.
+#
+#   git tag v1.2.3 && git push origin v1.2.3
+#
+# Produces:
+#   tiny-<ver>.apk        (Android, signed if keystore secrets set — REQUIRED
+#                          for OTA continuity: the in-app updater pins the
+#                          cert lineage, a differently-signed APK won't install)
+#   tiny-<ver>.aab        (Play Store bundle)
+#   Tiny-<ver>.ipa        (iOS, only when signing secrets are configured)
+#
+# Secrets (Settings → Secrets and variables → Actions):
+#   ANDROID_KEYSTORE_B64      base64 of the tiny keystore  (base64 -i tiny.keystore)
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+#   IOS_CERTIFICATE_B64       base64 of Apple Distribution .p12
+#   IOS_CERTIFICATE_PASSWORD
+#   IOS_PROVISION_PROFILE_B64 base64 of the .mobileprovision
+# Variables (same page, Variables tab):
+#   IOS_TEAM_ID               your Apple Developer Team ID (Membership page)
+#   KEYCHAIN_PASSWORD         any random string
+#
+# Without secrets: android falls back to debug signing (fine for testing,
+# NOT for OTA), ios job is skipped entirely.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # build.gradle.kts signs release with the DEBUG signing config on
+      # purpose (OTA cert-lineage pinning). Restore the canonical tiny
+      # keystore AS the debug keystore so CI builds keep the same signature.
+      # Grab yours from ~/.android/debug.keystore on the machine that built
+      # the shipped APKs:  base64 -i ~/.android/debug.keystore
+      - name: Restore tiny keystore (as debug keystore)
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            mkdir -p ~/.android
+            echo -n "$KEYSTORE_B64" | base64 -d > ~/.android/debug.keystore
+            echo "✅ tiny keystore restored — OTA signature lineage preserved"
+          else
+            echo "⚠️ ANDROID_KEYSTORE_B64 not set — CI will generate a fresh debug keystore (NOT OTA-compatible)"
+          fi
+
+      - name: Build APK + AAB
+        working-directory: android
+        run: ./gradlew assembleRelease bundleRelease --no-daemon
+
+      - name: Rename artifacts
+        run: |
+          VER=${GITHUB_REF_NAME#v}
+          mkdir -p out
+          cp android/app/build/outputs/apk/release/*.apk out/tiny-$VER.apk
+          cp android/app/build/outputs/bundle/release/*.aab out/tiny-$VER.aab
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: out/*
+
+  ios:
+    runs-on: macos-15
+    # IPA export requires real signing material — skip cleanly without it
+    if: ${{ vars.IOS_RELEASE_ENABLED == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Import signing certificate & profile
+        env:
+          CERT_B64: ${{ secrets.IOS_CERTIFICATE_B64 }}
+          CERT_PWD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+          PROFILE_B64: ${{ secrets.IOS_PROVISION_PROFILE_B64 }}
+          KEYCHAIN_PWD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          CERT=$RUNNER_TEMP/cert.p12
+          echo -n "$CERT_B64" | base64 -d > $CERT
+          KC=$RUNNER_TEMP/build.keychain-db
+          security create-keychain -p "$KEYCHAIN_PWD" $KC
+          security set-keychain-settings -lut 21600 $KC
+          security unlock-keychain -p "$KEYCHAIN_PWD" $KC
+          security import $CERT -P "$CERT_PWD" -A -t cert -f pkcs12 -k $KC
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PWD" $KC
+          security list-keychain -d user -s $KC
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          echo -n "$PROFILE_B64" | base64 -d > ~/Library/MobileDevice/Provisioning\ Profiles/tiny.mobileprovision
+
+      - name: Generate project & archive
+        working-directory: ios
+        run: |
+          xcodegen generate
+          xcodebuild -project Tiny.xcodeproj -scheme Tiny \
+            -destination 'generic/platform=iOS' -configuration Release \
+            -allowProvisioningUpdates \
+            archive -archivePath $RUNNER_TEMP/Tiny.xcarchive
+
+      - name: Export IPA
+        run: |
+          cat > $RUNNER_TEMP/export.plist << 'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>release-testing</string>
+            <key>teamID</key><string>${{ vars.IOS_TEAM_ID }}</string>
+          </dict></plist>
+          PLIST
+          xcodebuild -exportArchive -archivePath $RUNNER_TEMP/Tiny.xcarchive \
+            -exportOptionsPlist $RUNNER_TEMP/export.plist \
+            -exportPath $RUNNER_TEMP/export
+          VER=${GITHUB_REF_NAME#v}
+          mkdir -p out && cp $RUNNER_TEMP/export/*.ipa out/Tiny-$VER.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios
+          path: out/*
+
+  release:
+    needs: [android]
+    # ios is optional — collect whatever was built
+    if: always() && needs.android.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          draft: false

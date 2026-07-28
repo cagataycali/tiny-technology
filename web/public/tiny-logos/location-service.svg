@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="location-service">
+  <!-- location-service — realtime "nearby" location IaaS. A map pin dropping onto a point with
+       radiating proximity rings (the nearby query). Teal-green. -->
+  <rect width="120" height="120" rx="26" fill="#07130f"/>
+  <!-- proximity rings -->
+  <g fill="none" stroke="#00d98b" stroke-width="3">
+    <circle cx="60" cy="80" r="10"><animate attributeName="r" values="6;30;6" dur="2.8s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.9;0;0.9" dur="2.8s" repeatCount="indefinite"/></circle>
+    <circle cx="60" cy="80" r="20"><animate attributeName="r" values="14;40;14" dur="2.8s" begin="0.6s" repeatCount="indefinite"/><animate attributeName="opacity" values="0.7;0;0.7" dur="2.8s" begin="0.6s" repeatCount="indefinite"/></circle>
+  </g>
+  <!-- pin dropping -->
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0 -10;0 0;0 -3;0 0" dur="2.8s" keyTimes="0;0.35;0.5;0.6" repeatCount="indefinite"/>
+    <path d="M60 26a20 20 0 0 1 20 20c0 15-20 34-20 34S40 61 40 46a20 20 0 0 1 20-20z" fill="#00d98b"/>
+    <circle cx="60" cy="46" r="8" fill="#07130f"/>
+  </g>
+  <!-- ground dot -->
+  <circle cx="60" cy="80" r="3.5" fill="#7dffce"/>
+</svg>

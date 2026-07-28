@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="pf-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <marker id="pf-block" markerWidth="10" markerHeight="10" refX="5" refY="5" orient="auto">
+      <path d="M1,1 L9,9 M9,1 L1,9" stroke="#C2405A" stroke-width="1.6"/>
+    </marker>
+    <radialGradient id="pf-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <radialGradient id="pf-coin" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="#00FF88"/>
+      <stop offset="100%" stop-color="#00FF8800"/>
+    </radialGradient>
+    <style>
+      .pf-title{fill:#00FF88;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+      .pf-kicker{fill:#9FDFC0;font-size:12px}
+      .pf-step{fill:#7CFFC4;font-size:11px;font-weight:800;letter-spacing:1px}
+      .pf-lbl{fill:#E8FFF3;font-size:14.5px;font-weight:700}
+      .pf-sub{fill:#9FDFC0;font-size:11px}
+      .pf-card{fill:#06160E;stroke:#00FF8844;stroke-width:1.3}
+      .pf-exec{fill:#08211A;stroke:#00FF88;stroke-width:1.6}
+      .pf-execlbl{fill:#00FF88;font-size:13px;font-weight:800;letter-spacing:0.5px}
+      .pf-mono{fill:#7CFFC4;font-size:11px;font-family:ui-monospace,Menlo,monospace}
+      .pf-nomoney{fill:#0A2417;stroke:#00FF8855;stroke-width:1}
+      .pf-nomoneylbl{fill:#7CFFC4;font-size:9.5px;font-weight:800;letter-spacing:0.5px}
+      .pf-guard{fill:none;stroke:#C2405A;stroke-width:1.4;stroke-dasharray:5 4}
+      .pf-blocklbl{fill:#E28399;font-size:10.5px;font-weight:700}
+      .pf-danger{fill:#E28399;font-size:11px}
+      .pf-wire{stroke:#00FF8866;stroke-width:1.6;fill:none}
+      .pf-tap{fill:#00FF88;font-size:11px;font-weight:800}
+      .pf-foot{fill:#7CFFC4;font-size:12.5px;font-weight:700}
+      .pf-footsub{fill:#9FDFC0;font-size:11px}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+
+  <!-- header -->
+  <text x="40" y="44" class="pf-title">Your tiny can pay. It can't spend a cent without you.</text>
+  <text x="40" y="65" class="pf-kicker">pay_x402 quotes a payment — you approve it by hand — only then does one signed USDC transfer leave. No auto-spend.</text>
+
+  <!-- STEP 01 DECIDE -->
+  <text x="40" y="104" class="pf-step">01 · DECIDE</text>
+  <rect x="40" y="114" width="165" height="100" rx="16" class="pf-card"/>
+  <text x="56" y="139" class="pf-lbl">A 402 challenge</text>
+  <text x="56" y="159" class="pf-sub">another tiny — or an</text>
+  <text x="56" y="174" class="pf-sub">allowlisted endpoint —</text>
+  <text x="56" y="189" class="pf-sub">asks to be paid.</text>
+  <text x="56" y="208" class="pf-mono">pay_x402(url, msg)</text>
+
+  <path d="M205,164 L231,164" class="pf-wire" marker-end="url(#pf-mk)"/>
+
+  <!-- STEP 02 QUOTE -->
+  <text x="233" y="104" class="pf-step">02 · QUOTE — moves no money</text>
+  <rect x="233" y="114" width="165" height="100" rx="16" class="pf-card"/>
+  <rect x="330" y="120" width="62" height="16" rx="8" class="pf-nomoney"/>
+  <text x="361" y="132" text-anchor="middle" class="pf-nomoneylbl">$0 MOVED</text>
+  <text x="249" y="139" class="pf-lbl">POST → signed</text>
+  <text x="249" y="159" class="pf-sub">probe the 402, pick a</text>
+  <text x="249" y="174" class="pf-sub">price under your cap,</text>
+  <text x="249" y="189" class="pf-sub">mint an HMAC quote:</text>
+  <text x="249" y="208" class="pf-mono">jti·payTo·amount·exp</text>
+
+  <path d="M398,164 L424,164" class="pf-wire" marker-end="url(#pf-mk)"/>
+
+  <!-- STEP 03 APPROVE -->
+  <text x="426" y="104" class="pf-step">03 · APPROVE — your tap</text>
+  <rect x="426" y="114" width="165" height="100" rx="16" class="pf-card"/>
+  <text x="442" y="139" class="pf-lbl">The confirm card</text>
+  <text x="442" y="159" class="pf-sub">"Pay $0.05 to 0x…1234</text>
+  <text x="442" y="174" class="pf-sub">on Base?" — web, iOS,</text>
+  <text x="442" y="189" class="pf-sub">Android, in-voice.</text>
+  <text x="442" y="208" class="pf-tap">▶ only your Approve fires it</text>
+
+  <!-- arrow down from APPROVE into EXECUTE -->
+  <path d="M508,214 L508,256" class="pf-wire" marker-end="url(#pf-mk)"/>
+  <text x="516" y="240" class="pf-tap">PUT</text>
+
+  <!-- STEP 04 EXECUTE band -->
+  <text x="40" y="248" class="pf-step">04 · EXECUTE — the one money-moving path (PUT)</text>
+  <rect x="40" y="258" width="592" height="158" rx="18" class="pf-exec"/>
+  <circle cx="96" cy="312" r="30" fill="url(#pf-coin)"/>
+  <text x="96" y="308" text-anchor="middle" fill="#020604" font-size="11" font-weight="800">USDC</text>
+  <text x="96" y="322" text-anchor="middle" fill="#020604" font-size="10" font-weight="800">on Base</text>
+
+  <!-- re-verify -->
+  <text x="150" y="284" class="pf-execlbl">re-verify the quote</text>
+  <text x="150" y="303" class="pf-sub">same session · not expired · message still</text>
+  <text x="150" y="318" class="pf-sub">hashes to msgHash · host still allowlisted</text>
+
+  <!-- debit-before-sign chain -->
+  <rect x="150" y="330" width="150" height="34" rx="9" class="pf-card"/>
+  <text x="225" y="345" text-anchor="middle" class="pf-mono">1 · debit ledger</text>
+  <text x="225" y="358" text-anchor="middle" class="pf-sub">/pay/spend · by jti</text>
+  <path d="M300,347 L322,347" class="pf-wire" marker-end="url(#pf-mk)"/>
+  <rect x="324" y="330" width="150" height="34" rx="9" class="pf-card"/>
+  <text x="399" y="345" text-anchor="middle" class="pf-mono">2 · sign EIP-3009</text>
+  <text x="399" y="358" text-anchor="middle" class="pf-sub">platform hot wallet</text>
+  <path d="M474,347 L496,347" class="pf-wire" marker-end="url(#pf-mk)"/>
+  <rect x="498" y="330" width="118" height="34" rx="9" class="pf-card"/>
+  <text x="557" y="345" text-anchor="middle" class="pf-mono">3 · X-PAYMENT</text>
+  <text x="557" y="358" text-anchor="middle" class="pf-sub">retry the request</text>
+
+  <!-- reversal invariant strip -->
+  <rect x="150" y="374" width="466" height="30" rx="9" class="pf-guard"/>
+  <text x="164" y="393" class="pf-blocklbl">DEBIT BEFORE SIGN — reverse only if it fails before the signed header leaves.</text>
+
+  <!-- RIGHT rail: the guards -->
+  <rect x="656" y="114" width="224" height="302" rx="16" class="pf-card"/>
+  <text x="672" y="139" class="pf-lbl">What holds the line</text>
+
+  <text x="672" y="167" class="pf-mono">allowlist</text>
+  <text x="672" y="183" class="pf-sub">only https hosts we name —</text>
+  <text x="672" y="198" class="pf-sub">tiny.technology by default.</text>
+  <text x="672" y="213" class="pf-sub">No arbitrary URL, no SSRF.</text>
+
+  <text x="672" y="241" class="pf-mono">single-use jti</text>
+  <text x="672" y="257" class="pf-sub">one quote settles once —</text>
+  <text x="672" y="272" class="pf-sub">double-tap → already_spent.</text>
+
+  <text x="672" y="300" class="pf-mono">300s TTL · $25 cap</text>
+  <text x="672" y="316" class="pf-sub">quotes expire; the spend cap</text>
+  <text x="672" y="331" class="pf-sub">is clamped at mint, frozen.</text>
+
+  <text x="672" y="359" class="pf-mono">HMAC binds it all</text>
+  <text x="672" y="375" class="pf-sub">payTo·amount·network·msg</text>
+  <text x="672" y="390" class="pf-sub">signed — the amount you</text>
+  <text x="672" y="405" class="pf-sub">approve is the amount that pays.</text>
+
+  <!-- footer -->
+  <line x1="40" y1="452" x2="880" y2="452" class="pf-wire"/>
+  <text x="40" y="478" class="pf-foot">An agent that can spend money is only safe if it can't move a cent on its own.
+    <tspan class="pf-footsub">Once the signed transfer has left, we never silently reverse it — a timeout becomes "pending," never a second charge.</tspan>
+  </text>
+  <text x="40" y="502" class="pf-sub">Inbound, a tiny is paid then serves — and refunds if it delivers nothing. Outbound, it debits first, waits for your tap, and never auto-reverses a broadcast.</text>
+</svg>

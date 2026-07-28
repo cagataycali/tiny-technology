@@ -1,0 +1,45 @@
+{
+  "config": {
+    "chainId": 8470,
+    "londonBlock": 0,
+    "zeroBaseFee": true,
+    "qbft": {
+      "blockperiodseconds": 2,
+      "epochlength": 30000,
+      "requesttimeoutseconds": 4
+    },
+    "shanghaiTime": 0,
+    "_transitions_comment": "The qbft transition's `block` is 1785028028 — a UNIX TIMESTAMP, not a block number, and that is not a typo. Besu registers each qbft fork as a ProtocolSpecAdapter keyed by this number, then adopts the MILESTONE TYPE of the nearest preceding hardfork (ProtocolScheduleBuilder.lambda$initSchedule$0 takes floorEntry and copies its milestoneType). Our nearest preceding hardfork is `shanghaiTime: 0` — a TIME milestone, which we cannot drop because PUSH0 needs Shanghai. So besu reads this field as a timestamp whatever we intend, and a block number here means a 1970 timestamp: contract mode from block 1. That is silent on nodes that already hold the pre-transition blocks (they never re-validate them) and FATAL for anyone syncing from genesis — block 1 is rejected as 'Validators in extra data expected to be empty', the peer is dropped for BREACH_OF_PROTOCOL, and the joiner sits at block 0 forever. 1785028028 is the timestamp of block 51, the first block the founders actually produced in contract mode. Verify with `Protocol schedule created with milestones: [Shanghai:0, Shanghai:<this number>]` in any node's log: a 1970-looking second number is this bug.",
+    "transitions": {
+      "qbft": [
+        {
+          "block": 1785028028,
+          "validatorselectionmode": "contract",
+          "validatorcontractaddress": "0x0165878a594ca255338adfa4d48449f69242eb8f"
+        }
+      ]
+    }
+  },
+  "nonce": "0x0",
+  "timestamp": "0x0",
+  "gasLimit": "0x1c9c380",
+  "difficulty": "0x1",
+  "_mixHash_comment": "The QBFT/IBFT magic value \u2014 ASCII 'ctical byzantine fault tolerance', EXACTLY 32 bytes. Besu rejects any other value outright; a 33rd byte fails with 'Invalid mixHash'.",
+  "mixHash": "0x63746963616c2062797a616e74696e65206661756c7420746f6c6572616e6365",
+  "coinbase": "0x0000000000000000000000000000000000000000",
+  "alloc": {
+    "f39fd6e51aad88f6f4ce6ab8827279cfffb92266": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "70997970c51812dc3a010c7d01b50e0d17dc79c8": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "3c44cdddb6a900fa2b585dd299e03d12fa4293bc": {
+      "balance": "0x21e19e0c9bab2400000"
+    },
+    "90f79bf6eb2c4f870365e785982e1f101e93b906": {
+      "balance": "0x21e19e0c9bab2400000"
+    }
+  },
+  "extraData": "0xf87aa00000000000000000000000000000000000000000000000000000000000000000f85494ff7054f9721d791182f9c2fd385f5ecab8c525e99413bd8be870424bbb97ad87ee0556b987c96e960794a078a348c6dd9a9b66465642b1a1de4b6d4b1bcc946611e04336c4ecffd7fc626a1c20f212ae379143c080c0"
+}

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher long-press shortcuts — the Android analog to iOS's install-time
+  App Shortcuts. Each fires a tinyapp:// deep link into MainActivity, reusing
+  the same routes the home-screen widgets use (voice/ask/memory/messages).
+  Ranked top-to-bottom: voice, ask, memories, messages.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="voice"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_voice"
+        android:shortcutShortLabel="@string/shortcut_voice_short"
+        android:shortcutLongLabel="@string/shortcut_voice_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="tinyapp://voice"
+            android:targetPackage="technology.tiny.app"
+            android:targetClass="technology.tiny.app.MainActivity" />
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="ask"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_ask"
+        android:shortcutShortLabel="@string/shortcut_ask_short"
+        android:shortcutLongLabel="@string/shortcut_ask_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="tinyapp://ask"
+            android:targetPackage="technology.tiny.app"
+            android:targetClass="technology.tiny.app.MainActivity" />
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="memory"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_memory"
+        android:shortcutShortLabel="@string/shortcut_memory_short"
+        android:shortcutLongLabel="@string/shortcut_memory_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="tinyapp://memory"
+            android:targetPackage="technology.tiny.app"
+            android:targetClass="technology.tiny.app.MainActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="messages"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_messages"
+        android:shortcutShortLabel="@string/shortcut_messages_short"
+        android:shortcutLongLabel="@string/shortcut_messages_long">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:data="tinyapp://messages"
+            android:targetPackage="technology.tiny.app"
+            android:targetClass="technology.tiny.app.MainActivity" />
+    </shortcut>
+</shortcuts>

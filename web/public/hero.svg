@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1500 500" preserveAspectRatio="xMidYMid slice">
+  <!-- tiny.technology animated hero - neon green on black, SMIL-animated
+       (SMIL runs even when the SVG is used as a CSS background-image) -->
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.55"/>
+      <stop offset="45%" stop-color="#00FF88" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow2" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00ccff" stop-opacity="0.35"/>
+      <stop offset="100%" stop-color="#00ccff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#000000" stop-opacity="0.85"/>
+    </linearGradient>
+    <pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse">
+      <path d="M 60 0 L 0 0 0 60" fill="none" stroke="#00FF88" stroke-opacity="0.07" stroke-width="1"/>
+    </pattern>
+  </defs>
+
+  <rect width="1500" height="500" fill="#020604"/>
+  <rect width="1500" height="500" fill="url(#grid)"/>
+
+  <!-- drifting glow orbs -->
+  <circle r="260" fill="url(#glow)">
+    <animateMotion dur="26s" repeatCount="indefinite"
+      path="M 300 180 C 600 60, 900 320, 1200 180 C 900 40, 600 340, 300 180 Z"/>
+    <animate attributeName="opacity" values="0.8;1;0.6;0.8" dur="9s" repeatCount="indefinite"/>
+  </circle>
+  <circle r="200" fill="url(#glow2)">
+    <animateMotion dur="34s" repeatCount="indefinite"
+      path="M 1150 320 C 800 420, 450 120, 200 300 C 550 460, 900 100, 1150 320 Z"/>
+  </circle>
+  <circle r="150" fill="url(#glow)">
+    <animateMotion dur="19s" repeatCount="indefinite"
+      path="M 750 400 C 1000 300, 1100 150, 750 100 C 400 150, 500 300, 750 400 Z"/>
+    <animate attributeName="opacity" values="0.5;0.9;0.5" dur="7s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- constellation nodes: an AI being grown by chat -->
+  <g stroke="#00FF88" stroke-opacity="0.35" stroke-width="1">
+    <line x1="430" y1="150" x2="620" y2="230"/>
+    <line x1="620" y1="230" x2="620" y2="120"/>
+    <line x1="620" y1="230" x2="820" y2="180"/>
+    <line x1="820" y1="180" x2="980" y2="270"/>
+    <line x1="820" y1="180" x2="900" y2="110"/>
+    <line x1="620" y1="230" x2="700" y2="340"/>
+  </g>
+  <g fill="#00FF88">
+    <circle cx="430" cy="150" r="4"><animate attributeName="r" values="3;5;3" dur="3s" repeatCount="indefinite"/></circle>
+    <circle cx="620" cy="230" r="6"><animate attributeName="r" values="5;8;5" dur="4s" repeatCount="indefinite"/><animate attributeName="fill-opacity" values="1;0.6;1" dur="4s" repeatCount="indefinite"/></circle>
+    <circle cx="820" cy="180" r="5"><animate attributeName="r" values="4;6;4" dur="3.4s" repeatCount="indefinite"/></circle>
+    <circle cx="980" cy="270" r="4"><animate attributeName="r" values="3;5;3" dur="2.8s" repeatCount="indefinite"/></circle>
+    <circle cx="900" cy="110" r="3.5"><animate attributeName="fill-opacity" values="0.5;1;0.5" dur="3.2s" repeatCount="indefinite"/></circle>
+    <circle cx="700" cy="340" r="4"><animate attributeName="fill-opacity" values="1;0.4;1" dur="2.6s" repeatCount="indefinite"/></circle>
+    <circle cx="620" cy="120" r="3.5"><animate attributeName="r" values="3;4.5;3" dur="3.8s" repeatCount="indefinite"/></circle>
+  </g>
+
+  <!-- pulses travelling the edges: messages becoming intelligence -->
+  <circle r="3.5" fill="#ffffff">
+    <animateMotion dur="4s" repeatCount="indefinite" path="M 430 150 L 620 230 L 820 180 L 980 270"/>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle r="3" fill="#ffffff">
+    <animateMotion dur="5.2s" begin="1.4s" repeatCount="indefinite" path="M 700 340 L 620 230 L 620 120"/>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="5.2s" begin="1.4s" repeatCount="indefinite"/>
+  </circle>
+  <circle r="3" fill="#00FF88">
+    <animateMotion dur="4.6s" begin="2.2s" repeatCount="indefinite" path="M 980 270 L 820 180 L 900 110"/>
+    <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.1;0.9;1" dur="4.6s" begin="2.2s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- floating sparks -->
+  <g fill="#00FF88">
+    <circle cx="180" cy="380" r="2"><animate attributeName="cy" values="380;90;380" dur="22s" repeatCount="indefinite"/><animate attributeName="fill-opacity" values="0;0.8;0" dur="22s" repeatCount="indefinite"/></circle>
+    <circle cx="1320" cy="120" r="2.5"><animate attributeName="cy" values="120;420;120" dur="28s" repeatCount="indefinite"/><animate attributeName="fill-opacity" values="0;0.7;0" dur="28s" repeatCount="indefinite"/></circle>
+    <circle cx="1080" cy="420" r="1.8"><animate attributeName="cy" values="420;60;420" dur="18s" repeatCount="indefinite"/><animate attributeName="fill-opacity" values="0;0.9;0" dur="18s" repeatCount="indefinite"/></circle>
+    <circle cx="520" cy="60" r="1.6"><animate attributeName="cy" values="60;440;60" dur="25s" repeatCount="indefinite"/><animate attributeName="fill-opacity" values="0;0.6;0" dur="25s" repeatCount="indefinite"/></circle>
+  </g>
+
+  <!-- horizon sweep -->
+  <rect x="-500" y="0" width="360" height="500" fill="#00FF88" opacity="0.05" transform="skewX(-18)">
+    <animate attributeName="x" values="-500;1700" dur="12s" repeatCount="indefinite"/>
+  </rect>
+
+  <!-- bottom fade so the page content sits comfortably on top -->
+  <rect y="300" width="1500" height="200" fill="url(#fade)"/>
+</svg>

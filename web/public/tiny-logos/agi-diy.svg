@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="agi-diy">
+  <!-- agi-diy — "Build your own AGI. In your browser." A browser window whose agent writes its
+       own tool: a { } brace-brain self-assembling inside. Punk violet. -->
+  <rect width="120" height="120" rx="26" fill="#120a1f"/>
+  <!-- browser chrome -->
+  <rect x="22" y="26" width="76" height="68" rx="10" fill="none" stroke="#a855f7" stroke-width="4"/>
+  <line x1="22" y1="40" x2="98" y2="40" stroke="#a855f7" stroke-width="4"/>
+  <circle cx="31" cy="33" r="2.6" fill="#c084fc"/><circle cx="39" cy="33" r="2.6" fill="#c084fc"/><circle cx="47" cy="33" r="2.6" fill="#c084fc"/>
+  <!-- self-writing braces (the agent authoring its own tool) -->
+  <g fill="#e9d5ff" font-family="ui-monospace,Menlo,monospace" font-weight="700" font-size="30">
+    <text x="40" y="78">{ }
+      <animate attributeName="opacity" values="0.3;1;0.3" dur="2.4s" repeatCount="indefinite"/>
+    </text>
+  </g>
+  <!-- runtime cursor spark inside braces -->
+  <circle cx="60" cy="68" r="3" fill="#f0abfc">
+    <animate attributeName="r" values="2;5;2" dur="1.2s" repeatCount="indefinite"/>
+    <animate attributeName="opacity" values="1;0.2;1" dur="1.2s" repeatCount="indefinite"/>
+  </circle>
+</svg>

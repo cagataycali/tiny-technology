@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="xss-listener">
+  <!-- xss-listener 🕷️ — pentest XSS exfil listener, ./c²'s biggest OSS hit. A spider on a web
+       that twitches when "new baby's on board." Neon-green hacker vibe. -->
+  <rect width="120" height="120" rx="26" fill="#0a0a0a"/>
+  <!-- web -->
+  <g stroke="#00ff88" stroke-width="1.6" fill="none" opacity="0.5">
+    <line x1="60" y1="16" x2="60" y2="104"/><line x1="20" y1="60" x2="100" y2="60"/>
+    <line x1="30" y1="30" x2="90" y2="90"/><line x1="90" y1="30" x2="30" y2="90"/>
+    <path d="M60 30 L78 42 L84 60 L74 80 L60 88 L46 80 L36 60 L42 42 Z"/>
+    <path d="M60 44 L70 52 L73 62 L67 74 L60 78 L53 74 L47 62 L50 52 Z"/>
+  </g>
+  <!-- spider, gently bobbing on a thread -->
+  <g>
+    <animateTransform attributeName="transform" type="translate" values="0 -3;0 4;0 -3" dur="2.4s" repeatCount="indefinite"/>
+    <g stroke="#00ff88" stroke-width="3" stroke-linecap="round">
+      <path d="M60 60 q-14 -6 -22 -16"/><path d="M60 60 q-16 0 -24 8"/>
+      <path d="M60 60 q-14 8 -18 20"/><path d="M60 60 q14 -6 22 -16"/>
+      <path d="M60 60 q16 0 24 8"/><path d="M60 60 q14 8 18 20"/>
+    </g>
+    <ellipse cx="60" cy="62" rx="10" ry="12" fill="#00ff88"/>
+    <circle cx="60" cy="50" r="7" fill="#00ff88"/>
+    <circle cx="57" cy="49" r="1.8" fill="#0a0a0a"/><circle cx="63" cy="49" r="1.8" fill="#0a0a0a"/>
+  </g>
+</svg>

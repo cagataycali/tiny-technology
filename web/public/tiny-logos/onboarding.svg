@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="onboarding">
+  <!-- onboarding — the welcoming committee. An open door with warm light spilling out and a
+       sprout stepping through. Brand green, "come on in" energy. -->
+  <defs>
+    <linearGradient id="o-light" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.55"/><stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="26" fill="#0a0a0a"/>
+  <!-- doorway -->
+  <path d="M42 30h36v66H42z" fill="none" stroke="#00FF88" stroke-width="4"/>
+  <!-- open door leaf -->
+  <path d="M42 30 L26 22 v76 l16 -6z" fill="#00b45f">
+    <animateTransform attributeName="transform" type="skewY" values="0;-2;0" dur="5s" repeatCount="indefinite" additive="sum"/>
+  </path>
+  <!-- light spilling out -->
+  <path d="M78 34 L110 24 v76 l-32 -6z" fill="url(#o-light)">
+    <animate attributeName="opacity" values="0.6;1;0.6" dur="3.5s" repeatCount="indefinite"/>
+  </path>
+  <!-- a sprout waiting at the threshold -->
+  <g stroke="#7dffc0" stroke-width="4" stroke-linecap="round" fill="none">
+    <line x1="60" y1="92" x2="60" y2="72"/>
+    <path d="M60 78 q-10 -2 -12 -12 q10 0 12 8"><animate attributeName="opacity" values="0.7;1;0.7" dur="3s" repeatCount="indefinite"/></path>
+    <path d="M60 74 q10 -2 12 -12 q-10 0 -12 8"/>
+  </g>
+</svg>

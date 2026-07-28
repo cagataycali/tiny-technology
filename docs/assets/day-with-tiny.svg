@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="dw-fw" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="dw-sun" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <linearGradient id="dw-sky" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#06160E"/>
+      <stop offset="50%" stop-color="#0a2216"/>
+      <stop offset="100%" stop-color="#050f18"/>
+    </linearGradient>
+    <style>
+      .dw-lbl{fill:#E8FFF3;font-size:13px;font-weight:700}
+      .dw-sub{fill:#9FDFC0;font-size:10px}
+      .dw-card{fill:#06160E;stroke:#00FF88;stroke-width:1.4}
+      .dw-time{fill:#7CFFC4;font-size:11px;font-weight:800;letter-spacing:0.04em}
+      .dw-name{fill:#E8FFF3;font-size:12.5px;font-weight:700}
+      .dw-desc{fill:#CFEFDD;font-size:10px}
+      .dw-attr{fill:#7fae97;font-size:9px;font-weight:700;letter-spacing:0.06em}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+  <text x="460" y="30" text-anchor="middle" class="dw-lbl" font-size="18">A day with your tiny</text>
+  <text x="460" y="49" text-anchor="middle" class="dw-sub">one entity, living your day with you across every device — you never opened an app, submitted to a store, or wrote a line of code</text>
+
+  <!-- the day arc: dawn -> noon -> dusk -->
+  <path id="dw-arc" d="M70,300 Q460,120 850,300" fill="none" stroke="url(#dw-sky)" stroke-width="3"/>
+  <path d="M70,300 Q460,120 850,300" fill="none" stroke="#00FF8833" stroke-width="1.2" stroke-dasharray="3 6"/>
+  <!-- the sun travels the arc across the day -->
+  <circle r="9" fill="url(#dw-sun)">
+    <animateMotion dur="9s" repeatCount="indefinite" path="M70,300 Q460,120 850,300"/>
+  </circle>
+  <text x="70" y="330" text-anchor="middle" class="dw-sub">🌅 dawn</text>
+  <text x="460" y="150" text-anchor="middle" class="dw-sub">☀️ midday</text>
+  <text x="850" y="330" text-anchor="middle" class="dw-sub">🌙 night</text>
+
+  <!-- ===== 5 MOMENTS across the day, each a different attribute ===== -->
+  <!-- 07:00 morning — Body: fleet haptics + scheduled job -->
+  <g>
+    <rect class="dw-card" x="40" y="352" width="164" height="128" rx="12"/>
+    <text x="54" y="374" class="dw-time">07:00 · MORNING</text>
+    <text x="54" y="394" class="dw-name">⌚ Coach</text>
+    <text x="54" y="412" class="dw-desc">buzzes your watch and</text>
+    <text x="54" y="426" class="dw-desc">reads back yesterday's</text>
+    <text x="54" y="440" class="dw-desc">wins before you're up.</text>
+    <text x="54" y="466" class="dw-attr">BODY · SCHEDULED JOB</text>
+    <line x1="122" y1="352" x2="122" y2="316" stroke="#00FF8855" stroke-width="1.2" marker-end="url(#dw-fw)"/>
+  </g>
+
+  <!-- 12:30 midday — Body on-device image + Memory -->
+  <g>
+    <rect class="dw-card" x="216" y="352" width="164" height="128" rx="12"/>
+    <text x="230" y="374" class="dw-time">12:30 · MIDDAY</text>
+    <text x="230" y="394" class="dw-name">📸 Pantry</text>
+    <text x="230" y="412" class="dw-desc">snap the fridge — it reads</text>
+    <text x="230" y="426" class="dw-desc">it on-device and suggests</text>
+    <text x="230" y="440" class="dw-desc">lunch from what's there.</text>
+    <text x="230" y="466" class="dw-attr">ON-DEVICE · MEMORY</text>
+    <line x1="298" y1="352" x2="298" y2="228" stroke="#00FF8855" stroke-width="1.2" marker-end="url(#dw-fw)"/>
+  </g>
+
+  <!-- 15:00 afternoon — Economy: earns while you're away -->
+  <g>
+    <rect class="dw-card" x="392" y="352" width="164" height="128" rx="12"/>
+    <text x="406" y="374" class="dw-time">15:00 · AFTERNOON</text>
+    <text x="406" y="394" class="dw-name">💵 Advisor</text>
+    <text x="406" y="412" class="dw-desc">a stranger pays it $2 in</text>
+    <text x="406" y="426" class="dw-desc">USDC for your expertise</text>
+    <text x="406" y="440" class="dw-desc">while you're in a meeting.</text>
+    <text x="406" y="466" class="dw-attr">ECONOMY · x402 IN</text>
+    <line x1="474" y1="352" x2="474" y2="176" stroke="#00FF8855" stroke-width="1.2" marker-end="url(#dw-fw)"/>
+  </g>
+
+  <!-- 19:00 evening — Memory: bitemporal revise + conflict -->
+  <g>
+    <rect class="dw-card" x="568" y="352" width="164" height="128" rx="12"/>
+    <text x="582" y="374" class="dw-time">19:00 · EVENING</text>
+    <text x="582" y="394" class="dw-name">🧠 remembers</text>
+    <text x="582" y="412" class="dw-desc">you mention a new allergy</text>
+    <text x="582" y="426" class="dw-desc">— it revises the old fact,</text>
+    <text x="582" y="440" class="dw-desc">keeps history, flags it.</text>
+    <text x="582" y="466" class="dw-attr">MEMORY · BITEMPORAL</text>
+    <line x1="650" y1="352" x2="650" y2="228" stroke="#00FF8855" stroke-width="1.2" marker-end="url(#dw-fw)"/>
+  </g>
+
+  <!-- 22:30 night — Body on-device, no cloud -->
+  <g>
+    <rect class="dw-card" x="744" y="352" width="164" height="128" rx="12"/>
+    <text x="758" y="374" class="dw-time">22:30 · NIGHT</text>
+    <text x="758" y="394" class="dw-name">🌙 Nightlight</text>
+    <text x="758" y="412" class="dw-desc">speaks softly to your kid,</text>
+    <text x="758" y="426" class="dw-desc">entirely on the device —</text>
+    <text x="758" y="440" class="dw-desc">no cloud round-trip.</text>
+    <text x="758" y="466" class="dw-attr">BODY · NEURAL ENGINE</text>
+    <line x1="826" y1="352" x2="826" y2="316" stroke="#00FF8855" stroke-width="1.2" marker-end="url(#dw-fw)"/>
+  </g>
+
+  <text x="460" y="505" text-anchor="middle" fill="#3f6f57" font-size="11">Society all day underneath: it follows the tinys you trust, and every fact it learns writes home to one memory — synced across your phone, watch, and the web.</text>
+</svg>

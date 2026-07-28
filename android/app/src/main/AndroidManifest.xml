@@ -1,0 +1,275 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- One-frame screen capture for the `screenshot` device tool (iOS ReplayKit
+         parity). The system MediaProjection consent dialog is the per-capture prompt. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Live 📞 call survives screen-off/backgrounding (CallService; iOS gets
+         this from the `audio` UIBackgroundMode). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Keep the relay node alive across reboots so the phone stays reachable. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- Nearby-device BLE scan (iOS Bluetooth.swift parity). API 31+ uses the
+         granular BLUETOOTH_SCAN with neverForLocation (we don't derive location).
+         API 29–30 fall back to the legacy admin + FINE_LOCATION scan gate. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_ADMIN"
+        android:maxSdkVersion="30" />
+    <!-- 🗺️ Maps + location context (agi-diy port): FINE was capped at API 30 as
+         the legacy BLE-scan gate; the maps feature lifts the cap. Requested
+         lazily — the settings toggle / map screen ask, never app launch.
+         COARSE listed so users can grant "approximate" and everything still
+         works (the agent context is 4-decimal coarse anyway). -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Live motion snapshot (iOS Motion.swift parity): accelerometer/gravity/
+         rotation are permission-free; the step counter needs ACTIVITY_RECOGNITION
+         (requested lazily — degrades to no step line if not granted). -->
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+
+    <application
+        android:name=".TinyApp"
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="tiny"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
+        android:theme="@style/Theme.Tiny">
+
+        <!-- Maps JS/SDK browser-class key (referrer/package-restricted in the
+             Google Cloud console) — same shared key the web client falls back to. -->
+        <meta-data
+            android:name="com.google.android.geo.API_KEY"
+            android:value="AIzaSyDR7Q8EdLxM2u4OY5MsNJCDoMqk48yzstU" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Tiny">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Native auth callback: /auth/cli?scheme=tinyapp redirects to tinyapp://auth?code&state -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tinyapp" android:host="auth" />
+            </intent-filter>
+            <!-- Widget deep links: tinyapp://ask|voice|memory|messages -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tinyapp" android:host="ask" />
+                <data android:scheme="tinyapp" android:host="voice" />
+                <data android:scheme="tinyapp" android:host="memory" />
+                <data android:scheme="tinyapp" android:host="messages" />
+                <!-- Dynamic recent-tiny shortcuts: tinyapp://tiny?name=<slug> -->
+                <data android:scheme="tinyapp" android:host="tiny" />
+            </intent-filter>
+            <!-- Share target: any app's "Share" → tiny seeds the composer (iOS has
+                 no share extension — an Android-native reach). URLs/plain text ride
+                 EXTRA_TEXT (seed the composer). image/* attaches shared photo(s), and
+                 the document mimes attach shared files (PDF/CSV/DOCX/XLSX/HTML/MD/JSON/
+                 XML) — both matching the in-app picker's DOC_MIME_TYPES. Concrete mimes
+                 (not */*) so tiny isn't offered for arbitrary unsupported file types.
+                 SEND_MULTIPLE = several photos/files in one share. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/csv" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="text/xml" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.ms-excel" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+                <data android:mimeType="text/csv" />
+                <data android:mimeType="text/markdown" />
+                <data android:mimeType="text/html" />
+                <data android:mimeType="text/xml" />
+                <data android:mimeType="application/xml" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="application/msword" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.wordprocessingml.document" />
+                <data android:mimeType="application/vnd.ms-excel" />
+                <data android:mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" />
+            </intent-filter>
+            <!-- Text-selection toolbar: highlight anywhere → tiny gets the selection. -->
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <!-- Launcher long-press shortcuts (≈ iOS App Shortcuts) -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <!-- Home-screen widgets (Glance). App writes WidgetStore; widgets read-only. -->
+        <receiver
+            android:name=".widget.TinyStatusReceiver"
+            android:exported="true"
+            android:label="tiny fleet">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_status" />
+        </receiver>
+        <receiver
+            android:name=".widget.TinyLastAnswerReceiver"
+            android:exported="true"
+            android:label="tiny · last answer">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_last_answer" />
+        </receiver>
+        <receiver
+            android:name=".widget.TinyMemoryReceiver"
+            android:exported="true"
+            android:label="tiny · memories">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_memory" />
+        </receiver>
+        <receiver
+            android:name=".widget.TinyAskReceiver"
+            android:exported="true"
+            android:label="ask tiny">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_ask" />
+        </receiver>
+        <receiver
+            android:name=".widget.TinyBriefingReceiver"
+            android:exported="true"
+            android:label="tiny · briefing">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_briefing" />
+        </receiver>
+
+        <!-- DM notification quick-reply (RemoteInput) handler -->
+        <receiver
+            android:name=".fleet.DmReplyReceiver"
+            android:exported="false" />
+
+        <!-- Always-on fleet node: keeps heartbeat + 5s relay alive when backgrounded -->
+        <service
+            android:name=".fleet.RelayService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- Stream guard: foreground priority only while a chat reply streams, so
+             backgrounding can't kill the turn mid-answer. Promotes the AgentLive
+             per-turn chip (id 43) as its mandatory notification — no new chrome. -->
+        <service
+            android:name=".fleet.StreamGuardService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!-- `screenshot` device tool: a transparent activity fires the system
+             MediaProjection consent dialog (the per-capture "allow?" prompt), then
+             a mediaProjection foreground service grabs one frame → /api/media →
+             tool-result. iOS uses ReplayKit for the same round-trip. -->
+        <activity
+            android:name=".tools.ScreenshotConsentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
+        <service
+            android:name=".tools.ScreenshotService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- Live 📞 call: carries the mic+playback foreground privilege while a
+             call runs so screen-off/backgrounding can't cut AudioRecord.
+             VoiceCall owns the actual WS + audio; this is privilege + the
+             "in call — tap to return" notification only. -->
+        <service
+            android:name=".voice.CallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone|mediaPlayback" />
+
+        <!-- Quick Settings tile: one tap opens voice mode (iOS Control-Center parity) -->
+        <service
+            android:name=".fleet.AskTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_shortcut_voice"
+            android:label="ask tiny"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+
+        <!-- Re-arm the relay node after reboot if the user enabled always-on -->
+        <receiver
+            android:name=".fleet.BootReceiver"
+            android:exported="true"
+            android:enabled="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+
+</manifest>

@@ -1,0 +1,104 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="io-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <marker id="io-mk2" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#7CFFC4"/>
+    </marker>
+    <radialGradient id="io-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .io-title{fill:#00FF88;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+      .io-kicker{fill:#9FDFC0;font-size:12px}
+      .io-sect{fill:#7CFFC4;font-size:11px;font-weight:700;letter-spacing:1px}
+      .io-agent{fill:#06160E;stroke:#00FF8844;stroke-width:1.3}
+      .io-agenttxt{fill:#E8FFF3;font-size:12px;font-weight:600}
+      .io-in{fill:#0A1711;stroke:#1d5c3f;stroke-width:1.3}
+      .io-intxt{fill:#CFEFE0;font-size:11px;font-weight:600}
+      .io-wire{stroke:#00FF8866;stroke-width:1.4;fill:none}
+      .io-wire-in{stroke:#7CFFC4;stroke-width:1.4;fill:none;stroke-dasharray:5 4}
+      .io-corelbl{fill:#020604;font-size:13px;font-weight:800}
+      .io-coresub{fill:#053;font-size:9.5px;font-weight:700}
+      .io-note{fill:#9FDFC0;font-size:10.5px}
+      .io-tick{stroke:#00FF8822;stroke-width:1}
+      .io-foot{fill:#7CFFC4;font-size:12px;font-weight:600}
+      .io-footsub{fill:#9FDFC0;font-size:10.5px}
+      .io-mem{fill:#7CFFC4;font-size:10px;font-weight:700;letter-spacing:0.5px}
+      .io-pill{fill:#0A2417;stroke:#00FF88;stroke-width:1}
+      .io-pilltxt{fill:#7CFFC4;font-size:10px;font-weight:700}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+
+  <!-- header -->
+  <text x="40" y="46" class="io-title">One tiny, every agent — the protocol is the distribution</text>
+  <text x="40" y="67" class="io-kicker">Mount one durable identity into the agents you already run; a fact learned in one is recalled in them all. No app store — just MCP.</text>
+
+  <!-- center: the tiny -->
+  <circle cx="460" cy="262" r="48" fill="url(#io-orb)"/>
+  <text x="460" y="258" text-anchor="middle" class="io-corelbl">your tiny</text>
+  <text x="460" y="274" text-anchor="middle" class="io-coresub">one identity · one memory</text>
+
+  <!-- ===== LEFT: agents you already run (mount via MCP) ===== -->
+  <text x="56" y="104" class="io-sect">MOUNT — claude mcp add tiny -- npx -y tiny-tech</text>
+  <g>
+    <rect x="40" y="120" width="150" height="34" rx="10" class="io-agent"/><text x="115" y="142" text-anchor="middle" class="io-agenttxt">Claude Code</text>
+    <rect x="40" y="164" width="150" height="34" rx="10" class="io-agent"/><text x="115" y="186" text-anchor="middle" class="io-agenttxt">Codex</text>
+    <rect x="40" y="208" width="150" height="34" rx="10" class="io-agent"/><text x="115" y="230" text-anchor="middle" class="io-agenttxt">Cursor</text>
+    <rect x="40" y="252" width="150" height="34" rx="10" class="io-agent"/><text x="115" y="274" text-anchor="middle" class="io-agenttxt">Strands</text>
+    <rect x="40" y="296" width="150" height="34" rx="10" class="io-agent"/><text x="115" y="318" text-anchor="middle" class="io-agenttxt">any stdio MCP client</text>
+  </g>
+  <!-- wires from agents into the core (bidirectional feel) -->
+  <path d="M190,137 C300,150 360,215 414,250" class="io-wire" marker-end="url(#io-mk)"/>
+  <path d="M190,181 C300,195 350,225 412,256" class="io-wire" marker-end="url(#io-mk)"/>
+  <path d="M190,269 C300,268 350,266 410,264" class="io-wire" marker-end="url(#io-mk)"/>
+  <path d="M190,313 C300,300 355,285 412,272" class="io-wire" marker-end="url(#io-mk)"/>
+  <!-- memory-travels label along the mount lane -->
+  <text x="115" y="352" text-anchor="middle" class="io-mem">a fact learned here…</text>
+  <text x="115" y="367" text-anchor="middle" class="io-note">tiny_learn · tiny_recall · tiny-context prompt</text>
+
+  <!-- ===== RIGHT: called + paid by other agents ===== -->
+  <text x="864" y="104" text-anchor="end" class="io-sect">BE CALLED &amp; PAID — x402 · ERC-8004 · ask_tiny</text>
+  <g>
+    <rect x="726" y="132" width="150" height="40" rx="10" class="io-agent"/>
+    <text x="801" y="150" text-anchor="middle" class="io-agenttxt">other agents</text>
+    <text x="801" y="165" text-anchor="middle" class="io-note">discover · trust · pay</text>
+    <rect x="726" y="184" width="150" height="40" rx="10" class="io-agent"/>
+    <text x="801" y="202" text-anchor="middle" class="io-agenttxt">a peer tiny</text>
+    <text x="801" y="217" text-anchor="middle" class="io-note">ask_tiny → consulted edge</text>
+  </g>
+  <!-- wires from core out to the economy -->
+  <path d="M508,258 C580,235 650,190 724,168" class="io-wire" marker-end="url(#io-mk)"/>
+  <path d="M508,266 C580,240 650,210 724,204" class="io-wire" marker-end="url(#io-mk)"/>
+  <text x="801" y="250" text-anchor="middle" class="io-mem">…is recalled everywhere.</text>
+  <text x="801" y="265" text-anchor="middle" class="io-note">confirm-every-payment · flat $0.001 fee</text>
+
+  <!-- ===== BOTTOM-CENTER: bring your own APIs into the tiny ===== -->
+  <text x="460" y="356" text-anchor="middle" class="io-sect">EXPOSE YOUR OWN APIS → THEY MOUNT AS TOOLS EVERYWHERE</text>
+  <g>
+    <rect x="270" y="368" width="120" height="34" rx="10" class="io-in"/><text x="330" y="390" text-anchor="middle" class="io-intxt">any OpenAPI</text>
+    <rect x="400" y="368" width="120" height="34" rx="10" class="io-in"/><text x="460" y="390" text-anchor="middle" class="io-intxt">remote MCP</text>
+    <rect x="530" y="368" width="120" height="34" rx="10" class="io-in"/><text x="590" y="390" text-anchor="middle" class="io-intxt">forged my_* tools</text>
+  </g>
+  <!-- wires from APIs up into the core -->
+  <path d="M330,368 C360,340 400,315 440,300" class="io-wire-in" marker-end="url(#io-mk2)"/>
+  <path d="M460,368 C460,345 460,330 460,314" class="io-wire-in" marker-end="url(#io-mk2)"/>
+  <path d="M590,368 C560,340 520,315 480,300" class="io-wire-in" marker-end="url(#io-mk2)"/>
+  <text x="460" y="418" text-anchor="middle" class="io-note">sandboxed node:vm behind an SSRF guard · one hop gives an external agent the whole toolset via tiny_chat</text>
+
+  <!-- ===== consequence pills ===== -->
+  <g>
+    <rect x="150" y="432" width="176" height="24" rx="12" class="io-pill"/><text x="238" y="448" text-anchor="middle" class="io-pilltxt">keep your editor + keys</text>
+    <rect x="336" y="432" width="200" height="24" rx="12" class="io-pill"/><text x="436" y="448" text-anchor="middle" class="io-pilltxt">memory travels across tools</text>
+    <rect x="546" y="432" width="224" height="24" rx="12" class="io-pill"/><text x="658" y="448" text-anchor="middle" class="io-pilltxt">a shared identity, not another SaaS</text>
+  </g>
+
+  <!-- footer insight -->
+  <line x1="40" y1="474" x2="880" y2="474" class="io-tick"/>
+  <text x="40" y="500" class="io-foot">Distribution isn't an app store you gate —
+    <tspan class="io-footsub">it's the protocol every agent already speaks. One line of MCP, and your tiny is a durable colleague your whole stack shares.</tspan>
+  </text>
+</svg>

@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="demo-gordon">
+  <!-- demo-gordon — blunt Michelin chef. A chef's toque over a screaming-hot pan with a leaping
+       flame. Fiery red. Warm chaos. -->
+  <rect width="120" height="120" rx="26" fill="#0a0a0a"/>
+  <!-- chef hat -->
+  <path d="M40 44a14 14 0 0 1 28-6 13 13 0 0 1 18 10 12 12 0 0 1-6 22H44a12 12 0 0 1-4-26z" fill="#f5f5f5"/>
+  <rect x="46" y="66" width="34" height="10" rx="3" fill="#e0e0e0"/>
+  <!-- pan -->
+  <ellipse cx="60" cy="90" rx="26" ry="7" fill="#2a2a2a"/>
+  <rect x="84" y="87" width="22" height="6" rx="3" fill="#2a2a2a"/>
+  <!-- leaping flame -->
+  <g>
+    <path d="M60 88 q-9 -12 0 -22 q4 8 8 4 q4 10 -2 16 q6 -2 6 -8 q6 12 -4 18z" fill="#ff3b30">
+      <animate attributeName="d"
+        values="M60 88 q-9 -12 0 -22 q4 8 8 4 q4 10 -2 16 q6 -2 6 -8 q6 12 -4 18z;M60 88 q-7 -14 1 -24 q3 9 8 5 q3 11 -3 17 q7 -3 6 -9 q7 13 -5 20z;M60 88 q-9 -12 0 -22 q4 8 8 4 q4 10 -2 16 q6 -2 6 -8 q6 12 -4 18z"
+        dur="0.7s" repeatCount="indefinite"/>
+    </path>
+    <path d="M60 88 q-4 -8 0 -14 q3 5 5 2 q2 7 -1 12z" fill="#ffd23f">
+      <animate attributeName="opacity" values="0.7;1;0.7" dur="0.5s" repeatCount="indefinite"/>
+    </path>
+  </g>
+</svg>

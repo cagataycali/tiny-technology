@@ -1,0 +1,71 @@
+-- 🔍 WHICH instrument escaped — the fact that makes a frozen reservation resolvable.
+--
+-- Migration 0025 recorded THAT a signed EIP-3009 authorization left us, and the
+-- reverse refuses any ref carrying that mark. Correct, and the safe direction:
+-- refusing to refund costs a support ticket, refunding a landing payment costs
+-- the float. But 0025 stopped one field short of being reconcilable.
+--
+-- A `spend_sent` row said "ref x402pay:… escaped, pointed at payee P". It did NOT
+-- say which SIGNATURE escaped — and the answer wasn't recoverable from anywhere
+-- else, because the payer route generated the nonce inline at the signing site
+-- (`nonce: randomNonce()`) and discarded it the moment the header was encoded.
+-- Nothing in the ledger, the mark, or any log line named it.
+--
+-- That is what made the freeze PERMANENT rather than pending. The design leans on
+-- a reconciler ("it will be reconciled" is what three of the payer route's own
+-- 202 bodies promise the user), and the reconciler's whole job is to ask an
+-- authority whether the instrument was redeemed. On this chain that question has
+-- a crisp, cheap, first-class answer — EIP-3009 keeps a redemption bit:
+--
+--   authorizationState(from, nonce) → bool     (chain/contracts/TinyUSDC.sol:31)
+--
+-- true  ⟹ this exact authorization was consumed. The transfer happened (or the
+--          payer cancelled it, which is equally final: it can never settle now).
+-- false ⟹ it has NOT been consumed. Combined with `validBefore` in the past, that
+--          is a PROOF of not_settled — the one verdict that is safe to refund,
+--          and the only sound way to expire an `unknown`.
+--
+-- Verified live on chain 8469 before this migration was written: the real settled
+-- payment in block 13745 (payer 0xce13…d887, nonce 0xbdd7…a819) answers `0x…01`,
+-- while an unused nonce for the same payer answers `0x…00`. `eth_call` is on the
+-- public proxy's allowlist (chain/rpc-proxy.mjs), so the worker can ask it.
+--
+-- ⚠️ THE POINT: reconciliation does not chase a tx HASH. A hash is the wrong key
+-- here and always was — the payer route never learns one (the payee submits the
+-- transfer, not us), a hash may not exist yet while the instrument is still live,
+-- and c48 showed a hash can exist for a transaction that never reached a node.
+-- The bearer instrument's own identity is the durable key, and it is knowable at
+-- signing time with certainty. So the fix is to WRITE DOWN what we signed, in the
+-- same breath as recording that we sent it.
+--
+-- `validBefore` rides along because it is the only thing that lets absence be
+-- read as a verdict rather than as "not yet". It is signed INTO the payload, so
+-- past that timestamp the instrument is dead by the contract's own `require`
+-- (TinyUSDC.sol:144 `block.timestamp < validBefore`) — no policy of ours, no
+-- timeout we picked, nothing to tune. Before it, absence means keep waiting.
+--
+-- Nullable, not NOT NULL, and no backfill: rows written by the pre-0026 payer
+-- route genuinely do not know their nonce, and inventing a value would make an
+-- unresolvable row look resolvable — the worst possible direction for a guard
+-- whose entire value is that it fails closed. A NULL nonce means exactly "this
+-- one predates identity capture; a human must resolve it", which is the truth.
+-- The reconciler must therefore SELECT on `nonce IS NOT NULL` and never assume.
+--
+-- ALTER rather than a new table (the 0020 precedent): these three columns are
+-- attributes OF the mark, written by the same request in the same statement, and
+-- a second table keyed on the same `ref` would be two writes that can disagree —
+-- the exact split-authority shape this arc keeps closing.
+--
+-- ⚠️ OPERATOR NOTE: `ADD COLUMN` has no `IF NOT EXISTS` in sqlite/D1, so applying
+-- this file twice throws `duplicate column name: payer`. That is the same shape as
+-- migration 0020 (the only other ALTER here) and it is the SAFE failure: it is
+-- loud, it happens before any data is touched, and the first three statements are
+-- the only ones that can fail this way. Run 0025 before 0026 — the columns hang off
+-- the table 0025 creates.
+ALTER TABLE spend_sent ADD COLUMN payer TEXT;
+ALTER TABLE spend_sent ADD COLUMN nonce TEXT;
+ALTER TABLE spend_sent ADD COLUMN valid_before INTEGER;
+-- The reconciler's access pattern: "which sent authorizations are still open, and
+-- of those, which are past their signed deadline?" It sweeps on a per-minute cron
+-- across every user, so it must not table-scan as `spend_sent` grows.
+CREATE INDEX IF NOT EXISTS idx_spend_sent_open ON spend_sent(valid_before);

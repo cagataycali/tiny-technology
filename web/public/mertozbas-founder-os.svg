@@ -1,0 +1,189 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 700" preserveAspectRatio="xMidYMid slice" role="img" aria-labelledby="title desc">
+  <title id="title">Mert Özbaş Founder OS</title>
+  <desc id="desc">An original animated system map connecting agent decisions, a founder core, robotics execution, verified data, and a compounding feedback orbit.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#05030A"/>
+      <stop offset=".5" stop-color="#0B0615"/>
+      <stop offset="1" stop-color="#02080D"/>
+    </linearGradient>
+    <radialGradient id="violetAura">
+      <stop offset="0" stop-color="#A855F7" stop-opacity=".28"/>
+      <stop offset=".55" stop-color="#A855F7" stop-opacity=".07"/>
+      <stop offset="1" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cyanAura">
+      <stop offset="0" stop-color="#22D3EE" stop-opacity=".22"/>
+      <stop offset="1" stop-color="#22D3EE" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="violetCyan" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#A855F7"/>
+      <stop offset=".5" stop-color="#F8FAFC"/>
+      <stop offset="1" stop-color="#22D3EE"/>
+    </linearGradient>
+    <linearGradient id="coreFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1C0D2F"/>
+      <stop offset="1" stop-color="#071820"/>
+    </linearGradient>
+    <pattern id="microGrid" width="48" height="48" patternUnits="userSpaceOnUse">
+      <path d="M48 0H0V48" fill="none" stroke="#F8FAFC" stroke-opacity=".035"/>
+      <circle cx="0" cy="0" r="1.2" fill="#A855F7" fill-opacity=".13"/>
+    </pattern>
+    <filter id="softGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="7" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="tinyGlow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="2.5" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <style>
+      .orbit-slow { animation: orbit 26s linear infinite; transform-origin: 800px 350px; }
+      .orbit-fast { animation: orbit-reverse 17s linear infinite; transform-origin: 800px 350px; }
+      .flow-violet { animation: flow 5.5s linear infinite; }
+      .flow-cyan { animation: flow 4.2s linear infinite reverse; }
+      .pulse { animation: pulse 2.8s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+      .pulse-late { animation: pulse 2.8s 1.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+      .arm-think { animation: armThink 5s ease-in-out infinite; transform-origin: 1222px 315px; }
+      .scan { animation: scan 7s ease-in-out infinite; }
+      .core-breathe { animation: breathe 4s ease-in-out infinite; transform-origin: 800px 350px; }
+      .spark-a { animation: spark 3.1s ease-in-out infinite; }
+      .spark-b { animation: spark 3.1s 1.55s ease-in-out infinite; }
+      @keyframes orbit { to { transform: rotate(360deg); } }
+      @keyframes orbit-reverse { to { transform: rotate(-360deg); } }
+      @keyframes flow { to { stroke-dashoffset: -112; } }
+      @keyframes pulse {
+        0%, 100% { opacity: .55; transform: scale(.88); }
+        50% { opacity: 1; transform: scale(1.18); }
+      }
+      @keyframes armThink {
+        0%, 100% { transform: rotate(-2deg); }
+        50% { transform: rotate(5deg); }
+      }
+      @keyframes scan {
+        0%, 100% { transform: translateX(-180px); opacity: 0; }
+        18%, 82% { opacity: .48; }
+        50% { transform: translateX(180px); opacity: .75; }
+      }
+      @keyframes breathe {
+        0%, 100% { transform: scale(.985); opacity: .9; }
+        50% { transform: scale(1.025); opacity: 1; }
+      }
+      @keyframes spark {
+        0%, 100% { opacity: .15; }
+        50% { opacity: .95; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * { animation: none !important; }
+        .pulse, .pulse-late, .spark-a, .spark-b { opacity: .9; }
+      }
+    </style>
+  </defs>
+
+  <rect width="1600" height="700" fill="url(#bg)"/>
+  <rect width="1600" height="700" fill="url(#microGrid)"/>
+  <ellipse cx="690" cy="350" rx="510" ry="410" fill="url(#violetAura)"/>
+  <ellipse cx="1200" cy="360" rx="430" ry="350" fill="url(#cyanAura)"/>
+
+  <!-- Quiet horizon and scanning intelligence plane -->
+  <path d="M0 559C290 525 505 594 800 548S1320 527 1600 566" fill="none" stroke="#A855F7" stroke-opacity=".12"/>
+  <path d="M0 575C340 540 545 610 825 566S1315 548 1600 586" fill="none" stroke="#22D3EE" stroke-opacity=".10"/>
+  <g class="scan" opacity=".65">
+    <rect x="620" y="120" width="2" height="450" fill="url(#violetCyan)" filter="url(#tinyGlow)"/>
+    <path d="M622 120L700 350L622 570Z" fill="#A855F7" fill-opacity=".025"/>
+  </g>
+
+  <!-- Compounding feedback orbit -->
+  <g class="orbit-slow">
+    <ellipse cx="800" cy="350" rx="455" ry="260" fill="none" stroke="#A855F7" stroke-opacity=".28" stroke-width="1.5" stroke-dasharray="2 13"/>
+    <circle cx="345" cy="350" r="6" fill="#A855F7" filter="url(#tinyGlow)"/>
+    <circle cx="1255" cy="350" r="4" fill="#22D3EE" filter="url(#tinyGlow)"/>
+  </g>
+  <g class="orbit-fast">
+    <ellipse cx="800" cy="350" rx="370" ry="212" fill="none" stroke="#22D3EE" stroke-opacity=".20" stroke-width="1.2" stroke-dasharray="32 11 3 11"/>
+    <circle cx="800" cy="138" r="4" fill="#F8FAFC" filter="url(#tinyGlow)"/>
+  </g>
+
+  <!-- Agent decision stack: original node language -->
+  <g aria-label="Agent decision layer">
+    <path d="M232 214V486" stroke="#A855F7" stroke-opacity=".18" stroke-width="2"/>
+    <g transform="translate(232 238)">
+      <circle r="44" fill="#0C0714" stroke="#A855F7" stroke-opacity=".55"/>
+      <path d="M-15 0H15M0-15V15" stroke="#F8FAFC" stroke-width="3" stroke-linecap="round"/>
+      <circle r="5" fill="#A855F7" class="pulse"/>
+      <text x="66" y="-6" fill="#F8FAFC" font-size="17" font-weight="700" font-family="ui-sans-serif,system-ui">THINK</text>
+      <text x="66" y="16" fill="#A5A1B2" font-size="12" font-family="ui-monospace,monospace">intent → decision</text>
+    </g>
+    <g transform="translate(232 350)">
+      <circle r="44" fill="#0C0714" stroke="#A855F7" stroke-opacity=".55"/>
+      <path d="M-17 10L0-13L17 10M-10 10H10" fill="none" stroke="#F8FAFC" stroke-width="3" stroke-linejoin="round"/>
+      <circle cy="2" r="5" fill="#A855F7" class="pulse-late"/>
+      <text x="66" y="-6" fill="#F8FAFC" font-size="17" font-weight="700" font-family="ui-sans-serif,system-ui">BUILD</text>
+      <text x="66" y="16" fill="#A5A1B2" font-size="12" font-family="ui-monospace,monospace">decision → artifact</text>
+    </g>
+    <g transform="translate(232 462)">
+      <circle r="44" fill="#0C0714" stroke="#22D3EE" stroke-opacity=".55"/>
+      <path d="M-17 1L-6 12L19-15" fill="none" stroke="#22D3EE" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="66" y="-6" fill="#F8FAFC" font-size="17" font-weight="700" font-family="ui-sans-serif,system-ui">VERIFY</text>
+      <text x="66" y="16" fill="#A5A1B2" font-size="12" font-family="ui-monospace,monospace">artifact → evidence</text>
+    </g>
+  </g>
+
+  <!-- Decision and evidence lanes -->
+  <path d="M420 238C545 238 565 318 670 332" fill="none" stroke="#A855F7" stroke-opacity=".55" stroke-width="2.5" stroke-dasharray="14 14" class="flow-violet"/>
+  <path d="M420 350C535 350 575 350 670 350" fill="none" stroke="url(#violetCyan)" stroke-opacity=".65" stroke-width="3" stroke-dasharray="18 10" class="flow-violet"/>
+  <path d="M420 462C545 462 570 385 670 369" fill="none" stroke="#22D3EE" stroke-opacity=".55" stroke-width="2.5" stroke-dasharray="14 14" class="flow-cyan"/>
+
+  <!-- Founder core: custom MÖ monogram, drawn from primitives -->
+  <g class="core-breathe" aria-label="Mert Özbaş founder core">
+    <circle cx="800" cy="350" r="124" fill="#A855F7" fill-opacity=".045" stroke="#A855F7" stroke-opacity=".20"/>
+    <circle cx="800" cy="350" r="102" fill="url(#coreFill)" stroke="url(#violetCyan)" stroke-width="2.5" filter="url(#softGlow)"/>
+    <path d="M737 393V307L769 348L801 307V393" fill="none" stroke="#F8FAFC" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="848" cy="350" r="38" fill="none" stroke="#22D3EE" stroke-width="10"/>
+    <circle cx="833" cy="296" r="5.5" fill="#22D3EE"/>
+    <circle cx="863" cy="296" r="5.5" fill="#22D3EE"/>
+    <circle cx="800" cy="350" r="87" fill="none" stroke="#F8FAFC" stroke-opacity=".13" stroke-dasharray="2 9"/>
+    <text x="800" y="432" text-anchor="middle" fill="#D8D4E1" font-size="12" letter-spacing="4" font-family="ui-monospace,monospace">FOUNDER OS</text>
+  </g>
+
+  <!-- Robotics execution arm -->
+  <g aria-label="Robotics execution layer">
+    <path d="M930 350C1020 350 1050 350 1115 350" fill="none" stroke="#22D3EE" stroke-opacity=".62" stroke-width="3" stroke-dasharray="18 10" class="flow-cyan"/>
+    <g class="arm-think">
+      <path d="M1155 478H1320" stroke="#22D3EE" stroke-opacity=".38" stroke-width="8" stroke-linecap="round"/>
+      <rect x="1192" y="438" width="86" height="39" rx="9" fill="#071820" stroke="#22D3EE" stroke-opacity=".6"/>
+      <circle cx="1235" cy="428" r="24" fill="#071820" stroke="#22D3EE" stroke-width="7"/>
+      <path d="M1235 404L1188 330" stroke="#22D3EE" stroke-width="18" stroke-linecap="round"/>
+      <circle cx="1188" cy="330" r="23" fill="#0C0714" stroke="#A855F7" stroke-width="7"/>
+      <path d="M1170 318L1096 270" stroke="#A855F7" stroke-width="16" stroke-linecap="round"/>
+      <circle cx="1096" cy="270" r="19" fill="#0C0714" stroke="#A855F7" stroke-width="6"/>
+      <path d="M1082 258L1048 226" stroke="#F8FAFC" stroke-width="10" stroke-linecap="round"/>
+      <path d="M1047 225L1019 214M1047 225L1034 196" stroke="#F8FAFC" stroke-width="7" stroke-linecap="round"/>
+      <circle cx="1235" cy="428" r="7" fill="#22D3EE" class="pulse"/>
+      <circle cx="1188" cy="330" r="6" fill="#F8FAFC" class="pulse-late"/>
+      <circle cx="1096" cy="270" r="5" fill="#A855F7" class="pulse"/>
+    </g>
+    <text x="1150" y="527" fill="#F8FAFC" font-size="17" font-weight="700" font-family="ui-sans-serif,system-ui">EXECUTE</text>
+    <text x="1150" y="549" fill="#8FA7AC" font-size="12" font-family="ui-monospace,monospace">software → hardware</text>
+  </g>
+
+  <!-- Evidence returns to strategy: the compounding loop closes -->
+  <path d="M1320 475C1440 420 1430 178 1255 116C1030 36 550 47 343 157" fill="none" stroke="url(#violetCyan)" stroke-opacity=".26" stroke-width="2" stroke-dasharray="7 17" class="flow-violet"/>
+  <path d="M343 157l22-2-11 19" fill="none" stroke="#A855F7" stroke-opacity=".65" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Small proof sparks -->
+  <g fill="#F8FAFC" filter="url(#tinyGlow)">
+    <circle cx="535" cy="350" r="2.4" class="spark-a"/>
+    <circle cx="1040" cy="350" r="2.4" class="spark-b"/>
+    <circle cx="1372" cy="300" r="2.2" class="spark-a"/>
+    <circle cx="552" cy="91" r="2.2" class="spark-b"/>
+  </g>
+
+  <g font-family="ui-monospace,monospace" font-size="11" letter-spacing="2">
+    <text x="78" y="76" fill="#A855F7">MERT ÖZBAŞ</text>
+    <text x="78" y="96" fill="#81798F">AGENTS × ROBOTICS × DATA</text>
+    <text x="1435" y="628" text-anchor="end" fill="#22D3EE">BUILD → VERIFY → COMPOUND</text>
+  </g>
+</svg>

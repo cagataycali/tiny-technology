@@ -1,0 +1,12 @@
+-- Account-level default voice for live speech-to-speech calls.
+--
+-- The live-call voice resolves per call as: the tiny's OWN `voice` (an owner's
+-- explicit per-tiny choice) → else this account default → else 'marin'. So a
+-- user's own tinys inherit their account voice unless a tiny overrides it, while
+-- other people's tinys keep their owner's chosen voice.
+--
+-- Lives on `users` (not model_config): a stable account preference that must
+-- survive reverting to the free chat tier (model_config is deleted on default)
+-- and applies even when the OpenAI key arrives via per-request device headers
+-- rather than the synced model_config row. '' = unset (falls back to marin).
+ALTER TABLE users ADD COLUMN voice TEXT DEFAULT '';

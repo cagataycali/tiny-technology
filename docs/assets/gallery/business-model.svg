@@ -1,0 +1,93 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 500" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="bm-fw" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="bm-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .bm-box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .bm-lbl{fill:#E8FFF3;font-size:13px;font-weight:600}
+      .bm-sub{fill:#9FDFC0;font-size:10px}
+      .bm-big{fill:#7CFFC4;font-size:22px;font-weight:800;font-family:ui-monospace,Menlo,monospace}
+      .bm-fee{fill:#00FF88;font-size:15px;font-weight:800;font-family:ui-monospace,Menlo,monospace}
+      .bm-fw{stroke:#00FF88;stroke-width:1.6;fill:none}
+      .bm-thin{stroke:#00FF8844;stroke-width:1.2;fill:none;stroke-dasharray:6 6}
+    </style>
+  </defs>
+  <rect width="920" height="500" fill="#020604"/>
+  <text x="460" y="32" text-anchor="middle" class="bm-lbl" font-size="18">How the platform makes money — a flat fee, aligned incentives</text>
+  <text x="460" y="51" text-anchor="middle" class="bm-sub">we take a flat $0.001 per paid invocation; the creator keeps the rest; our revenue scales with the economy's volume, not with model cost</text>
+
+  <!-- ROW 1: a paid invocation splits -->
+  <g>
+    <rect class="bm-box" x="40" y="86" width="190" height="70" rx="12"/>
+    <text x="60" y="112" class="bm-lbl">👤 A buyer pays</text>
+    <text x="60" y="134" class="bm-big">$0.50</text>
+    <text x="60" y="150" class="bm-sub">a price the creator set, in USDC</text>
+  </g>
+
+  <!-- settle-before-serve gateway -->
+  <g>
+    <circle cx="360" cy="121" r="42" fill="url(#bm-orb)"><animate attributeName="r" values="38;46;38" dur="2.6s" repeatCount="indefinite"/></circle>
+    <text x="360" y="117" text-anchor="middle" font-size="12" font-weight="800" fill="#020604">settle</text>
+    <text x="360" y="132" text-anchor="middle" font-size="9.5" font-weight="700" fill="#053">before serve</text>
+  </g>
+  <path class="bm-fw" d="M230,121 L316,121" marker-end="url(#bm-fw)"/>
+  <circle r="4" fill="url(#bm-orb)"><animateMotion dur="1.5s" repeatCount="indefinite" path="M234,121 L312,121"/></circle>
+
+  <!-- split to creator (most) + platform (flat fee) -->
+  <g>
+    <rect class="bm-box" x="600" y="80" width="280" height="60" rx="12" stroke="#00FF88" stroke-width="2"/>
+    <text x="620" y="104" class="bm-lbl">🧑‍🎨 Creator keeps</text>
+    <text x="620" y="127" class="bm-big">$0.499</text>
+    <text x="770" y="127" class="bm-sub">everything but the flat fee</text>
+  </g>
+  <g>
+    <rect class="bm-box" x="600" y="150" width="280" height="52" rx="12"/>
+    <text x="620" y="173" class="bm-lbl">🏦 Platform takes</text>
+    <text x="620" y="194" class="bm-fee">$0.001 flat</text>
+    <text x="770" y="194" class="bm-sub">same at $0.50 or $5 — not a %</text>
+  </g>
+  <path class="bm-fw" d="M402,110 C500,95 520,108 598,108" marker-end="url(#bm-fw)"/>
+  <path class="bm-fw" d="M402,132 C500,160 520,174 598,174" marker-end="url(#bm-fw)" opacity="0.7"/>
+
+  <!-- divider -->
+  <line x1="40" y1="232" x2="880" y2="232" stroke="#0c3" stroke-opacity="0.3" stroke-width="1"/>
+
+  <!-- ROW 2: the three live streams + cost structure -->
+  <text x="40" y="262" class="bm-sub" font-size="12" fill="#7CFFC4">Three live revenue streams — plus a cost structure that trends to zero:</text>
+
+  <g>
+    <rect class="bm-box" x="40" y="278" width="270" height="92" rx="12"/>
+    <text x="58" y="304" class="bm-lbl">1 · Transaction fees <tspan fill="#00FF88">(live)</tspan></text>
+    <text x="58" y="326" class="bm-sub">flat fee on every paid invocation</text>
+    <text x="58" y="342" class="bm-sub">&amp; tool sale — scales with agent-</text>
+    <text x="58" y="358" class="bm-sub">economy volume, NOT inference cost</text>
+  </g>
+  <g>
+    <rect class="bm-box" x="325" y="278" width="270" height="92" rx="12"/>
+    <text x="343" y="304" class="bm-lbl">2 · Creator take-rate <tspan fill="#00FF88">(live)</tspan></text>
+    <text x="343" y="326" class="bm-sub">priced tinys &amp; marketplace tools;</text>
+    <text x="343" y="342" class="bm-sub">reputation compounds via the</text>
+    <text x="343" y="358" class="bm-sub">consult graph (trust PageRank)</text>
+  </g>
+  <g>
+    <rect class="bm-box" x="610" y="278" width="270" height="92" rx="12"/>
+    <text x="628" y="304" class="bm-lbl">3 · BYOK cost structure <tspan fill="#00FF88">(live)</tspan></text>
+    <text x="628" y="326" class="bm-sub">power users bring keys (~12</text>
+    <text x="628" y="342" class="bm-sub">providers) or run on-device;</text>
+    <text x="628" y="358" class="bm-sub">marginal cost → 0, no per-token cut</text>
+  </g>
+
+  <!-- the alignment insight -->
+  <g>
+    <rect class="bm-box" x="40" y="392" width="840" height="52" rx="12" fill="#06120C" stroke="#00FF8833"/>
+    <text x="460" y="416" text-anchor="middle" class="bm-lbl" font-size="14">We make money when the economy is <tspan fill="#00FF88">busy</tspan>, not when models are <tspan fill="#c2493d">expensive</tspan> — so our incentives point the same way yours do.</text>
+    <text x="460" y="434" text-anchor="middle" class="bm-sub">Roadmap: pro subscriptions · enterprise fleets · white-label ("universe in a box")</text>
+  </g>
+
+  <text x="460" y="472" text-anchor="middle" fill="#3f6f57" font-size="11">No subscription to exist · free to create &amp; keep alive · append-only, idempotent USDC ledger on Base · money only moves when someone pays for expertise.</text>
+</svg>

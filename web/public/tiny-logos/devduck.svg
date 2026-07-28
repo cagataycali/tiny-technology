@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="devduck">
+  <!-- devduck 🦆 — self-healing single-file agent. A minimal duck head as a glowing amber node,
+       with a self-repair ring that sweeps + closes (hot-reload / auto-recovery). -->
+  <defs>
+    <radialGradient id="d-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffd23f" stop-opacity="0.7"/>
+      <stop offset="60%" stop-color="#ffd23f" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#ffd23f" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="d-head" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff2b0"/>
+      <stop offset="100%" stop-color="#ffd23f"/>
+    </linearGradient>
+  </defs>
+  <rect width="120" height="120" rx="26" fill="#0d1410"/>
+  <circle cx="60" cy="60" r="38" fill="url(#d-glow)">
+    <animate attributeName="opacity" values="0.6;1;0.6" dur="3s" repeatCount="indefinite"/>
+  </circle>
+  <!-- self-heal ring: dashed arc rotating, "closing the loop" -->
+  <circle cx="60" cy="60" r="40" fill="none" stroke="#ffd23f" stroke-width="2.5"
+          stroke-linecap="round" stroke-dasharray="150 100" opacity="0.65">
+    <animateTransform attributeName="transform" type="rotate" from="0 60 60" to="360 60 60" dur="3.5s" repeatCount="indefinite"/>
+  </circle>
+  <!-- duck head (round) + bill, terse and clean -->
+  <circle cx="56" cy="58" r="21" fill="url(#d-head)"/>
+  <!-- bill -->
+  <path d="M74 56c11-2 18 1 18 5s-7 6-18 4z" fill="#ff8c1a">
+    <animateTransform attributeName="transform" type="rotate" values="0 74 60;-6 74 60;0 74 60" dur="2.6s" repeatCount="indefinite"/>
+  </path>
+  <!-- eye (blinks) -->
+  <circle cx="58" cy="52" r="3.2" fill="#0d1410">
+    <animate attributeName="ry" values="3.2;0.4;3.2" dur="4s" keyTimes="0;0.05;0.1" repeatCount="indefinite"/>
+  </circle>
+</svg>

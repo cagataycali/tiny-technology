@@ -1,0 +1,206 @@
+name: Tiny
+options:
+  bundleIdPrefix: technology.tiny
+  deploymentTarget:
+    # 18.0 so the user's iPad Pro (iPadOS 18.3.1) can install; guard 26-only
+    # APIs with @available
+    iOS: '18.0'
+    watchOS: '11.0'
+settings:
+  base:
+    # DEVELOPMENT_TEAM deliberately unset: simulator builds need no signing,
+    # and device builds go through scripts/build-on-device.sh, which detects
+    # YOUR team from your certificate (or set DEVELOPMENT_TEAM here yourself).
+    SWIFT_VERSION: '6.0'
+    CODE_SIGN_STYLE: Automatic
+    # OTA build number — bump on every /ios push (scripts/push-ota.sh syncs
+    # the manifest to this; the in-app Updater compares against it)
+    CURRENT_PROJECT_VERSION: 61
+targets:
+  Tiny:
+    type: application
+    platform: iOS
+    sources:
+    - Tiny/Sources
+    # Pure watch logic — compiled here so TinyTests covers it (W8)
+    - TinyWatch/Sources/WatchCore.swift
+    - Shared
+    - Tiny/Assets.xcassets
+    dependencies:
+    # platformFilter iOS: neither the watch app nor (for now) the widget
+    # extension can ride along in a Mac Catalyst build
+    - target: TinyWidgets
+      embed: true
+      platformFilter: iOS
+    - target: TinyWatch
+      embed: true
+      platformFilter: iOS
+    entitlements:
+      path: Tiny/Tiny.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.technology.tiny.app
+        keychain-access-groups:
+        - $(AppIdentifierPrefix)technology.tiny.app.shared
+    info:
+      path: Tiny/Info.plist
+      properties:
+        CFBundleDisplayName: tiny
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+        - UIInterfaceOrientationPortrait
+        # iPad: all orientations (required for multitasking/Split View)
+        UISupportedInterfaceOrientations~ipad:
+        - UIInterfaceOrientationPortrait
+        - UIInterfaceOrientationPortraitUpsideDown
+        - UIInterfaceOrientationLandscapeLeft
+        - UIInterfaceOrientationLandscapeRight
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UIBackgroundModes:
+        - fetch
+        - audio
+        NSBluetoothAlwaysUsageDescription: tiny scans nearby Bluetooth devices when you (or your web agent, at your request) ask what's around the phone.
+        NSMicrophoneUsageDescription: Voice mode and voice calls keep the mic open to hear you — transcription is on-device; a live call streams to your tiny so it can talk back.
+        NSCameraUsageDescription: Take a photo to share it with your tiny in the chat.
+        NSSpeechRecognitionUsageDescription: Speech is transcribed on-device where supported; transcripts become chat messages to your tiny.
+        NSMotionUsageDescription: When you (or your web agent, at your request) ask what the phone is doing, tiny reads motion and step data to answer.
+        NSLocationWhenInUseUsageDescription: When you turn on location sharing, tiny reads your position and speed so it can answer with real context — and answers "where am I" asks from your web agent.
+        # Live Activity (P2.1) — declared once; a duplicate of this key crept
+        # in during concurrent edits and duplicate YAML keys are parser roulette
+        NSSupportsLiveActivities: true
+        BGTaskSchedulerPermittedIdentifiers:
+        - technology.tiny.refresh
+        CFBundleURLTypes:
+        - CFBundleURLSchemes:
+          - tinyapp
+          CFBundleURLName: technology.tiny.auth
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: technology.tiny.app
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: 1,2
+        # Mac Catalyst: real Mac app, same bundle id (keychain/app-group parity);
+        # AVAudioSession survives under Catalyst so the voice pipeline is intact
+        SUPPORTS_MACCATALYST: YES
+        DERIVE_MACCATALYST_PRODUCT_BUNDLE_IDENTIFIER: NO
+  TinyWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+    - TinyWidgets/Sources
+    # PhoneBriefingIntent runs IN the extension → full ask pipeline
+    - Tiny/Sources/Api.swift
+    # Api.chatStream's SSE decode — travels with Api.swift everywhere, and is
+    # Foundation-only for exactly that reason (no UIKit, so it compiles in the
+    # extension and on the watch)
+    - Tiny/Sources/ChatStreamDecoder.swift
+    - Tiny/Sources/ModelConfig.swift
+    - Tiny/Sources/Config.swift
+    - Tiny/Sources/Keychain.swift
+    - Tiny/Sources/Continuity.swift
+    - Shared
+    entitlements:
+      path: TinyWidgets/TinyWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.technology.tiny.app
+        keychain-access-groups:
+        - $(AppIdentifierPrefix)technology.tiny.app.shared
+    info:
+      path: TinyWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: tiny
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: technology.tiny.app.widgets
+        TARGETED_DEVICE_FAMILY: 1,2
+  TinyWatch:
+    type: application
+    platform: watchOS
+    sources:
+    - TinyWatch/Sources
+    - TinyWatch/Assets.xcassets
+    # Shared, UIKit-free plumbing — the watch speaks the same API dialect
+    - Tiny/Sources/Api.swift
+    - Tiny/Sources/ChatStreamDecoder.swift
+    - Tiny/Sources/ModelConfig.swift
+    - Tiny/Sources/Config.swift
+    - Tiny/Sources/Keychain.swift
+    - Tiny/Sources/Continuity.swift
+    - Shared
+    dependencies:
+    - target: TinyWatchWidgets
+      embed: true
+    entitlements:
+      path: TinyWatch/TinyWatch.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.technology.tiny.app
+        keychain-access-groups:
+        - $(AppIdentifierPrefix)technology.tiny.app.shared
+    info:
+      path: TinyWatch/Info.plist
+      properties:
+        CFBundleDisplayName: tiny
+        # WatchKit install validation: the watch app's versions MUST match
+        # the companion iOS app's — a mismatch is the generic
+        # "app could not be installed at this time" in the Watch app
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        WKApplication: true
+        WKCompanionAppBundleIdentifier: technology.tiny.app
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: technology.tiny.app.watchkitapp
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  TinyWatchWidgets:
+    type: app-extension
+    platform: watchOS
+    sources:
+    - TinyWatchWidgets/Sources
+    # Briefing button (Button(intent:)) runs IN the extension → it needs
+    # the full ask pipeline: intent + API + config + keychain + continuity
+    - TinyWatch/Sources/Briefing.swift
+    - TinyWatch/Sources/WatchCore.swift
+    - Tiny/Sources/Api.swift
+    - Tiny/Sources/ChatStreamDecoder.swift
+    - Tiny/Sources/ModelConfig.swift
+    - Tiny/Sources/Config.swift
+    - Tiny/Sources/Keychain.swift
+    - Tiny/Sources/Continuity.swift
+    - Shared
+    entitlements:
+      path: TinyWatchWidgets/TinyWatchWidgets.entitlements
+      properties:
+        com.apple.security.application-groups:
+        - group.technology.tiny.app
+        keychain-access-groups:
+        - $(AppIdentifierPrefix)technology.tiny.app.shared
+    info:
+      path: TinyWatchWidgets/Info.plist
+      properties:
+        CFBundleDisplayName: tiny
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: technology.tiny.app.watchkitapp.widgets
+  TinyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+    - Tests
+    dependencies:
+    - target: Tiny
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: technology.tiny.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: $(BUILT_PRODUCTS_DIR)/Tiny.app/Tiny
+        BUNDLE_LOADER: $(TEST_HOST)

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="feedback">
+  <!-- feedback — the friendly front desk. A speech bubble with a pulsing signal/heart that
+       "sends to cagatay's inbox." Brand green. -->
+  <rect width="120" height="120" rx="26" fill="#0d0d0d"/>
+  <!-- bubble -->
+  <path d="M26 32h68a10 10 0 0 1 10 10v34a10 10 0 0 1-10 10H60l-18 16v-16H26a10 10 0 0 1-10-10V42a10 10 0 0 1 10-10z" fill="none" stroke="#00FF88" stroke-width="4"/>
+  <!-- rising signal bars (feedback landing) -->
+  <g fill="#00FF88">
+    <rect x="40" y="60" width="8" height="10" rx="2"><animate attributeName="height" values="6;20;6" dur="1.6s" repeatCount="indefinite"/><animate attributeName="y" values="64;50;64" dur="1.6s" repeatCount="indefinite"/></rect>
+    <rect x="56" y="54" width="8" height="16" rx="2"><animate attributeName="height" values="10;26;10" dur="1.6s" begin="0.2s" repeatCount="indefinite"/><animate attributeName="y" values="60;44;60" dur="1.6s" begin="0.2s" repeatCount="indefinite"/></rect>
+    <rect x="72" y="58" width="8" height="12" rx="2"><animate attributeName="height" values="8;22;8" dur="1.6s" begin="0.4s" repeatCount="indefinite"/><animate attributeName="y" values="62;48;62" dur="1.6s" begin="0.4s" repeatCount="indefinite"/></rect>
+  </g>
+</svg>

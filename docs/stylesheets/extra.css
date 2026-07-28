@@ -1,0 +1,33 @@
+/* tiny brand — neon green on near-black (logo: #00FF88).
+   Material's palette.css sets link colors with double-attribute selectors
+   ([data-md-color-scheme][data-md-color-primary], specificity 0,2,0), so
+   single-attribute overrides lose no matter the load order — match it. */
+[data-md-color-scheme="default"][data-md-color-primary="white"] {
+  --md-accent-fg-color: #00b460;
+  --md-typeset-a-color: #00b460;
+}
+
+[data-md-color-scheme="slate"][data-md-color-primary="black"] {
+  --md-accent-fg-color: #00ff88;
+  --md-typeset-a-color: #00ff88;
+  --md-default-bg-color: #0a0d0b;
+}
+
+[data-md-color-scheme="slate"] .md-header,
+[data-md-color-scheme="slate"] .md-tabs {
+  background-color: #020604;
+}
+
+/* gallery frames — the SVGs are dark-native; keep them on brand-black in both schemes */
+.tiny-frame {
+  margin: 0 0 1.2rem;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #020604;
+  border: 1px solid rgba(0, 255, 136, 0.18);
+}
+.tiny-frame img,
+.tiny-frame video {
+  display: block;
+  width: 100%;
+}

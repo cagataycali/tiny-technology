@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 340" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="pkg" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .core{fill:#06160E;stroke:#00FF88;stroke-width:2}
+      .lbl{fill:#E8FFF3;font-size:15px;font-weight:600}
+      .sub{fill:#9FDFC0;font-size:11px}
+      .flow{stroke:#00FF88;stroke-width:2;fill:none;stroke-dasharray:6 6}
+      .tag{fill:#7CFFC4;font-size:12px;font-weight:600}
+    </style>
+  </defs>
+  <rect width="920" height="340" fill="#020604"/>
+  <text x="460" y="34" text-anchor="middle" class="lbl" font-size="18">The tiny marketplace — a skill, published once, reaches every tiny</text>
+
+  <!-- builder -->
+  <g><rect class="box" x="36" y="118" width="176" height="96" rx="14"/>
+    <text x="124" y="150" text-anchor="middle" class="lbl">Builder</text>
+    <text x="124" y="170" text-anchor="middle" class="sub">forge a JS tool · bind</text>
+    <text x="124" y="185" text-anchor="middle" class="sub">an OpenAPI or MCP server</text>
+    <text x="124" y="202" text-anchor="middle" class="tag">GitHub-pinned install</text></g>
+
+  <!-- marketplace core -->
+  <g><rect class="core" x="372" y="100" width="176" height="132" rx="16"/>
+    <text x="460" y="134" text-anchor="middle" class="lbl">Marketplace</text>
+    <text x="460" y="154" text-anchor="middle" class="sub">RAG-searchable universe</text>
+    <text x="460" y="170" text-anchor="middle" class="sub">tools · personas · tinys</text>
+    <text x="460" y="190" text-anchor="middle" class="sub">sandboxed · versioned</text>
+    <text x="460" y="212" text-anchor="middle" class="tag">priced per message</text></g>
+
+  <!-- consumers -->
+  <g><rect class="box" x="708" y="70" width="176" height="70" rx="14"/>
+    <text x="796" y="100" text-anchor="middle" class="lbl">Any tiny</text>
+    <text x="796" y="120" text-anchor="middle" class="sub">installs the skill instantly</text></g>
+  <g><rect class="box" x="708" y="196" width="176" height="70" rx="14"/>
+    <text x="796" y="226" text-anchor="middle" class="lbl">Agents &amp; devs</text>
+    <text x="796" y="246" text-anchor="middle" class="sub">discover over MCP · x402</text></g>
+
+  <!-- publish flow -->
+  <path class="flow" d="M212,158 L368,158" marker-end="url(#mk)">
+    <animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/>
+  </path>
+  <text x="290" y="146" text-anchor="middle" class="sub">publish</text>
+
+  <!-- distribute flows -->
+  <path class="flow" d="M548,140 Q630,110 706,105" marker-end="url(#mk)">
+    <animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/>
+  </path>
+  <path class="flow" d="M548,190 Q630,220 706,228" marker-end="url(#mk)">
+    <animate attributeName="stroke-dashoffset" values="24;0" dur="1s" repeatCount="indefinite"/>
+  </path>
+  <text x="628" y="170" text-anchor="middle" class="sub">reach</text>
+
+  <!-- royalty loop back to builder -->
+  <path class="flow" d="M372,214 Q248,286 124,214" marker-end="url(#mk)" stroke-dasharray="3 5" opacity="0.75"/>
+  <text x="248" y="292" text-anchor="middle" class="tag">every use pays the builder (USDC)</text>
+
+  <!-- travelling package -->
+  <circle cx="290" cy="158" r="7" fill="url(#pkg)">
+    <animate attributeName="cx" values="222;358" dur="1.6s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="628" cy="122" r="6" fill="url(#pkg)">
+    <animate attributeName="cx" values="556;700" dur="1.8s" repeatCount="indefinite"/>
+    <animate attributeName="cy" values="138;106" dur="1.8s" repeatCount="indefinite"/>
+  </circle>
+
+  <text x="460" y="326" text-anchor="middle" fill="#3f6f57" font-size="12">build once · sandboxed execution · discoverable by humans and AIs alike</text>
+</svg>

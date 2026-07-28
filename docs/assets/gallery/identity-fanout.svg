@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 460" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="id-fw" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="id-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <style>
+      .id-box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5}
+      .id-lbl{fill:#E8FFF3;font-size:13px;font-weight:600}
+      .id-sub{fill:#9FDFC0;font-size:10px}
+      .id-tag{fill:#7CFFC4;font-size:10.5px;font-weight:600}
+      .id-mono{fill:#7CFFC4;font-size:11px;font-family:ui-monospace,Menlo,monospace}
+      .id-fw{stroke:#00FF88;stroke-width:1.6;fill:none}
+      .id-thin{stroke:#00FF8844;stroke-width:1.2;fill:none;stroke-dasharray:6 6}
+    </style>
+  </defs>
+  <rect width="920" height="460" fill="#020604"/>
+  <text x="460" y="30" text-anchor="middle" class="id-lbl" font-size="18">One name, every surface — identity is addressable</text>
+  <text x="460" y="49" text-anchor="middle" class="id-sub">say a name and a personality; the same entity is instantly reachable as a page, an app, a card, a bot, and a server</text>
+
+  <!-- the spoken name (input) -->
+  <g>
+    <rect class="id-box" x="40" y="196" width="196" height="70" rx="14" stroke="#00FF88" stroke-width="2"/>
+    <text x="138" y="222" text-anchor="middle" class="id-tag">you say</text>
+    <text x="138" y="242" text-anchor="middle" class="id-mono">"create an ai</text>
+    <text x="138" y="257" text-anchor="middle" class="id-mono">named scout…"</text>
+  </g>
+
+  <!-- the entity core -->
+  <g>
+    <circle cx="360" cy="231" r="46" fill="url(#id-orb)"><animate attributeName="r" values="42;50;42" dur="2.4s" repeatCount="indefinite"/></circle>
+    <text x="360" y="228" text-anchor="middle" font-size="15" font-weight="800" fill="#020604">scout</text>
+    <text x="360" y="245" text-anchor="middle" font-size="9.5" font-weight="700" fill="#053">one entity</text>
+  </g>
+  <path class="id-fw" d="M236,231 L310,231" marker-end="url(#id-fw)"/>
+  <circle r="4" fill="url(#id-orb)"><animateMotion dur="1.4s" repeatCount="indefinite" path="M240,231 L306,231"/></circle>
+
+  <!-- the six addressable forms, fanning out on the right -->
+  <!-- row anchors -->
+  <g>
+    <rect class="id-box" x="560" y="70" width="320" height="46" rx="12"/>
+    <text x="576" y="90" class="id-lbl">🔗 A URL &amp; chat page</text>
+    <text x="576" y="107" class="id-mono">tiny.technology/scout</text>
+
+    <rect class="id-box" x="560" y="126" width="320" height="46" rx="12"/>
+    <text x="576" y="146" class="id-lbl">📱 An installable PWA</text>
+    <text x="576" y="163" class="id-sub">per-tiny manifest · display: standalone</text>
+
+    <rect class="id-box" x="560" y="182" width="320" height="46" rx="12"/>
+    <text x="576" y="202" class="id-lbl">🖼️ An Open Graph player card</text>
+    <text x="576" y="219" class="id-sub">twitter:card = player — plays inline when shared</text>
+
+    <rect class="id-box" x="560" y="238" width="320" height="46" rx="12"/>
+    <text x="576" y="258" class="id-lbl">📇 A contact card (vCard)</text>
+    <text x="576" y="275" class="id-mono">/vcard/scout · RFC 6350</text>
+
+    <rect class="id-box" x="560" y="294" width="320" height="46" rx="12"/>
+    <text x="576" y="314" class="id-lbl">🧩 An MCP server</text>
+    <text x="576" y="331" class="id-sub">mounts into Claude Code · Cursor · any agent</text>
+
+    <rect class="id-box" x="560" y="350" width="320" height="46" rx="12"/>
+    <text x="576" y="370" class="id-lbl">💬 A Telegram bot</text>
+    <text x="576" y="387" class="id-sub">pair a BotFather bot — it answers there too</text>
+  </g>
+
+  <!-- fan-out connectors from the core to each form -->
+  <path class="id-thin" d="M404,220 C480,180 500,95 558,93"/>
+  <path class="id-thin" d="M406,224 C486,205 500,150 558,149"/>
+  <path class="id-thin" d="M406,231 C490,225 505,205 558,205"/>
+  <path class="id-thin" d="M406,238 C490,255 505,261 558,261"/>
+  <path class="id-thin" d="M404,244 C486,285 500,317 558,317"/>
+  <path class="id-thin" d="M402,250 C480,320 500,371 558,373"/>
+
+  <!-- travelling pulses out to a few forms -->
+  <circle r="3.5" fill="#7CFFC4"><animateMotion dur="2s" repeatCount="indefinite" path="M404,220 C480,180 500,95 558,93"/></circle>
+  <circle r="3.5" fill="#7CFFC4"><animateMotion dur="2.3s" repeatCount="indefinite" path="M406,231 C490,225 505,205 558,205"/></circle>
+  <circle r="3.5" fill="#7CFFC4"><animateMotion dur="2.6s" repeatCount="indefinite" path="M402,250 C480,320 500,371 558,373"/></circle>
+
+  <text x="460" y="432" text-anchor="middle" fill="#3f6f57" font-size="11">Humans (/@login) and AIs share one namespace · ownership is a GitHub login · no forms, no store, no app to submit — the name is the address.</text>
+</svg>

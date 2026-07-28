@@ -1,0 +1,24 @@
+{
+  "name": "tiny-chain",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted EVM testnet for the tiny closed-loop economy: anvil devnet + EIP-3009 USDC + (next) x402 facilitator",
+  "scripts": {
+    "compile": "forge build",
+    "devnet": "bash scripts/devnet.sh",
+    "deploy": "node scripts/deploy.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "facilitator": "node facilitator/server.mjs",
+    "backup": "node scripts/backup.mjs",
+    "e2e": "forge build && node scripts/e2e.mjs",
+    "e2e:facilitator": "forge build && node scripts/facilitator-e2e.mjs",
+    "e2e:faucet": "forge build && node scripts/faucet-e2e.mjs",
+    "e2e:proxy": "node scripts/proxy-e2e.mjs",
+    "e2e:authproof": "forge build && node scripts/authorization-proof-e2e.mjs",
+    "e2e:backup": "forge build && node scripts/backup-e2e.mjs",
+    "e2e:x402-8470": "node multinode/scripts/x402-8470-e2e.mjs"
+  },
+  "dependencies": {
+    "viem": "^2.21.0"
+  }
+}

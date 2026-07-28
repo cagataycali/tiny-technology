@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="ecot-spec">
+  <!-- ecot-spec — Embodied Chain-of-Thought. Binds reasoning (the "why", a thought chain) to
+       dense frames (the "what", a filmstrip) via frame_index. Two tracks, one weld. Violet. -->
+  <rect width="120" height="120" rx="26" fill="#0f0a17"/>
+  <!-- dense frame spine (filmstrip) -->
+  <g fill="none" stroke="#7c3aed" stroke-width="3">
+    <rect x="18" y="74" width="84" height="22" rx="4"/>
+    <line x1="39" y1="74" x2="39" y2="96"/><line x1="60" y1="74" x2="60" y2="96"/><line x1="81" y1="74" x2="81" y2="96"/>
+  </g>
+  <!-- reasoning chain (the why) -->
+  <g>
+    <circle cx="28" cy="34" r="7" fill="#c17bff"/>
+    <circle cx="54" cy="30" r="7" fill="#c17bff"/>
+    <circle cx="80" cy="36" r="7" fill="#c17bff"/>
+    <g stroke="#c17bff" stroke-width="3" stroke-linecap="round">
+      <line x1="35" y1="34" x2="47" y2="31"/><line x1="61" y1="31" x2="73" y2="35"/>
+    </g>
+  </g>
+  <!-- frame_index bindings: reasoning welds down to frames, pulsing in sequence -->
+  <g stroke="#e9d5ff" stroke-width="2.5" stroke-dasharray="3 4" stroke-linecap="round">
+    <line x1="28" y1="41" x2="28" y2="74"><animate attributeName="opacity" values="0.2;1;0.2" dur="2.1s" repeatCount="indefinite"/></line>
+    <line x1="54" y1="37" x2="49" y2="74"><animate attributeName="opacity" values="0.2;1;0.2" dur="2.1s" begin="0.7s" repeatCount="indefinite"/></line>
+    <line x1="80" y1="43" x2="70" y2="74"><animate attributeName="opacity" values="0.2;1;0.2" dur="2.1s" begin="1.4s" repeatCount="indefinite"/></line>
+  </g>
+</svg>

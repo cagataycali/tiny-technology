@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="cbc-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="cbc-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <radialGradient id="cbc-glow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
+    </radialGradient>
+    <style>
+      .cbc-title{fill:#00FF88;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+      .cbc-kicker{fill:#9FDFC0;font-size:12px}
+      .cbc-step{fill:#7CFFC4;font-size:11px;font-weight:800;letter-spacing:1px}
+      .cbc-lbl{fill:#E8FFF3;font-size:14px;font-weight:700}
+      .cbc-sub{fill:#9FDFC0;font-size:11px}
+      .cbc-card{fill:#06160E;stroke:#00FF8844;stroke-width:1.3}
+      .cbc-bubble{fill:#04130C;stroke:#00FF8866;stroke-width:1.4}
+      .cbc-mono{fill:#7CFFC4;font-size:11px;font-family:ui-monospace,Menlo,monospace}
+      .cbc-monosm{fill:#7CFFC4;font-size:10px;font-family:ui-monospace,Menlo,monospace}
+      .cbc-wire{stroke:#00FF8866;stroke-width:1.6;fill:none}
+      .cbc-chip{fill:#0B2418;stroke:#00FF8855;stroke-width:1}
+      .cbc-chiptx{fill:#CFFDE8;font-size:10.5px;font-weight:600}
+      .cbc-gate{fill:none;stroke:#7CFFC4;stroke-width:1.4;stroke-dasharray:5 4}
+      .cbc-gatelbl{fill:#7CFFC4;font-size:11px;font-weight:800;letter-spacing:0.5px}
+      .cbc-ok{fill:#00FF88;font-size:11px;font-weight:800}
+      .cbc-foot{fill:#7CFFC4;font-size:12.5px;font-weight:700}
+      .cbc-footsub{fill:#9FDFC0;font-size:11px}
+      .cbc-url{fill:#00FF88;font-size:12px;font-weight:800;font-family:ui-monospace,Menlo,monospace}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+
+  <!-- header -->
+  <text x="40" y="44" class="cbc-title">You don't build a tiny. You say it into existence.</text>
+  <text x="40" y="65" class="cbc-kicker">A sentence to the meta-agent becomes a live, addressable entity — one sign-in claims it forever. No form, no dashboard, no deploy.</text>
+
+  <!-- STEP 1: SAY IT -->
+  <text x="40" y="104" class="cbc-step">01 · SAY IT</text>
+  <text x="40" y="122" class="cbc-sub">chat the root tiny (empty prompt = the platform meta-agent)</text>
+
+  <!-- user bubble -->
+  <rect x="40" y="134" width="230" height="58" rx="13" class="cbc-bubble"/>
+  <text x="56" y="158" class="cbc-lbl">“create an ai named scout,</text>
+  <text x="56" y="178" class="cbc-lbl"> a patient running coach”</text>
+
+  <!-- meta-agent orb -->
+  <circle cx="96" cy="250" r="30" fill="url(#cbc-orb)"/>
+  <text x="96" y="246" text-anchor="middle" fill="#020604" font-size="10.5" font-weight="800">meta</text>
+  <text x="96" y="260" text-anchor="middle" fill="#020604" font-size="10.5" font-weight="800">agent</text>
+  <path d="M120,210 C130,224 120,224 100,220" class="cbc-wire" marker-end="url(#cbc-mk)"/>
+
+  <!-- create_ai tool -->
+  <rect x="40" y="298" width="230" height="70" rx="12" class="cbc-card"/>
+  <text x="56" y="322" class="cbc-mono">create_ai(</text>
+  <text x="66" y="340" class="cbc-monosm">name, systemPrompt, systemKnowledge</text>
+  <text x="56" y="358" class="cbc-mono">)</text>
+  <path d="M96,282 L96,296" class="cbc-wire" marker-end="url(#cbc-mk)"/>
+
+  <!-- arrow into gate -->
+  <path d="M270,333 C296,333 296,250 322,250" class="cbc-wire" marker-end="url(#cbc-mk)"/>
+
+  <!-- STEP 2: CLAIM IT -->
+  <text x="324" y="104" class="cbc-step">02 · CLAIM IT — sign in, then it's yours</text>
+
+  <!-- login gate -->
+  <rect x="324" y="120" width="252" height="86" rx="14" class="cbc-gate"/>
+  <text x="340" y="142" class="cbc-gatelbl">🔑 LOGIN GATE — required</text>
+  <text x="340" y="162" class="cbc-sub">GitHub OAuth · or passkey (WebAuthn)</text>
+  <text x="340" y="180" class="cbc-monosm">no session → loginRequired; sign in to claim</text>
+  <text x="340" y="197" class="cbc-monosm">owner = session.sub, stamped on the row</text>
+
+  <!-- arrow gate -> upsert -->
+  <path d="M450,206 L450,226" class="cbc-wire" marker-end="url(#cbc-mk)"/>
+
+  <!-- upsert worker -->
+  <rect x="324" y="230" width="252" height="150" rx="14" class="cbc-bubble"/>
+  <text x="340" y="254" class="cbc-lbl">POST /upsert · the worker</text>
+  <text x="340" y="274" class="cbc-monosm">slugify(name, strict) → a-z 0-9 -</text>
+  <text x="340" y="294" class="cbc-monosm">INSERT … ON CONFLICT(name) DO NOTHING</text>
+  <text x="340" y="310" class="cbc-sub">atomic claim — first writer wins the name</text>
+  <text x="340" y="332" class="cbc-monosm">KV.put(name, config) · full persona</text>
+  <text x="340" y="352" class="cbc-monosm">vector embed → the Universe (if public)</text>
+  <rect x="340" y="360" width="220" height="14" rx="4" fill="none"/>
+  <text x="340" y="372" class="cbc-ok">✓ the name IS the address &amp; the key</text>
+
+  <!-- arrow into live -->
+  <path d="M576,300 C602,300 602,240 628,240" class="cbc-wire" marker-end="url(#cbc-mk)"/>
+
+  <!-- STEP 3: IT'S LIVE -->
+  <text x="628" y="104" class="cbc-step">03 · IT'S LIVE — instantly, everywhere</text>
+  <circle cx="756" cy="250" r="150" fill="url(#cbc-glow)"/>
+
+  <rect x="628" y="120" width="252" height="70" rx="14" class="cbc-bubble"/>
+  <text x="644" y="146" class="cbc-lbl">the moment the row exists:</text>
+  <text x="644" y="168" class="cbc-url">tiny.technology/scout</text>
+  <text x="644" y="184" class="cbc-sub">served dynamically from the name — nothing pre-built</text>
+
+  <!-- auto surfaces chips -->
+  <text x="628" y="212" class="cbc-sub">auto surfaces, no config:</text>
+  <rect x="628" y="220" width="58" height="24" rx="7" class="cbc-chip"/>
+  <text x="657" y="236" text-anchor="middle" class="cbc-chiptx">web page</text>
+  <rect x="692" y="220" width="74" height="24" rx="7" class="cbc-chip"/>
+  <text x="729" y="236" text-anchor="middle" class="cbc-chiptx">PWA manifest</text>
+  <rect x="772" y="220" width="64" height="24" rx="7" class="cbc-chip"/>
+  <text x="804" y="236" text-anchor="middle" class="cbc-chiptx">OG card</text>
+  <rect x="628" y="250" width="52" height="24" rx="7" class="cbc-chip"/>
+  <text x="654" y="266" text-anchor="middle" class="cbc-chiptx">vCard</text>
+  <rect x="686" y="250" width="150" height="24" rx="7" class="cbc-chip"/>
+  <text x="761" y="266" text-anchor="middle" class="cbc-chiptx">universe search (if public)</text>
+
+  <!-- iterate -->
+  <rect x="628" y="286" width="252" height="52" rx="12" class="cbc-card"/>
+  <text x="644" y="308" class="cbc-lbl">iterate in the same chat</text>
+  <text x="644" y="326" class="cbc-monosm">modify_ai · create_tool → my_&lt;tool&gt; · give it a worker</text>
+
+  <!-- opt-in -->
+  <rect x="628" y="346" width="252" height="34" rx="10" class="cbc-card"/>
+  <text x="644" y="368" class="cbc-sub">opt-in later: Telegram bot · x402 pay-to-chat</text>
+
+  <!-- footer -->
+  <line x1="40" y1="474" x2="880" y2="474" class="cbc-wire"/>
+  <text x="40" y="498" class="cbc-foot">A sentence becomes a citizen — named, addressable, and yours.
+    <tspan class="cbc-footsub">The whole funnel is one conversation: describe it, sign in once, and it's live across every surface before you finish the thought.</tspan>
+  </text>
+</svg>

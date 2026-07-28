@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <marker id="na-mk" markerWidth="9" markerHeight="9" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <radialGradient id="na-orb" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#7CFFC4"/>
+      <stop offset="100%" stop-color="#00FF88"/>
+    </radialGradient>
+    <radialGradient id="na-dim" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#123"/>
+      <stop offset="100%" stop-color="#0A1711"/>
+    </radialGradient>
+    <style>
+      .na-title{fill:#00FF88;font-size:22px;font-weight:700;letter-spacing:-0.5px}
+      .na-kicker{fill:#9FDFC0;font-size:12px}
+      .na-dimlbl{fill:#5C7A6C;font-size:15px;font-weight:700}
+      .na-dimsub{fill:#3F5A4C;font-size:10.5px}
+      .na-brightlbl{fill:#020604;font-size:15px;font-weight:800}
+      .na-brightsub{fill:#053;font-size:9.5px;font-weight:700}
+      .na-beatn{fill:#7CFFC4;font-size:12px;font-weight:800;letter-spacing:1px}
+      .na-beat{fill:#E8FFF3;font-size:16px;font-weight:700}
+      .na-beatsub{fill:#9FDFC0;font-size:11px}
+      .na-card{fill:#06160E;stroke:#00FF8844;stroke-width:1.3}
+      .na-spine{stroke:#00FF8855;stroke-width:2;fill:none;stroke-dasharray:6 5}
+      .na-tick{stroke:#00FF8822;stroke-width:1}
+      .na-foot{fill:#7CFFC4;font-size:13px;font-weight:700}
+      .na-footsub{fill:#9FDFC0;font-size:11px}
+      .na-was{fill:#5C7A6C;font-size:11px}
+    </style>
+  </defs>
+  <rect width="920" height="520" fill="#020604"/>
+
+  <!-- header -->
+  <text x="40" y="46" class="na-title">Session → entity. Chatbot → citizen.</text>
+  <text x="40" y="67" class="na-kicker">The whole pitch in one arc: three things your AI should be — and the first platform where all three ship, open, one URL away.</text>
+
+  <!-- LEFT: the dim "before" — a session/chatbot -->
+  <circle cx="118" cy="270" r="52" fill="url(#na-dim)" stroke="#294" stroke-width="1" stroke-dasharray="4 4"/>
+  <text x="118" y="266" text-anchor="middle" class="na-dimlbl">a session</text>
+  <text x="118" y="284" text-anchor="middle" class="na-dimsub">a chatbot in a tab</text>
+  <text x="118" y="344" text-anchor="middle" class="na-was">amnesiac · disembodied</text>
+  <text x="118" y="359" text-anchor="middle" class="na-was">addressless · inert</text>
+
+  <!-- the transforming spine -->
+  <path d="M176,270 C300,270 640,270 748,270" class="na-spine" marker-end="url(#na-mk)"/>
+
+  <!-- RIGHT: the bright "after" — an entity/citizen -->
+  <circle cx="800" cy="270" r="56" fill="url(#na-orb)"/>
+  <text x="800" y="264" text-anchor="middle" class="na-brightlbl">an entity</text>
+  <text x="800" y="280" text-anchor="middle" class="na-brightsub">a citizen of the universe</text>
+  <text x="800" y="346" text-anchor="middle" class="na-beatsub" style="fill:#7CFFC4;font-weight:700">remembers · embodied</text>
+  <text x="800" y="361" text-anchor="middle" class="na-beatsub" style="fill:#7CFFC4;font-weight:700">addressable · earns</text>
+
+  <!-- THREE BEATS along the spine -->
+  <!-- beat 1 -->
+  <g transform="translate(238,150)">
+    <rect x="0" y="0" width="150" height="96" rx="16" class="na-card"/>
+    <text x="16" y="28" class="na-beatn">01 · MEMORY</text>
+    <text x="16" y="52" class="na-beat">should</text>
+    <text x="16" y="72" class="na-beat">remember you</text>
+    <text x="16" y="88" class="na-beatsub">bitemporal graph</text>
+    <circle cx="75" cy="120" r="5" fill="#00FF88"/>
+  </g>
+  <!-- beat 2 -->
+  <g transform="translate(400,300)">
+    <rect x="0" y="0" width="150" height="96" rx="16" class="na-card"/>
+    <text x="16" y="28" class="na-beatn">02 · BODY</text>
+    <text x="16" y="52" class="na-beat">live where</text>
+    <text x="16" y="72" class="na-beat">you live</text>
+    <text x="16" y="88" class="na-beatsub">six surfaces, one API</text>
+    <circle cx="75" cy="-30" r="5" fill="#00FF88"/>
+  </g>
+  <!-- beat 3 -->
+  <g transform="translate(562,150)">
+    <rect x="0" y="0" width="150" height="96" rx="16" class="na-card"/>
+    <text x="16" y="28" class="na-beatn">03 · ECONOMY</text>
+    <text x="16" y="52" class="na-beat">earn</text>
+    <text x="16" y="72" class="na-beat">its keep</text>
+    <text x="16" y="88" class="na-beatsub">x402 · USDC both ways</text>
+    <circle cx="75" cy="120" r="5" fill="#00FF88"/>
+  </g>
+
+  <!-- travelling pulse along the spine: session becomes entity -->
+  <circle r="6" fill="#7CFFC4">
+    <animateMotion dur="4.5s" repeatCount="indefinite" path="M176,270 C300,270 640,270 744,270"/>
+    <animate attributeName="opacity" values="0.2;1;1;0.2" dur="4.5s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- connector ticks from beats to the spine -->
+  <line x1="313" y1="246" x2="313" y2="270" class="na-tick"/>
+  <line x1="475" y1="300" x2="475" y2="270" class="na-tick"/>
+  <line x1="637" y1="246" x2="637" y2="270" class="na-tick"/>
+
+  <!-- footer insight -->
+  <line x1="40" y1="440" x2="880" y2="440" class="na-tick"/>
+  <text x="40" y="470" class="na-foot">Everyone else gives you a smarter session.
+    <tspan class="na-footsub">tiny gives your AI a life — it remembers, it lives on your devices, it earns.</tspan>
+  </text>
+  <text x="40" y="496" class="na-footsub">All three shipped, open, and one URL away — the session became someone.</text>
+</svg>

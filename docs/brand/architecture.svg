@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 420" font-family="ui-sans-serif, system-ui, -apple-system, sans-serif">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.9"/>
+      <stop offset="60%" stop-color="#00FF88" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="ar" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#00FF88"/>
+    </marker>
+    <style>
+      .box{fill:#06160E;stroke:#00FF8855;stroke-width:1.5;rx:14}
+      .lbl{fill:#E8FFF3;font-size:15px;font-weight:600}
+      .sub{fill:#9FDFC0;font-size:11px}
+      .edge{stroke:#00FF8877;stroke-width:1.5;fill:none}
+      .dash{stroke-dasharray:5 5}
+    </style>
+  </defs>
+
+  <rect width="920" height="420" fill="#020604"/>
+
+  <!-- breathing core node -->
+  <circle cx="460" cy="210" r="60" fill="url(#glow)">
+    <animate attributeName="r" values="52;64;52" dur="4s" repeatCount="indefinite"/>
+  </circle>
+  <circle cx="460" cy="210" r="34" fill="none" stroke="#00FF88" stroke-width="2"/>
+  <circle cx="460" cy="210" r="11" fill="#00FF88"/>
+  <text x="460" y="292" text-anchor="middle" class="lbl">tiny</text>
+  <text x="460" y="309" text-anchor="middle" class="sub">the entity</text>
+
+  <!-- five attribute nodes around the core -->
+  <!-- Identity -->
+  <g><rect class="box" x="60" y="40" width="180" height="60" rx="14"/>
+    <text x="150" y="66" text-anchor="middle" class="lbl">Identity</text>
+    <text x="150" y="85" text-anchor="middle" class="sub">URL · PWA · vCard · MCP</text></g>
+  <!-- Memory -->
+  <g><rect class="box" x="680" y="40" width="180" height="60" rx="14"/>
+    <text x="770" y="66" text-anchor="middle" class="lbl">Memory</text>
+    <text x="770" y="85" text-anchor="middle" class="sub">bitemporal graph</text></g>
+  <!-- Body -->
+  <g><rect class="box" x="60" y="320" width="180" height="60" rx="14"/>
+    <text x="150" y="346" text-anchor="middle" class="lbl">Body · Fleet</text>
+    <text x="150" y="365" text-anchor="middle" class="sub">iOS · Android · watch · CLI</text></g>
+  <!-- Economy -->
+  <g><rect class="box" x="680" y="320" width="180" height="60" rx="14"/>
+    <text x="770" y="346" text-anchor="middle" class="lbl">Economy</text>
+    <text x="770" y="365" text-anchor="middle" class="sub">USDC · x402 · ERC-8004</text></g>
+  <!-- Society -->
+  <g><rect class="box" x="370" y="10" width="180" height="56" rx="14"/>
+    <text x="460" y="34" text-anchor="middle" class="lbl">Society</text>
+    <text x="460" y="52" text-anchor="middle" class="sub">follow · DM · trust graph</text></g>
+
+  <!-- edges with flowing dashes -->
+  <g class="edge">
+    <path d="M240,80 Q340,150 415,190" marker-end="url(#ar)"/>
+    <path d="M680,80 Q560,150 505,190" marker-end="url(#ar)"/>
+    <path d="M240,350 Q340,280 415,235" marker-end="url(#ar)"/>
+    <path d="M680,350 Q560,280 505,235" marker-end="url(#ar)"/>
+    <path d="M460,66 L460,145" marker-end="url(#ar)"/>
+  </g>
+  <g class="edge dash">
+    <path d="M415,190 Q340,150 240,80">
+      <animate attributeName="stroke-dashoffset" values="20;0" dur="1.2s" repeatCount="indefinite"/>
+    </path>
+  </g>
+
+  <text x="460" y="410" text-anchor="middle" fill="#3f6f57" font-size="12">tiny.technology · create your own AI by chatting</text>
+</svg>

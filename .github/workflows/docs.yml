@@ -1,0 +1,123 @@
+# 📖 Docs — build the public site and publish it to GitHub Pages.
+#
+#   https://cagataycali.github.io/tiny-technology/
+#
+# The site is the answer to "why does this exist and can I trust it" — product,
+# platform, business, brand and the films, in one place, for someone who did not
+# arrive through a terminal. The REPO answers a different question ("is it
+# real"), so the two link to each other rather than duplicating: docs/CONCEPTS.md
+# is deliberately excluded from the site and read on GitHub next to the code it
+# cites (see the note in mkdocs.yml).
+#
+# ── One-time setup, or this job fails on its first run ──────────────────────
+#   Settings → Pages → Build and deployment → Source: **GitHub Actions**
+# Not "Deploy from a branch". This workflow uploads an artifact and deploys it
+# through the Pages API, so nothing is ever committed to a gh-pages branch —
+# a rendered site in git history is 12MB per rebuild, forever, on a repo whose
+# whole point is that people read its history.
+#
+# ── What runs when ──────────────────────────────────────────────────────────
+# push to main touching docs/, mkdocs.yml, overrides/ → build + deploy
+# pull_request touching the same                      → build ONLY, no deploy
+#
+# The PR leg is the point of `--strict`: mkdocs fails the build on a broken
+# internal link or a nav entry pointing at a file that does not exist. That
+# turns "a reporter hits a 404 on the pricing page" into a red check on the PR
+# that introduced it. Deploys are gated on the default branch, so a fork's PR
+# can never publish.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'overrides/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'overrides/**'
+      - '.github/workflows/docs.yml'
+  # Manual re-publish, for when Pages settings change but the content did not.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A second push while a deploy is in flight should supersede it, not queue
+# behind it — but never CANCEL a running deploy, which can leave Pages serving
+# a half-published site.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      # Pinned deliberately: mkdocs-material's own maintainers have announced
+      # that MkDocs 2.0 removes the plugin system and rewrites theming with no
+      # migration path. An unpinned `pip install` would break this site on
+      # somebody else's release schedule, on a push that changed one paragraph.
+      - name: Install mkdocs
+        run: pip install 'mkdocs-material>=9.5,<10' 'pymdown-extensions>=10,<11'
+
+      # --strict: warnings are errors. Broken internal links and missing nav
+      # targets fail here instead of shipping as 404s.
+      - name: Build (strict)
+        run: mkdocs build --strict
+
+      # Cheap guard against the failure --strict does NOT catch: mkdocs
+      # validates markdown links, not raw <img>/<video> src attributes, and the
+      # gallery and every diagram-bearing page are written in inline HTML. A
+      # silently missing SVG is exactly the kind of thing a visiting reporter
+      # sees and we don't.
+      - name: Every local asset reference resolves
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          bad, checked = [], 0
+          for h in pathlib.Path('site').rglob('*.html'):
+              html = h.read_text(errors='ignore')
+              for m in re.finditer(r'(?:src|href)="([^"#?:]+\.(?:svg|png|jpg|jpeg|mp4|css|js))"', html):
+                  u = m.group(1)
+                  if u.startswith('/') or '//' in u:
+                      continue
+                  checked += 1
+                  if not (h.parent / u).resolve().exists():
+                      bad.append(f'{h.relative_to("site")} -> {u}')
+          print(f'checked {checked} local asset references')
+          if bad:
+              print(f'::error::{len(bad)} broken asset reference(s)')
+              for b in bad:
+                  print(f'  {b}')
+              sys.exit(1)
+          PY
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  # Separate job so the PR leg builds and verifies without ever touching Pages.
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

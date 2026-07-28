@@ -1,0 +1,68 @@
+{
+  "_comment": [
+    "Input to `besu operator generate-blockchain-config` — produces the 8470 genesis",
+    "plus one keypair per validator. See docs/multinode-tiny-chain-design.md.",
+    "",
+    "chainId 8470: a NEW id, deliberately not the live 8469 (which production settles",
+    "on and which is a single anvil process). Running both is the whole migration plan.",
+    "",
+    "P1 is HEADER mode: the validator set lives in the genesis extraData. Contract mode",
+    "(validatorcontractaddress + getValidators(), which is what makes validator entry",
+    "permissionless) is P2 — Besu supports transitioning between the two at a future",
+    "block, so shipping header-mode first costs no rework.",
+    "",
+    "blockperiodseconds 2 matches the live chain, so payment-path latency assumptions",
+    "(x402 settles BEFORE serving) carry over unchanged.",
+    "",
+    "zeroBaseFee: gas is FREE but still METERED — gasLimit is real. Free-and-unmetered",
+    "would be an unbounded write channel once anyone can validate (design doc 0.1).",
+    "",
+    "4 validators is the minimum meaningful QBFT set: f = floor((n-1)/3) = 1, so it",
+    "tolerates exactly one Byzantine node. A 3-node set has f=0 and tolerates nothing."
+  ],
+  "genesis": {
+    "config": {
+      "chainId": 8470,
+      "londonBlock": 0,
+      "_shanghaiTime_comment": "REQUIRED, and the trap is silent: besu's own dev genesis stops at londonBlock, but solc 0.8.24 emits PUSH0 (0x5f), a Shanghai opcode. On a London chain EVERY contract deploy dies with 'Invalid opcode: 0x5f' — the chain itself looks perfectly healthy, so the failure reads as a broken deploy script. Post-merge forks are TIMESTAMP-keyed, not block-keyed, and genesis timestamp is 0, so 0 activates it from block 1. Matching the live 8469 (anvil, modern fork) also means a contract that works in prod can't fail here for a reason prod never had.",
+      "shanghaiTime": 0,
+      "zeroBaseFee": true,
+      "qbft": {
+        "blockperiodseconds": 2,
+        "epochlength": 30000,
+        "requesttimeoutseconds": 4
+      }
+    },
+    "nonce": "0x0",
+    "timestamp": "0x0",
+    "_gasLimit_comment": "30,000,000 — mainnet-scale on purpose. Free gas still needs a REAL ceiling, or 'metered' is a word with no number behind it (design §0.1). Was 0x1fffffffffffff, which metered nothing.",
+    "gasLimit": "0x1c9c380",
+    "difficulty": "0x1",
+    "_mixHash_comment": "The QBFT/IBFT magic value — ASCII 'ctical byzantine fault tolerance', EXACTLY 32 bytes. Besu rejects any other value outright; a 33rd byte fails with 'Invalid mixHash'.",
+    "mixHash": "0x63746963616c2062797a616e74696e65206661756c7420746f6c6572616e6365",
+    "coinbase": "0x0000000000000000000000000000000000000000",
+    "_alloc_comment": [
+      "NOT decoration, and NOT (only) about paying for gas. Proven by controlled test on this",
+      "devnet: a sender whose account does not exist in state has its txs accepted by the pool,",
+      "gossiped to every peer, and then NEVER selected into a block — silently, forever. The pool",
+      "reports them pending, blocks keep being produced empty, and no error is logged anywhere.",
+      "Funding the SAME sender with 1 wei makes the SAME zero-fee tx mine immediately.",
+      "",
+      "So zero-price gas does not mean zero-balance senders. Anyone who wants to submit a tx here",
+      "— including a joiner staking from its validator key — needs a nonzero balance first. That's",
+      "a real onboarding step (P5 must ship a drip), not a footnote."
+    ],
+    "alloc": {
+      "f39fd6e51aad88f6f4ce6ab8827279cfffb92266": { "balance": "0x21e19e0c9bab2400000" },
+      "70997970c51812dc3a010c7d01b50e0d17dc79c8": { "balance": "0x21e19e0c9bab2400000" },
+      "3c44cdddb6a900fa2b585dd299e03d12fa4293bc": { "balance": "0x21e19e0c9bab2400000" },
+      "90f79bf6eb2c4f870365e785982e1f101e93b906": { "balance": "0x21e19e0c9bab2400000" }
+    }
+  },
+  "blockchain": {
+    "nodes": {
+      "generate": true,
+      "count": 4
+    }
+  }
+}
