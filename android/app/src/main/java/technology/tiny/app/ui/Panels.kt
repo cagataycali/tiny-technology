@@ -23,8 +23,14 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.VolumeUp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import com.meta.wearable.dat.core.Wearables
+import com.meta.wearable.dat.core.types.Permission
+import com.meta.wearable.dat.core.types.PermissionStatus
+import com.meta.wearable.dat.core.types.RegistrationState
+import technology.tiny.app.fleet.WearablesBridge
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -323,6 +329,9 @@ fun SettingsSheet(app: TinyApp, onReplayTour: () -> Unit = {}, onDismiss: () -> 
                 style = MaterialTheme.typography.bodySmall,
                 color = TinyGray,
             )
+            Spacer(Modifier.height(16.dp))
+
+            GlassesSection(app)
             Spacer(Modifier.height(12.dp))
 
             OutlinedTextField(
@@ -487,6 +496,82 @@ private fun SectionLabel(icon: ImageVector, text: String) {
 }
 
 /** A filled/hollow status dot — the native replacement for the 🟢/⚫ online glyph. */
+/**
+ * 🕶️ Meta glasses (iOS Settings 🕶 section parity): status + link/unlink +
+ * the two permission launchers the DAT flow needs — BLUETOOTH_CONNECT (the
+ * one Android runtime permission the SDK requires before initialize()) and
+ * the glasses-camera grant, which happens INSIDE the Meta AI app via
+ * Wearables.RequestPermissionContract (an Activity contract — this section
+ * owns the launcher; WearablesBridge only checks).
+ */
+@Composable
+private fun GlassesSection(app: TinyApp) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+    var btGranted by remember { mutableStateOf(WearablesBridge.hasBtPermission(app)) }
+    var initialized by remember { mutableStateOf(WearablesBridge.ensureInitialized(app)) }
+    var cameraNote by remember { mutableStateOf<String?>(null) }
+
+    // Registration state only exists once the SDK is initialized — produceState
+    // re-runs when the BT grant flips `initialized` true.
+    val regState by produceState<RegistrationState?>(null, initialized) {
+        if (initialized) Wearables.registrationState.collect { value = it }
+    }
+
+    val btAsk = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        btGranted = granted
+        if (granted) initialized = WearablesBridge.ensureInitialized(app)
+    }
+    val cameraAsk = rememberLauncherForActivityResult(Wearables.RequestPermissionContract()) { result ->
+        val status = result.getOrDefault(PermissionStatus.Denied)
+        cameraNote = if (status == PermissionStatus.Granted) "camera access granted — your tiny can see through the glasses"
+        else "camera access denied in the Meta AI app"
+    }
+
+    Text("🕶 meta glasses", style = MaterialTheme.typography.titleSmall)
+    Spacer(Modifier.height(8.dp))
+    when {
+        !btGranted -> {
+            Button(onClick = { btAsk.launch(android.Manifest.permission.BLUETOOTH_CONNECT) }, modifier = Modifier.fillMaxWidth()) {
+                Text("allow bluetooth to find your glasses")
+            }
+        }
+        regState == RegistrationState.REGISTERED -> {
+            Text("linked", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = { cameraAsk.launch(Permission.CAMERA) }) { Text("grant camera") }
+                TextButton(onClick = { activity?.let { WearablesBridge.startUnregistration(it) } }) { Text("unlink") }
+            }
+        }
+        regState == RegistrationState.REGISTERING -> {
+            Text("linking via Meta AI…", style = MaterialTheme.typography.bodySmall, color = TinyGray)
+        }
+        else -> {
+            Button(
+                onClick = { activity?.let { WearablesBridge.startRegistration(it) } },
+                enabled = activity != null,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("link glasses via Meta AI") }
+        }
+    }
+    cameraNote?.let {
+        Spacer(Modifier.height(6.dp))
+        Text(it, style = MaterialTheme.typography.bodySmall, color = TinyGray)
+    }
+    Text(
+        "Link your Meta AI glasses to give your tiny eyes — it can capture what you're looking at when you ask. Unlink here or in the Meta AI app any time.",
+        style = MaterialTheme.typography.bodySmall,
+        color = TinyGray,
+    )
+}
+
+private tailrec fun android.content.Context.findActivity(): android.app.Activity? = when (this) {
+    is android.app.Activity -> this
+    is android.content.ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 @Composable
 private fun StatusDot(online: Boolean) {
     Icon(

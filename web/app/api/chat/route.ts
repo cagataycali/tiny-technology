@@ -19,7 +19,7 @@ import { ownsTiny } from '@/lib/chat/page-code-trust'
 // Shared with /api/job-run so scheduled jobs run with the owner's real
 // capability set (forged my_* tools, OpenAPI skills, use_telegram) —
 // runToolApi proxies to the Node sandbox (edge forbids new Function).
-import { runToolApi, makeForgedTools, buildDynamicTools, makeUseTelegramTool, makeUseDeviceTool, makeGenerateImageTool, makeScreenshotTool, makeWalletTool } from '@/lib/chat/tools/platform'
+import { runToolApi, makeForgedTools, buildDynamicTools, makeUseTelegramTool, makeUseDeviceTool, makeGenerateImageTool, makeScreenshotTool, makeMetaTakePhotoTool, makeMetaRecordVideoTool, makeMetaListenTool, makeMetaGlassesStatusTool, makeWalletTool } from '@/lib/chat/tools/platform'
 
 export const runtime = 'edge'
 export const maxDuration = 300
@@ -1320,6 +1320,23 @@ You are being consulted by another tiny AI (${tinyData.name}). Answer as yoursel
   // 90s timeout). See docs/use-device-screenshot-scoping-2026-07-23.md.
   const screenshotTool = makeScreenshotTool(session?.sub)
 
+  // 🕶️ meta_take_photo — one photo through the user's Meta AI glasses,
+  // screenshot's round-trip twin (the glasses camera instead of the screen).
+  // iOS-only mount until the Android executor lands: the iOS client posts a
+  // fast {ok:false} when no glasses are linked, so nothing strands.
+  const metaTakePhotoTool = makeMetaTakePhotoTool(session?.sub)
+
+  // 🎥 meta_record_video — toggle-recording through the glasses (start on
+  // first call, collect on second). Same iOS-only mount as the photo tool.
+  const metaRecordVideoTool = makeMetaRecordVideoTool(session?.sub)
+
+  // 👂 meta_listen — N seconds of the glasses mic as an on-device transcript
+  // (audio never uploads). Same iOS-only mount.
+  const metaListenTool = makeMetaListenTool(session?.sub)
+
+  // 🕶️ meta_glasses_status — instant hardware poll (link/ready/thermal).
+  const metaGlassesStatusTool = makeMetaGlassesStatusTool(session?.sub)
+
   // learn/recall/unlearn definitions live in lib/chat/tools/memory.ts
   const learnTool = makeLearnTool(session)
   const recallTool = makeRecallTool(session)
@@ -1747,7 +1764,10 @@ ${semanticOnly.length ? `Relevant to this message (semantic recall):\n${semantic
     listTinyTool,
     retrieveTool,
     isNativeApp ? renderUiNativeTool : renderUiTool,
-    ...(tinySession === 'tiny-ios' ? [generateImageTool] : []),
+    ...(tinySession === 'tiny-ios' ? [generateImageTool, metaTakePhotoTool, metaRecordVideoTool, metaListenTool, metaGlassesStatusTool] : []),
+    // 🤖 Android now carries the full glasses set (fleet/Wearables{,Recorder,
+    // Listener}.kt) — same executors-per-mount rule as iOS.
+    ...(tinySession === 'tiny-android' ? [metaTakePhotoTool, metaRecordVideoTool, metaListenTool, metaGlassesStatusTool] : []),
     // screenshot ships on BOTH native apps (iOS ReplayKit + Android
     // MediaProjection executors both verified complete); generate_image is
     // iOS-only (no Android on-device image gen yet).

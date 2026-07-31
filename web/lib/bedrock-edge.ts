@@ -119,7 +119,7 @@ export async function* parseEventStream(body: ReadableStream<Uint8Array>): Async
 // Strands message JSON → Converse content blocks
 // ---------------------------------------------------------------------------
 
-function toConverseContent(blocks: any[]): any[] {
+export function toConverseContent(blocks: any[]): any[] {
   const out: any[] = []
   for (const b of blocks) {
     if (b.text !== undefined) out.push({ text: b.text })
@@ -129,9 +129,21 @@ function toConverseContent(blocks: any[]): any[] {
         toolResult: {
           toolUseId: b.toolResult.toolUseId,
           status: b.toolResult.status,
-          content: (b.toolResult.content || []).map((c: any) =>
-            c.json !== undefined ? { json: c.json } : { text: c.text ?? JSON.stringify(c) }
-          ),
+          content: (b.toolResult.content || []).map((c: any) => {
+            if (c.json !== undefined) return { json: c.json }
+            // 📸 Image blocks in tool results are how the round-trip device
+            // tools (meta_take_photo / screenshot / generate_image /
+            // use_device) hand the model REAL pixels. Converse supports them
+            // natively; before this branch existed they fell through to
+            // JSON.stringify — a screenful of "{\"0\":137,…}" bytes-as-text
+            // the model can't see, which read as "the tool returned but the
+            // agent is blind" (glasses QA, 2026-07-28).
+            if (c.image?.source) {
+              const bytes = toBase64(c.image.source.bytes)
+              if (bytes) return { image: { format: c.image.format || 'jpeg', source: { bytes } } }
+            }
+            return { text: c.text ?? JSON.stringify(c) }
+          }),
         },
       })
     } else if (b.reasoning) {

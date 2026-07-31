@@ -314,6 +314,19 @@ enum Api {
         /// is polling back into the loop (the model SEES the screen). `reason`
         /// is the agent's stated purpose, shown in the consent prompt.
         case screenshot(id: String, reason: String)
+        /// meta_take_photo tool — screenshot's ROUND-TRIP twin through the
+        /// Meta glasses camera (what the USER is looking at). The app-target
+        /// executor lives in Wearables.swift; watch/widget targets decode the
+        /// event and ignore it (no MWDAT there).
+        case metaTakePhoto(id: String)
+        /// meta_record_video — TOGGLE recording through the glasses camera
+        /// (start on first call, stop+upload on second; GlassesRecorder).
+        case metaRecordVideo(id: String)
+        /// meta_listen — N seconds of the glasses mic → on-device transcript
+        /// posted to the mailbox (audio never leaves the phone).
+        case metaListen(id: String, seconds: Int)
+        /// meta_glasses_status — instant facts from state the app holds.
+        case metaGlassesStatus(id: String)
         /// pay_x402 tool — CONFIRM-EVERY-PAYMENT. The tool returns a signed
         /// quote (no money moved); the user must approve. We surface the quote
         /// so the bubble can render a native Approve/Decline card whose Approve
@@ -344,9 +357,7 @@ enum Api {
         // Platform note rides as a system message (the route folds those into
         // the prompt) — it steers render_ui toward props the native renderer
         // can draw, since componentCode never executes on iOS.
-        var messages: [[String: Any]] = [[
-            "role": "system",
-            "content": [["text": """
+        var platformNote = """
             📱 Native iOS app: replies render in the tiny iOS app. \
             render_ui: componentCode does NOT run here — put the displayable data in `props` \
             (e.g. {"data": [{"label": "Mon", "value": 12}, …]} plus a `title`); charts/key-values render natively from props. \
@@ -356,7 +367,15 @@ enum Api {
             copy_to_clipboard / set_brightness / play_sound also act on THIS physical phone. \
             generate_image: renders ON this phone's Neural Engine — the finished image comes back to you AND shows in the chat. \
             Keep replies mobile-width friendly.
-            """]],
+            """
+        // 🕶️ Only builds that carry the DAT executor advertise the glasses
+        // tool (watch/widget targets compile this file without MWDAT).
+        #if canImport(MWDATCore) && canImport(MWDATCamera)
+        platformNote += " meta_take_photo: one real photo through the user's Meta glasses (when linked — the extra system context says so) showing what they are physically LOOKING AT."
+        #endif
+        var messages: [[String: Any]] = [[
+            "role": "system",
+            "content": [["text": platformNote]],
         ]]
         // Continuity context (turn log + memories) rides as a second system
         // message — exactly how the web injects buildContinuityContext()

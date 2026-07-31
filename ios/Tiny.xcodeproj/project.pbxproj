@@ -29,6 +29,7 @@
 		41669068A55A4B2CEBA7C949 /* TinyWatch.app in Embed Watch Content */ = {isa = PBXBuildFile; fileRef = C31FC2A2E071239A5A0880AF /* TinyWatch.app */; platformFilter = ios; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		42037C387EB34FCDE381DAFE /* Continuity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 069C139015B9508A76FFE116 /* Continuity.swift */; };
 		426EA0CAE0237011FD8E9D59 /* Explorer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 51D93C92C063D8A021F85385 /* Explorer.swift */; };
+		4604C31E8DD2CD95A42BECD6 /* Wearables.swift in Sources */ = {isa = PBXBuildFile; fileRef = B27A249C6A80102679CC8BCC /* Wearables.swift */; };
 		483FEAC1A66EEC1D35E7FBE5 /* TopUpTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F31BF7BE841978BF28086F5B /* TopUpTests.swift */; };
 		48C78B7707AEAAD66978D7DE /* TinyWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31E25A1ADDBE5C0DD2439C4B /* TinyWatchApp.swift */; };
 		4C33FA27E29BB24F74E02C4A /* Voice.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB80605A854F1016AE7B3CF1 /* Voice.swift */; };
@@ -36,12 +37,14 @@
 		4D00E53D7E37E936EB31BA9F /* Messages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B02215DCCBD2AAA448B9160 /* Messages.swift */; };
 		4E0DC741D6FBC426F9963BFB /* ChatStreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A56AD5C842342A3CFFBC5AB8 /* ChatStreamDecoder.swift */; };
 		4ED8F56194C88673F1B3A5FE /* ModelPricing.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC3D439C81F29ADB0353FAFF /* ModelPricing.swift */; };
+		4FA095B13B5EC757D4723C22 /* WearablesRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBC3ADFB03E9B0AC5579A7B9 /* WearablesRecorder.swift */; };
 		531868017FD386F461C3AE58 /* ChatStreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A56AD5C842342A3CFFBC5AB8 /* ChatStreamDecoder.swift */; };
 		53334E5C90DA3CE76F557366 /* Notifications.swift in Sources */ = {isa = PBXBuildFile; fileRef = 07BA5DB02E8FFCC40F1C387C /* Notifications.swift */; };
 		5401D9BCF48AE2B5621DA34F /* Briefing.swift in Sources */ = {isa = PBXBuildFile; fileRef = A45F0D68484CFD4910548C08 /* Briefing.swift */; };
 		591D2D22494BC9753B7780EE /* AgentActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FB02858768765513AB0828 /* AgentActivity.swift */; };
 		59C9C8F4D918A8E80C67F8D0 /* ChatStreamDecoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A56AD5C842342A3CFFBC5AB8 /* ChatStreamDecoder.swift */; };
 		5AD4BF43A09898BC78EA9F7E /* ContentWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3399E2D2028C58C3F49CB10 /* ContentWidgets.swift */; };
+		5D02097156D0915028812D52 /* MWDATCamera in Frameworks */ = {isa = PBXBuildFile; platformFilter = ios; productRef = 8B34077AD28AD0A3E708E898 /* MWDATCamera */; };
 		5EB914AA54F1C17FD9D605F5 /* MapScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FB1E573C4D0D44DF82022D /* MapScreen.swift */; };
 		5F38BC3EE70E8D77A4DB0C05 /* Api.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA46B60769B65B655D3C90C /* Api.swift */; };
 		606C08842C19A5C49B93F7AB /* Config.swift in Sources */ = {isa = PBXBuildFile; fileRef = C621305C23550CE05D6CA8A4 /* Config.swift */; };
@@ -72,8 +75,10 @@
 		A5E19ACD062487057B2095CB /* Markdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10DFD47916CD4331BD24B6B1 /* Markdown.swift */; };
 		A84C6EB902516A2A15F7D5BD /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1CE320A9725C4646477C8B52 /* Theme.swift */; };
 		A8CFFB1D0B09B29C2F9216EC /* Api.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA46B60769B65B655D3C90C /* Api.swift */; };
+		AB5BB644D5CA52F30CEFA43F /* MWDATCore in Frameworks */ = {isa = PBXBuildFile; platformFilter = ios; productRef = CB2BD0B5FC941471E2260A4E /* MWDATCore */; };
 		ABDCD56C37D96C7E24AA9EA7 /* TaskTree.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DB64C5D3D2F518C60B21B77 /* TaskTree.swift */; };
 		AF664316898262C1BB371783 /* AgentActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FB02858768765513AB0828 /* AgentActivity.swift */; };
+		B0692B15D291838BEDA4B5FD /* WearablesLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = EEDF3B7FC11570F42D589D15 /* WearablesLive.swift */; };
 		B0DC65E9ECDD7A1A6FD30298 /* Standing.swift in Sources */ = {isa = PBXBuildFile; fileRef = 38B5967AE48B2E0524FAAA99 /* Standing.swift */; };
 		B25CD642E8560F1BE5AE85CD /* Continuity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 069C139015B9508A76FFE116 /* Continuity.swift */; };
 		B309F5A7A7B23F714CCB5C6E /* AgentActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FB02858768765513AB0828 /* AgentActivity.swift */; };
@@ -246,6 +251,7 @@
 		ABB479E32A4BE1042E36A1D1 /* EndpointPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndpointPanelTests.swift; sourceTree = "<group>"; };
 		AFF98DE2EEAC38EED39548D4 /* Activity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Activity.swift; sourceTree = "<group>"; };
 		B1F720B08F557FAA73DCAB95 /* Session.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Session.swift; sourceTree = "<group>"; };
+		B27A249C6A80102679CC8BCC /* Wearables.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wearables.swift; sourceTree = "<group>"; };
 		B3ED420938A353C89157CD85 /* TinyTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = TinyTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B424F99ED0AB1614C77E297F /* ImageGen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageGen.swift; sourceTree = "<group>"; };
 		B50C61BFC0E8191A9922D467 /* Geo.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Geo.swift; sourceTree = "<group>"; };
@@ -255,6 +261,7 @@
 		C4FB1E573C4D0D44DF82022D /* MapScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapScreen.swift; sourceTree = "<group>"; };
 		C621305C23550CE05D6CA8A4 /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
 		C6C05D0DB4CBE527F7ECEE89 /* WatchIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchIntents.swift; sourceTree = "<group>"; };
+		CBC3ADFB03E9B0AC5579A7B9 /* WearablesRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearablesRecorder.swift; sourceTree = "<group>"; };
 		D16B733BDE1BCF4A6686FD46 /* WatchWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchWidgets.swift; sourceTree = "<group>"; };
 		D25E5629B177873F14F1AA2F /* TinyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyTests.swift; sourceTree = "<group>"; };
 		D8264B73A8EA36D1CB572416 /* MemoryGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryGraph.swift; sourceTree = "<group>"; };
@@ -262,9 +269,22 @@
 		E94145671C12B6552E8C79FB /* DeviceTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTools.swift; sourceTree = "<group>"; };
 		EBC50495EC5FE233BE5E24FD /* WidgetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetStore.swift; sourceTree = "<group>"; };
 		EC3D439C81F29ADB0353FAFF /* ModelPricing.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPricing.swift; sourceTree = "<group>"; };
+		EEDF3B7FC11570F42D589D15 /* WearablesLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearablesLive.swift; sourceTree = "<group>"; };
 		F31BF7BE841978BF28086F5B /* TopUpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpTests.swift; sourceTree = "<group>"; };
 		F58ED7872AC159DF433123AA /* EndpointPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndpointPanel.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		76AF7B0C6118A30FDF4B2DFC /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AB5BB644D5CA52F30CEFA43F /* MWDATCore in Frameworks */,
+				5D02097156D0915028812D52 /* MWDATCamera in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		00D4F49DA6CC46110AEDC5E6 /* Sources */ = {
@@ -425,6 +445,9 @@
 				5C7357B08AE66393E70432DC /* VoiceCall.swift */,
 				4AD2CAB7CD35A131336B3175 /* Wallet.swift */,
 				4DE5980E314E4727D0451904 /* WatchBridge.swift */,
+				B27A249C6A80102679CC8BCC /* Wearables.swift */,
+				EEDF3B7FC11570F42D589D15 /* WearablesLive.swift */,
+				CBC3ADFB03E9B0AC5579A7B9 /* WearablesRecorder.swift */,
 			);
 			name = Sources;
 			path = Tiny/Sources;
@@ -511,6 +534,7 @@
 			buildPhases = (
 				CCC41836ED38C529FE230154 /* Sources */,
 				541137D576A13F1F47C06DCC /* Resources */,
+				76AF7B0C6118A30FDF4B2DFC /* Frameworks */,
 				E730AF5F279E4BBAF8EEFD4B /* Embed Foundation Extensions */,
 				6C0FA1A59B436B62B747272F /* Embed Watch Content */,
 			);
@@ -522,6 +546,8 @@
 			);
 			name = Tiny;
 			packageProductDependencies = (
+				CB2BD0B5FC941471E2260A4E /* MWDATCore */,
+				8B34077AD28AD0A3E708E898 /* MWDATCamera */,
 			);
 			productName = Tiny;
 			productReference = 0AA94B4C6E9EB6DE66B743BB /* Tiny.app */;
@@ -562,6 +588,9 @@
 			);
 			mainGroup = B3D123D2F3D06D16598F12F9;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				12BB17F00B8990F51369FFE3 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 906992681C8FE04C6A28B4FE /* Products */;
 			projectDirPath = "";
@@ -728,6 +757,9 @@
 				0AF5F3FC0075F321A976603A /* Wallet.swift in Sources */,
 				733E46C188571C09A34DC48B /* WatchBridge.swift in Sources */,
 				D8159F6B29E76C9E13437CC8 /* WatchCore.swift in Sources */,
+				4604C31E8DD2CD95A42BECD6 /* Wearables.swift in Sources */,
+				B0692B15D291838BEDA4B5FD /* WearablesLive.swift in Sources */,
+				4FA095B13B5EC757D4723C22 /* WearablesRecorder.swift in Sources */,
 				6B76811B4EC4C827A93B6857 /* WidgetStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1107,6 +1139,30 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		12BB17F00B8990F51369FFE3 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/facebook/meta-wearables-dat-ios";
+			requirement = {
+				kind = exactVersion;
+				version = 0.8.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		8B34077AD28AD0A3E708E898 /* MWDATCamera */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 12BB17F00B8990F51369FFE3 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCamera;
+		};
+		CB2BD0B5FC941471E2260A4E /* MWDATCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 12BB17F00B8990F51369FFE3 /* XCRemoteSwiftPackageReference "meta-wearables-dat-ios" */;
+			productName = MWDATCore;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = FCA243BF25C6585918B7CCD0 /* Project object */;
 }

@@ -50,6 +50,9 @@ const EXT: Record<string, string> = {
   "audio/mpeg": "mp3",
   "audio/wav": "wav",
   "audio/ogg": "ogg",
+  // 🎥 meta_record_video (glasses clips) — mp4 is as inert as the images on
+  // the public GET (no HTML/JS surface); the 6MB cap above still governs.
+  "video/mp4": "mp4",
 };
 
 export const TOOL_RESULT_INSERT_SQL = `

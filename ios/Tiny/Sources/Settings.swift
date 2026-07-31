@@ -28,6 +28,11 @@ struct SettingsView: View {
     @State private var showTour = false
     @Environment(\.horizontalSizeClass) private var hSize
 
+    // 🕶️ Meta glasses (absent on Catalyst — Wearables.swift explains)
+    #if canImport(MWDATCore) && canImport(MWDATCamera)
+    @ObservedObject private var wearables = WearablesManager.shared
+    #endif
+
     // ── BYO-model (mirrors web ModelSettings; key in Keychain) ──────────────
     @AppStorage(ModelConfigStore.keyProvider) private var modelProvider = "default"
     @AppStorage(ModelConfigStore.keyModelId) private var modelId = ""
@@ -150,6 +155,38 @@ struct SettingsView: View {
                 } footer: {
                     Text("While on, each message quietly carries your position and speed so your tiny answers with real context. Off = nothing leaves the phone.")
                 }
+
+                #if canImport(MWDATCore) && canImport(MWDATCamera)
+                Section {
+                    HStack {
+                        Label("Status", systemImage: "eyeglasses")
+                        Spacer()
+                        Text(wearables.statusText)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if wearables.isLinked {
+                        Button(role: .destructive) {
+                            wearables.unlink()
+                        } label: {
+                            Label("Unlink glasses", systemImage: "xmark.circle")
+                        }
+                    } else {
+                        Button {
+                            wearables.link()
+                        } label: {
+                            Label("Link glasses via Meta AI", systemImage: "link")
+                        }
+                    }
+                    if let err = wearables.lastError {
+                        Text(err).font(.caption).foregroundStyle(.red)
+                    }
+                } header: {
+                    Text("🕶 Meta glasses")
+                } footer: {
+                    Text("Link your Meta AI glasses to give your tiny eyes — it can capture what you're looking at when you ask. The link is made by the Meta AI app with your permission; unlink here or there any time.")
+                }
+                #endif
 
                 Section {
                     Picker("Provider", selection: $modelProvider) {

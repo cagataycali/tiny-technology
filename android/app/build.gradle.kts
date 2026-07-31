@@ -15,6 +15,14 @@ android {
         targetSdk = 35
         versionCode = 27
         versionName = "0.7.2"
+
+        // 🕶️ Meta Wearables DAT creds (Wearables Developer Center; mirrored
+        // in meta.md + the iOS MWDAT Info.plist dict). Placeholders like the
+        // SDK sample, not manifest literals — aapt would coerce the bare
+        // numeric id into a non-string resource the SDK can't read.
+        manifestPlaceholders["mwdat_application_id"] = "2131650944063872"
+        manifestPlaceholders["mwdat_client_token"] =
+            "AR|2131650944063872|37eb3769c581134efd954d22c4cdca50"
     }
 
     buildTypes {
@@ -44,6 +52,11 @@ android {
 }
 
 dependencies {
+    // 🕶️ Meta glasses (Wearables DAT); the mock device rides debug builds
+    // only — the sideload-release APK ships without the simulator.
+    implementation(libs.mwdat.core)
+    implementation(libs.mwdat.camera)
+    debugImplementation(libs.mwdat.mockdevice)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

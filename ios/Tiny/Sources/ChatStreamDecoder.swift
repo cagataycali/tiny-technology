@@ -223,6 +223,14 @@ struct ChatStreamDecoder {
             }
         case "screenshot":
             out.append(.screenshot(id: id, reason: input?["reason"] as? String ?? ""))
+        case "meta_take_photo":
+            out.append(.metaTakePhoto(id: id))
+        case "meta_record_video":
+            out.append(.metaRecordVideo(id: id))
+        case "meta_listen":
+            out.append(.metaListen(id: id, seconds: input?["seconds"] as? Int ?? 10))
+        case "meta_glasses_status":
+            out.append(.metaGlassesStatus(id: id))
         case "render_ui":
             out.append(.renderUi(id: id, title: input?["title"] as? String, propsJson: Self.jsonString(input?["props"])))
         default:

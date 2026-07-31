@@ -571,7 +571,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val geoBlock = technology.tiny.app.geo.Geo.contextIfEnabled(
                 tinyApp, tinyApp.config.locationContext,
             )
-            val extraWithGeo = listOfNotNull(extraSystem, geoBlock)
+            // 🕶️ Glasses context (location's sibling, iOS parity): one line
+            // when linked, null (byte-identical request) when not.
+            val glassesBlock = runCatching {
+                technology.tiny.app.fleet.WearablesBridge.contextIfLinked(tinyApp)
+            }.getOrNull()
+            val extraWithGeo = listOfNotNull(extraSystem, geoBlock, glassesBlock)
                 .joinToString("\n\n").ifBlank { null }
             try {
                 tinyApp.api.chat(prompt, tiny, history, extraWithGeo, userBlocks).collect { ev ->
@@ -2270,6 +2275,33 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 // off the chat surface in ScreenshotConsentActivity/Service, so mark this
                 // tool "running" (no toolLabel) rather than treating it as unhandled.
                 technology.tiny.app.tools.ScreenshotConsentActivity.launch(getApplication(), ev.toolUseId)
+            }
+            "meta_take_photo" -> {
+                // 🕶️ Glasses ROUND-TRIP (iOS Wearables.swift parity): capture
+                // through the DAT session, upload once, post to the mailbox
+                // the server tool is polling. The bridge posts on EVERY path.
+                viewModelScope.launch {
+                    technology.tiny.app.fleet.WearablesBridge.runPhotoTool(tinyApp, ev.toolUseId)
+                }
+            }
+            "meta_glasses_status" -> {
+                viewModelScope.launch {
+                    technology.tiny.app.fleet.WearablesBridge.runStatusTool(tinyApp, ev.toolUseId)
+                }
+            }
+            "meta_record_video" -> {
+                // 🎥 Toggle recording (iOS GlassesRecorder parity) — the
+                // bridge holds state between the agent's start and stop calls.
+                viewModelScope.launch {
+                    technology.tiny.app.fleet.GlassesRecorderBridge.runTool(tinyApp, ev.toolUseId)
+                }
+            }
+            "meta_listen" -> {
+                viewModelScope.launch {
+                    technology.tiny.app.fleet.WearablesListenerBridge.runTool(
+                        tinyApp, ev.toolUseId, ev.input.optInt("seconds", 10),
+                    )
+                }
             }
             "add_map_marker", "remove_map_marker", "clear_map_markers",
             "fly_to_location", "fly_to_marker", "tour_markers" -> {

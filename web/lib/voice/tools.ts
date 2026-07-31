@@ -92,6 +92,47 @@ export function buildVoiceTools(sessionType: string): RealtimeTool[] {
     // Android chat runs generate_image server-side, which the voice bridge
     // doesn't reach yet — don't advertise a tool the device can't answer.
     if (sessionType === 'tiny-ios') {
+      // 🕶️ Glasses photo — voice is the NATURAL surface for this tool
+      // ("what am I looking at?" is a spoken question). The device answers
+      // fast and honestly when no glasses are linked/worn, so advertising it
+      // unconditionally on iOS never strands the model.
+      roster.push({
+        type: 'function',
+        name: 'meta_take_photo',
+        description:
+          "Take a photo through the user's Meta AI glasses camera — what the user is physically LOOKING AT right now. Use when they ask about their surroundings, what they see, to read or identify something in front of them, or to capture the moment. Needs their glasses linked and worn; you receive the hosted image URL and the photo lands in the chat. Tell the user out loud what you see or that it's captured.",
+        parameters: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: 'Optional short reason for the capture' },
+          },
+          additionalProperties: false,
+        },
+      })
+      // 🎥 Toggle recording works mid-call too — "start/stop recording".
+      roster.push({
+        type: 'function',
+        name: 'meta_record_video',
+        description:
+          "Record a video through the user's Meta AI glasses. TOGGLE: call once to start (tell the user it's rolling — the LED is on), call again to stop; on stop you receive the hosted clip URL and it lands in the chat. Auto-stops around 30 seconds. Needs linked, worn glasses.",
+        parameters: {
+          type: 'object',
+          properties: {
+            reason: { type: 'string', description: 'Optional short reason' },
+          },
+          additionalProperties: false,
+        },
+      })
+      // 🕶️ Status is instant and safe mid-call. meta_listen is deliberately
+      // ABSENT here: on a live call the model already hears the user through
+      // the glasses mic — a second tap on the same input would fight the call.
+      roster.push({
+        type: 'function',
+        name: 'meta_glasses_status',
+        description:
+          "Check the user's Meta AI glasses right now: linked, connected/ready for capture, device names, thermal, whether a recording is running. Instant.",
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      })
       roster.push({
         type: 'function',
         name: 'generate_image',

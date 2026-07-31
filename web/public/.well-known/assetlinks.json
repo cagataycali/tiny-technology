@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "technology.tiny.app",
+      "sha256_cert_fingerprints": [
+        "29:AD:39:6C:AE:A6:81:81:69:88:12:61:90:54:5C:2C:E8:B5:35:99:F4:E7:44:F6:38:46:ED:D0:66:2E:1D:78"
+      ]
+    }
+  }
+]

@@ -30,6 +30,11 @@
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
+    <!-- 🕶️ Meta glasses (Wearables DAT): the SDK talks to the paired glasses
+         over BT. CONNECT is the API 31+ runtime half; legacy BLUETOOTH ≤30 is
+         already declared above for the BLE scan. Requested lazily by the
+         glasses UI, never at launch. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <!-- 🗺️ Maps + location context (agi-diy port): FINE was capped at API 30 as
          the legacy BLE-scan gate; the maps feature lifts the cap. Requested
          lazily — the settings toggle / map screen ask, never app launch.
@@ -58,6 +63,16 @@
             android:name="com.google.android.geo.API_KEY"
             android:value="AIzaSyDR7Q8EdLxM2u4OY5MsNJCDoMqk48yzstU" />
 
+        <!-- 🕶️ Meta Wearables DAT creds (Wearables Developer Center; values
+             injected as placeholders from build.gradle.kts — mirrored in
+             meta.md + the iOS MWDAT dict; a parity test pins all three). -->
+        <meta-data
+            android:name="com.meta.wearable.mwdat.APPLICATION_ID"
+            android:value="${mwdat_application_id}" />
+        <meta-data
+            android:name="com.meta.wearable.mwdat.CLIENT_TOKEN"
+            android:value="${mwdat_client_token}" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -74,6 +89,16 @@
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="tinyapp" android:host="auth" />
+            </intent-filter>
+            <!-- 🕶️ Meta AI app callback (Wearables DAT registration): the SDK
+                 returns via the bare scheme with an SDK-chosen path, so this
+                 filter is host-less — the SDK sample's filter has no host
+                 either. Host-specific routes above still match first. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="tinyapp" />
             </intent-filter>
             <!-- Widget deep links: tinyapp://ask|voice|memory|messages -->
             <intent-filter>

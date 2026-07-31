@@ -484,6 +484,192 @@ export const makeScreenshotTool = (userId: string | null | undefined) => tool({
 })
 
 /**
+ * 🕶️ meta_take_photo — one photo through the user's Meta AI glasses.
+ * screenshot's twin at one more remove: identical round-trip (the phone sees
+ * the beforeToolCallEvent → runs a DAT camera session against the linked
+ * glasses → uploads the JPEG once to /api/media → posts {toolUseId, url} to
+ * the mailbox this callback polls), only the "make pixels" step differs —
+ * the glasses camera, i.e. what the USER is looking at, not the screen.
+ *
+ * Mounted only for sessions whose client carries the DAT executor (the chat
+ * route gates it like generate_image); a client with no glasses posts a
+ * fast, honest {ok:false} (not linked / permission missing), so the poll
+ * never strands on the common failure.
+ */
+export const makeMetaTakePhotoTool = (userId: string | null | undefined) => tool({
+  name: 'meta_take_photo',
+  description: "Take a photo through the user's Meta AI glasses camera and receive it back as an image you can SEE — this is what the USER is physically looking at right now. Use it when they ask what they're looking at, to read/identify/remember something in front of them, or to capture the moment. Requires their glasses to be linked (Settings → Meta glasses) and worn; capture takes a few seconds. One still per call.",
+  inputSchema: z.object({
+    reason: z.string().max(200).optional().describe('Optional short reason, e.g. "to read the menu you\'re looking at"'),
+  }),
+  callback: async (_input, context) => {
+    if (!userId) return { ok: false, error: 'Login required — the glasses belong to the user account.' }
+    const toolUseId = context?.toolUse?.toolUseId
+    if (!toolUseId) return { ok: false, error: 'internal: missing toolUseId' }
+
+    // The executing phone saw the beforeToolCallEvent and is running the
+    // glasses session now. Poll the mailbox (2s × 45 = 90s: session start +
+    // stream up + capture + upload over BT/Wi-Fi; not-linked posts instantly).
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      const d = await fetch(
+        `${WORKER}/device/tool-result?userId=${encodeURIComponent(userId)}&toolUseId=${encodeURIComponent(toolUseId)}`,
+        { headers: ikey(), cache: 'no-store' },
+      ).then(r => r.json()).catch(() => null)
+      const raw = d?.result?.payload
+      if (!raw) continue
+
+      let p: any
+      try { p = JSON.parse(raw) } catch { return { ok: false, error: 'device posted an unreadable result' } }
+      if (!p?.ok) return { ok: false, error: String(p?.error || 'the glasses photo failed on the device') }
+      if (!p.url) return { ok: false, error: 'device result missing media url' }
+
+      // Real pixels to the model (bytes from R2, uploaded exactly once).
+      const bytes = await fetch(String(p.url), { cache: 'no-store' })
+        .then(r => (r.ok ? r.arrayBuffer() : null)).catch(() => null)
+      const note = new TextBlock(
+        `Photo taken through the user's Meta glasses — this is what they are looking at. Hosted at: ${p.url} — embed with ![…](${p.url}) if useful.`
+      )
+      if (!bytes) return { ok: true, url: p.url, note: note.text }
+      return [
+        new ImageBlock({ format: p.format === 'png' ? 'png' : 'jpeg', source: { bytes: new Uint8Array(bytes) } }),
+        note,
+      ]
+    }
+    return { ok: false, error: 'The glasses did not return a photo within 90s — they may be off, out of Bluetooth range, mid-firmware-update, or the app went to background during capture.' }
+  },
+})
+
+/**
+ * 🎥 meta_record_video — TOGGLE-semantics recording through the glasses.
+ * First call starts the clip (the device answers fast with recording:true);
+ * second call stops it: the phone finalizes the MP4, uploads it once to
+ * /api/media, uploads up to 4 sampled frames, and posts URLs to the mailbox.
+ * Models can't watch MP4s, so the frames come back as REAL image blocks —
+ * the agent sees what the clip contains — beside the hosted video URL.
+ * Clips auto-stop at ~30s (the media store caps uploads at 6MB); if the
+ * auto-stop fired first, the second call simply collects the finished clip.
+ */
+export const makeMetaRecordVideoTool = (userId: string | null | undefined) => tool({
+  name: 'meta_record_video',
+  description: "Record a video through the user's Meta AI glasses camera. TOGGLE: call once to START recording (you'll get confirmation), continue the conversation, then call again to STOP — you'll receive a few frames from the clip as images you can SEE plus the hosted video URL to share (embed with a plain link). Clips auto-stop at ~30 seconds. Requires linked, worn glasses (the capture LED is on while recording).",
+  inputSchema: z.object({
+    reason: z.string().max(200).optional().describe('Optional short reason for the recording'),
+  }),
+  callback: async (_input, context) => {
+    if (!userId) return { ok: false, error: 'Login required — the glasses belong to the user account.' }
+    const toolUseId = context?.toolUse?.toolUseId
+    if (!toolUseId) return { ok: false, error: 'internal: missing toolUseId' }
+
+    // Start answers in a few seconds; stop needs finalize+upload (~15s worst).
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      const d = await fetch(
+        `${WORKER}/device/tool-result?userId=${encodeURIComponent(userId)}&toolUseId=${encodeURIComponent(toolUseId)}`,
+        { headers: ikey(), cache: 'no-store' },
+      ).then(r => r.json()).catch(() => null)
+      const raw = d?.result?.payload
+      if (!raw) continue
+
+      let p: any
+      try { p = JSON.parse(raw) } catch { return { ok: false, error: 'device posted an unreadable result' } }
+      if (!p?.ok) return { ok: false, error: String(p?.error || 'recording failed on the device') }
+
+      // START leg: nothing to fetch, just tell the model it's rolling.
+      if (p.recording) {
+        return { ok: true, recording: true, note: '🔴 Recording started on the glasses (LED on). Call meta_record_video again to stop — it auto-stops at ~30s.' }
+      }
+
+      // STOP leg: video URL + sampled frames the model can SEE.
+      if (!p.url) return { ok: false, error: 'device result missing the clip url' }
+      const frameUrls: string[] = Array.isArray(p.frames) ? p.frames.slice(0, 4) : []
+      const blocks: any[] = []
+      for (const u of frameUrls) {
+        const bytes = await fetch(String(u), { cache: 'no-store' })
+          .then(r => (r.ok ? r.arrayBuffer() : null)).catch(() => null)
+        if (bytes) blocks.push(new ImageBlock({ format: 'jpeg', source: { bytes: new Uint8Array(bytes) } }))
+      }
+      blocks.push(new TextBlock(
+        `Recording stopped — ${p.seconds ? `${p.seconds}s clip` : 'clip'} from the user's glasses hosted at: ${p.url} (share as a plain link). The image${blocks.length === 1 ? '' : 's'} above ${blocks.length === 1 ? 'is a frame' : 'are frames'} sampled from it.`
+      ))
+      return blocks
+    }
+    return { ok: false, error: 'The glasses did not answer within 90s — recording may be unavailable (glasses off/out of range) or the app went to background.' }
+  },
+})
+
+/**
+ * 👂 meta_listen — a few seconds of the glasses microphone, returned as an
+ * ON-DEVICE transcript. The audio never leaves the phone (Apple local STT,
+ * requiresOnDeviceRecognition) — only the text rides the mailbox. If the
+ * live HUD's transcriber is already running, the phone rides it instead of
+ * fighting over the mic tap.
+ */
+export const makeMetaListenTool = (userId: string | null | undefined) => tool({
+  name: 'meta_listen',
+  description: "Listen through the user's Meta AI glasses microphone for a few seconds and receive a transcript of what was said around them. Transcription happens ON their phone — audio never uploads, you only get text. Use when the user asks you to listen, catch what someone is saying, take a voice note, or transcribe their surroundings. Requires linked, worn glasses.",
+  inputSchema: z.object({
+    seconds: z.number().int().min(3).max(30).optional().describe('How long to listen (default 10)'),
+  }),
+  callback: async (_input, context) => {
+    if (!userId) return { ok: false, error: 'Login required — the glasses belong to the user account.' }
+    const toolUseId = context?.toolUse?.toolUseId
+    if (!toolUseId) return { ok: false, error: 'internal: missing toolUseId' }
+
+    // Up to 30s of listening + route setup — the 90s poll covers it.
+    for (let i = 0; i < 45; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      const d = await fetch(
+        `${WORKER}/device/tool-result?userId=${encodeURIComponent(userId)}&toolUseId=${encodeURIComponent(toolUseId)}`,
+        { headers: ikey(), cache: 'no-store' },
+      ).then(r => r.json()).catch(() => null)
+      const raw = d?.result?.payload
+      if (!raw) continue
+
+      let p: any
+      try { p = JSON.parse(raw) } catch { return { ok: false, error: 'device posted an unreadable result' } }
+      if (!p?.ok) return { ok: false, error: String(p?.error || 'listening failed on the device') }
+      const transcript = String(p.transcript || '').trim()
+      if (!transcript) {
+        return { ok: true, transcript: '', note: String(p.note || 'Heard nothing — silence, or the glasses mic was not the active audio route.') }
+      }
+      return { ok: true, transcript, note: 'On-device transcript of what the glasses heard — the audio itself never left the phone.' }
+    }
+    return { ok: false, error: 'The glasses did not answer within 90s — they may be off, out of range, or the app went to background.' }
+  },
+})
+
+/**
+ * 🕶️ meta_glasses_status — an on-demand hardware poll (the per-message
+ * context carries the same facts, but a tool lets the agent CHECK before a
+ * capture mid-conversation, or answer "are my glasses connected?" exactly).
+ * The phone answers instantly from state it already holds — short poll.
+ */
+export const makeMetaGlassesStatusTool = (userId: string | null | undefined) => tool({
+  name: 'meta_glasses_status',
+  description: "Check the user's Meta AI glasses right now: linked? connected and ready for capture? device names/types, thermal level, whether the live feed is open or a recording is running. Instant — use it before captures or when the user asks about their glasses.",
+  inputSchema: z.object({}),
+  callback: async (_input, context) => {
+    if (!userId) return { ok: false, error: 'Login required.' }
+    const toolUseId = context?.toolUse?.toolUseId
+    if (!toolUseId) return { ok: false, error: 'internal: missing toolUseId' }
+
+    // The device answers from memory — 30s poll is generous.
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 2000))
+      const d = await fetch(
+        `${WORKER}/device/tool-result?userId=${encodeURIComponent(userId)}&toolUseId=${encodeURIComponent(toolUseId)}`,
+        { headers: ikey(), cache: 'no-store' },
+      ).then(r => r.json()).catch(() => null)
+      const raw = d?.result?.payload
+      if (!raw) continue
+      try { return JSON.parse(raw) } catch { return { ok: false, error: 'device posted an unreadable result' } }
+    }
+    return { ok: false, error: 'The device did not answer within 30s — the app may be backgrounded.' }
+  },
+})
+
+/**
  * 💰 wallet — the READ side of the money surface, mounted for the agent.
  *
  * Until now the agent could PRICE (set_price) and QUOTE (pay_x402) but could

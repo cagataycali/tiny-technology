@@ -1,0 +1,17 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appIDs": ["9A7Z5J4696.technology.tiny.app"],
+        "components": [
+          { "/": "/wearables", "comment": "Meta Wearables DAT callback (universal link)" },
+          { "/": "/wearables/*" }
+        ]
+      }
+    ]
+  },
+  "webcredentials": {
+    "apps": ["9A7Z5J4696.technology.tiny.app"]
+  }
+}

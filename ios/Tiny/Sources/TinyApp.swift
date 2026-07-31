@@ -20,6 +20,12 @@ struct TinyApp: App {
     init() {
         // BGTaskScheduler demands registration before launch completes
         Background.register()
+        // 🕶️ Meta glasses: the DAT SDK must be configured before any other
+        // call (incl. the URL callback from the Meta AI app). Guarded — a
+        // Catalyst build has no MWDAT module (Wearables.swift explains).
+        #if canImport(MWDATCore) && canImport(MWDATCamera)
+        WearablesManager.shared.configure()
+        #endif
         // Foreground notification banners (new-DM alerts while the app is open)
         UNUserNotificationCenter.current().delegate = NotifyDelegate.shared
         // One-time migration: cfg_tiny_name used to live only in the app's
@@ -79,6 +85,11 @@ struct TinyApp: App {
                 session.startDeviceLoops()
                 // OTA: is tiny.technology/ios ahead of this binary?
                 Updater.shared.checkSoon()
+                // 🕶️ Returning from the Meta AI link handoff: re-read the
+                // registration state in case the callback was missed.
+                #if canImport(MWDATCore) && canImport(MWDATCamera)
+                WearablesManager.shared.refresh()
+                #endif
             case .background:
                 // The OS would suspend the 5s poll mid-request anyway; stop
                 // cleanly and hand persistence to BGAppRefresh
@@ -112,18 +123,35 @@ struct RootView: View {
         // launches (Control Center / widget taps) never drop the route.
         // ChatView consumes session.pendingRoute when it's ready.
         .onOpenURL { url in
-            guard let host = url.host(), host != "auth" else { return }
-            // Quick-action deep link (tinyapp://tiny?name=<slug>) carries the
-            // target tiny as a query param the bare route string can't hold.
-            if host == "tiny",
-               let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
-               let slug = comps.queryItems?.first(where: { $0.name == "name" })?.value,
-               !slug.isEmpty {
-                session.pendingTiny = slug
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            // 🕶️ A DAT callback is identified by its metaWearablesAction
+            // query item — the SDK sample's own dispatch rule — and it may
+            // arrive with NO host at all, so this claim must run BEFORE the
+            // host guard below (which silently swallowed the first real
+            // link attempt: Meta AI succeeded, tiny never saw the reply).
+            if URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.contains(where: { $0.name == "metaWearablesAction" }) == true {
+                Task { await WearablesManager.shared.handle(url: url) }
                 return
             }
-            session.pendingRoute = host
+            #endif
+            guard let host = url.host(), host != "auth" else { return }
+            route(url, host: host)
         }
         .task { await session.bootstrap() }
+    }
+
+    /// The pre-glasses routing, verbatim: quick-action deep links
+    /// (tinyapp://tiny?name=<slug>) carry the target tiny as a query param
+    /// the bare route string can't hold; everything else is a route host.
+    private func route(_ url: URL, host: String) {
+        if host == "tiny",
+           let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+           let slug = comps.queryItems?.first(where: { $0.name == "name" })?.value,
+           !slug.isEmpty {
+            session.pendingTiny = slug
+            return
+        }
+        session.pendingRoute = host
     }
 }

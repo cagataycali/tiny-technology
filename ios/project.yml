@@ -16,6 +16,14 @@ settings:
     # OTA build number — bump on every /ios push (scripts/push-ota.sh syncs
     # the manifest to this; the in-app Updater compares against it)
     CURRENT_PROJECT_VERSION: 61
+packages:
+  # Meta Wearables Device Access Toolkit (glasses). Binary xcframeworks with
+  # ios-arm64 + simulator slices ONLY — no Mac Catalyst slice, hence the
+  # platformFilter on the dependencies below and #if canImport() around every
+  # use site (Wearables.swift explains).
+  MetaWearablesDAT:
+    url: https://github.com/facebook/meta-wearables-dat-ios
+    exactVersion: 0.8.0
 targets:
   Tiny:
     type: application
@@ -35,6 +43,14 @@ targets:
     - target: TinyWatch
       embed: true
       platformFilter: iOS
+    # 🕶️ Glasses SDK — device+simulator only (no Catalyst slice in the
+    # xcframeworks), so the link is filtered exactly like the watch/widgets
+    - package: MetaWearablesDAT
+      product: MWDATCore
+      platformFilter: iOS
+    - package: MetaWearablesDAT
+      product: MWDATCamera
+      platformFilter: iOS
     entitlements:
       path: Tiny/Tiny.entitlements
       properties:
@@ -42,6 +58,13 @@ targets:
         - group.technology.tiny.app
         keychain-access-groups:
         - $(AppIdentifierPrefix)technology.tiny.app.shared
+        # ⚠️ NO com.apple.developer.associated-domains here: personal
+        # development teams don't support Associated Domains, and Apple
+        # refuses the capability outright at provisioning time. The Meta AI
+        # callback rides the tinyapp:// scheme instead (MWDAT.AppLinkURLScheme
+        # below), and the web AASA at /.well-known stays deployed, inert,
+        # ready — re-add `applinks:tiny.technology` the day a paid Developer
+        # Program team signs this app.
     info:
       path: Tiny/Info.plist
       properties:
@@ -61,6 +84,22 @@ targets:
         UIBackgroundModes:
         - fetch
         - audio
+        # Glasses (Meta Wearables DAT): stay connected while backgrounded
+        - bluetooth-peripheral
+        - external-accessory
+        # The DAT accessory protocol — required for ExternalAccessory sessions
+        UISupportedExternalAccessoryProtocols:
+        - com.meta.ar.wearable
+        # Meta Wearables DAT config. These are the tiny app's own credentials
+        # registered in the Meta Wearables Developer Center; a client token is
+        # embeddable-by-design (it ships in every build). Register your own
+        # app there if you fork.
+        MWDAT:
+          AppLinkURLScheme: 'tinyapp://'
+          MetaAppID: '2131650944063872'
+          ClientToken: 'AR|2131650944063872|37eb3769c581134efd954d22c4cdca50'
+          TeamID: $(DEVELOPMENT_TEAM)
+          DAMEnabled: true
         NSBluetoothAlwaysUsageDescription: tiny scans nearby Bluetooth devices when you (or your web agent, at your request) ask what's around the phone.
         NSMicrophoneUsageDescription: Voice mode and voice calls keep the mic open to hear you — transcription is on-device; a live call streams to your tiny so it can talk back.
         NSCameraUsageDescription: Take a photo to share it with your tiny in the chat.

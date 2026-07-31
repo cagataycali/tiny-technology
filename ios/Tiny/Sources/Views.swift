@@ -861,6 +861,35 @@ final class ChatModel: ObservableObject {
         return ["ok": true, "url": img.url]
     }
 
+    #if canImport(MWDATCore) && canImport(MWDATCamera)
+    /// 🕶️ meta_take_photo over the voice bridge — same capture+upload the
+    /// chat executor uses, answered over the call's WS instead of the
+    /// mailbox; the photo card lands on the live voice bubble.
+    func voiceMetaTakePhoto(token: String?) async -> [String: Any] {
+        do {
+            let img = try await WearablesManager.shared.captureAndUpload(
+                id: "voice-\(UUID().uuidString)", token: token)
+            voiceAttach(img)
+            return ["ok": true, "url": img.url]
+        } catch {
+            let message = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return ["ok": false, "error": message]
+        }
+    }
+    #endif
+
+    /// Post a plain payload to the chat tool-result mailbox (the round-trip
+    /// tools' reply channel) — shared by the glasses status case and any
+    /// future device tool that answers from held state.
+    func postToolPayload(_ toolUseId: String, token: String?, payload: [String: Any]) async {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let json = String(data: data, encoding: .utf8) else { return }
+        _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+            "toolUseId": toolUseId, "payload": json,
+        ]) as [String: Any]
+    }
+
     /// Attach a media card to the live voice bubble (opens one if the tiny
     /// is acting without narrating).
     private func voiceAttach(_ img: GeneratedImage) {
@@ -945,7 +974,14 @@ final class ChatModel: ObservableObject {
                 // resolved here because the fix is async (30s-cached,
                 // 5s-bounded); toggle off / no grant → extraSystem unchanged.
                 let geoBlock = await Geo.shared.contextIfEnabled()
-                let extraSystem = [continuity, geoBlock].compactMap { $0 }.joined(separator: "\n\n")
+                // 🕶️ Glasses context (location's sibling): one line when
+                // linked, nil (byte-identical request) when not.
+                #if canImport(MWDATCore) && canImport(MWDATCamera)
+                let glassesBlock = WearablesManager.shared.contextIfLinked()
+                #else
+                let glassesBlock: String? = nil
+                #endif
+                let extraSystem = [continuity, geoBlock, glassesBlock].compactMap { $0 }.joined(separator: "\n\n")
                 for try await ev in Api.chatStream(token: token, message: text, tiny: tiny, history: history, extraSystem: extraSystem.isEmpty ? nil : extraSystem, userBlocks: userBlocks) {
                     if Task.isCancelled { break }
                     switch ev {
@@ -1060,6 +1096,64 @@ final class ChatModel: ObservableObject {
                         } else {
                             await Screenshot.shared.postDenied(toolUseId: id, token: token)
                         }
+                        activeTool = nil
+                    case .metaTakePhoto(let id):
+                        // 🕶️ ROUND-TRIP through the glasses camera. The user
+                        // already consented at link time (Meta AI permission
+                        // flow) and capture LEDs on the glasses make it
+                        // visible; runPhotoTool posts an outcome on EVERY
+                        // path, so the server poll never strands.
+                        activeTool = "meta_take_photo"
+                        #if canImport(MWDATCore) && canImport(MWDATCamera)
+                        if let img = await WearablesManager.shared.runPhotoTool(toolUseId: id, token: token) {
+                            reply.images.append(img)
+                            setReply(reply)
+                        }
+                        #else
+                        _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+                            "toolUseId": id,
+                            "payload": #"{"ok":false,"error":"Meta glasses aren't supported on this device."}"#,
+                        ]) as [String: Any]
+                        #endif
+                        activeTool = nil
+                    case .metaRecordVideo(let id):
+                        // 🎥 Toggle recording — GlassesRecorder holds state
+                        // between the agent's start and stop calls and posts
+                        // an outcome on every path (LED on while rolling).
+                        activeTool = "meta_record_video"
+                        #if canImport(MWDATCore) && canImport(MWDATCamera)
+                        await GlassesRecorder.shared.runTool(toolUseId: id, token: token)
+                        #else
+                        _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+                            "toolUseId": id,
+                            "payload": #"{"ok":false,"error":"Meta glasses aren't supported on this device."}"#,
+                        ]) as [String: Any]
+                        #endif
+                        activeTool = nil
+                    case .metaListen(let id, let seconds):
+                        // 👂 N seconds of the glasses mic → on-device
+                        // transcript. Audio never leaves the phone; every
+                        // path posts (rides the HUD transcriber if running).
+                        activeTool = "meta_listen"
+                        #if canImport(MWDATCore) && canImport(MWDATCamera)
+                        await GlassesListener.shared.runTool(toolUseId: id, seconds: seconds, token: token)
+                        #else
+                        _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+                            "toolUseId": id,
+                            "payload": #"{"ok":false,"error":"Meta glasses aren't supported on this device."}"#,
+                        ]) as [String: Any]
+                        #endif
+                        activeTool = nil
+                    case .metaGlassesStatus(let id):
+                        // 🕶️ Instant facts from state the app already holds.
+                        activeTool = "meta_glasses_status"
+                        #if canImport(MWDATCore) && canImport(MWDATCamera)
+                        await postToolPayload(id, token: token,
+                                                   payload: WearablesManager.shared.statusFacts())
+                        #else
+                        await postToolPayload(id, token: token,
+                                                   payload: ["ok": true, "linked": false, "note": "glasses unsupported on this device"])
+                        #endif
                         activeTool = nil
                     case .manageMessages(let action, let from, let to, let summary):
                         // Surgery is deferred to stream end — mutating the
@@ -1722,6 +1816,31 @@ struct ChatView: View {
     @State private var showActivity = false
     @State private var showGraph = false
     @State private var banner: String?
+    // 🕶️ Glasses live HUD (absent on Catalyst — Wearables.swift explains).
+    // Both pieces are pre-built small views: ChatView's body is AT the
+    // type-checker's budget (voice-sessions arc) — inline closures here
+    // tipped it into "unable to type-check in reasonable time".
+    #if canImport(MWDATCore) && canImport(MWDATCamera)
+    @State private var showGlassesLive = false
+    @ObservedObject private var wearablesState = WearablesManager.shared
+
+    @ViewBuilder private var glassesLiveOverlayView: some View {
+        if showGlassesLive {
+            GlassesLiveOverlay(shown: $showGlassesLive)
+        }
+    }
+
+    private var glassesToolbarButton: some View {
+        Button {
+            TinyDesign.haptic()
+            showGlassesLive.toggle()
+        } label: {
+            Image(systemName: "eyeglasses")
+                .foregroundStyle(showGlassesLive ? Color.green : Color.primary)
+        }
+        .accessibilityLabel("Glasses live view")
+    }
+    #endif
     @ObservedObject private var voice = VoiceMode.shared
     // 📞 Real speech-to-speech call (VoiceCall.swift) — a full-screen call
     // surface, distinct from VoiceMode's dictation-and-send.
@@ -2094,6 +2213,12 @@ struct ChatView: View {
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            // 🕶️ Floating live-glasses card, above the chat, draggable.
+            // Rendering it via overlay (not a sheet) keeps the chat usable
+            // while watching the stream — the PiP the user asked for.
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            .overlay(alignment: .topTrailing) { glassesLiveOverlayView }
+            #endif
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button { showUniverse = true } label: {
@@ -2123,6 +2248,15 @@ struct ChatView: View {
                             : "\(chat.tiny), private, locked")
                     }
                 }
+                #if canImport(MWDATCore) && canImport(MWDATCamera)
+                // 🕶️ The glasses icon appears the moment glasses are linked;
+                // tap = live picture-in-picture from the glasses camera.
+                ToolbarItem(placement: .topBarTrailing) {
+                    if wearablesState.isLinked {
+                        glassesToolbarButton
+                    }
+                }
+                #endif
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         if let u = session.user {
@@ -3207,7 +3341,16 @@ struct ChatView: View {
         // Continuity stays keyed by chat.tiny: that's the key this surface
         // reads/writes turns under (see buildContext/appendTurn call sites).
         let target = chat.tiny != "tiny" ? chat.tiny : Config.tinyName
-        call.start(tiny: target, token: session.token, context: Continuity.buildContext(chat.tiny))
+        // 🕶️ Glasses context rides into the session instructions beside
+        // continuity — the voice agent starts a call knowing whether the
+        // glasses are worn and ready, exactly like the chat agent does.
+        #if canImport(MWDATCore) && canImport(MWDATCamera)
+        let voiceContext = [Continuity.buildContext(chat.tiny), WearablesManager.shared.contextIfLinked()]
+            .compactMap { $0 }.joined(separator: "\n\n")
+        #else
+        let voiceContext = Continuity.buildContext(chat.tiny)
+        #endif
+        call.start(tiny: target, token: session.token, context: voiceContext)
     }
 
     /// Voice-call tool bridge: execute with the SAME executors the chat stream
@@ -3238,6 +3381,36 @@ struct ChatView: View {
                 call.sendToolResult(id: id, output: out)
             }
             return
+        case "meta_take_photo":
+            // 🕶️ Every path replies (the manager throws words, not silence);
+            // on a build without the SDK the default arm below answers.
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            Task {
+                let out = await chat.voiceMetaTakePhoto(token: session.token)
+                call.sendToolResult(id: id, output: out)
+            }
+            return
+            #else
+            break
+            #endif
+        case "meta_record_video":
+            // 🎥 Same toggle core as chat, answered over the call's WS.
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            Task {
+                let out = await GlassesRecorder.shared.toggle(token: session.token)
+                call.sendToolResult(id: id, output: out)
+            }
+            return
+            #else
+            break
+            #endif
+        case "meta_glasses_status":
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            call.sendToolResult(id: id, output: WearablesManager.shared.statusFacts())
+            return
+            #else
+            break
+            #endif
         case "learn", "recall", "unlearn", "send_message", "read_messages":
             // Server tools (worker-backed memory + DMs) — /api/voice/tool
             // runs the same session-bound tool objects chat mounts. viaTiny

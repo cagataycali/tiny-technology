@@ -2,6 +2,17 @@ const path = require('path');
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+    async headers() {
+        return [
+            {
+                // Apple's CDN requires the AASA file as application/json; the
+                // file is extension-less in public/.well-known so the static
+                // server would otherwise guess a generic type.
+                source: '/.well-known/apple-app-site-association',
+                headers: [{ key: 'Content-Type', value: 'application/json' }],
+            },
+        ]
+    },
     experimental: {
         nextScriptWorkers: true,
     },
