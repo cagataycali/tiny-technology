@@ -379,8 +379,15 @@ class TinyApi(
                 o.optJSONObject("toolResult")?.let { t ->
                     // The batch result rides the tool result's first content block as JSON
                     // (spawn_agents result payload). The block may be a structured `json`
-                    // object or a `text` string — take whichever is present (iOS reads
-                    // `text`, but this server emits `json`).
+                    // object or a `text` string — take whichever is present. This server
+                    // emits `json`, because the tool returns an object; `text` covers a
+                    // string-returning tool and an older deployment.
+                    //
+                    // This comment used to end "(iOS reads `text`, but this server emits
+                    // `json`)" — a note that iOS was broken, left in place for months
+                    // while iOS's fan-out trees spun forever. iOS reads both now
+                    // (ChatStreamDecoder.swift). Writing down another client's bug is
+                    // not reporting it.
                     val resultText = t.optJSONArray("content")?.let { arr ->
                         (0 until arr.length()).firstNotNullOfOrNull { i ->
                             arr.optJSONObject(i)?.let { block ->

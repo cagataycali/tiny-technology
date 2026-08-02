@@ -251,13 +251,26 @@ struct ChatStreamDecoder {
         let id = tr["toolUseId"] as? String ?? UUID().uuidString
 
         switch n {
-        // spawn_agents: the batch result rides the tool result's first text
-        // block as JSON.
+        // spawn_agents: the batch result is an OBJECT, so it lands as a `json`
+        // block — `serializeToolContent` (lib/chat/events.ts) keeps the block
+        // shape and only calls toJSON() on it. The old read here asked for
+        // `text` and nothing else, so it matched NOTHING: no `.spawnResults`
+        // was ever emitted, and every fan-out tree spun its "running" spinner
+        // forever while the results sat in hand.
+        //
+        // ⚠️ Android's decoder has said so, in writing, the whole time:
+        // "take whichever is present (iOS reads `text`, but this server emits
+        // `json`)" — TinyApi.kt. `firstToolJson`, which the pay_x402 branch a
+        // dozen lines below already uses, handles both shapes.
         case "spawn_agents":
-            if let tid = tr["toolUseId"] as? String,
-               let content = tr["content"] as? [[String: Any]],
-               let text = content.compactMap({ $0["text"] as? String }).first {
-                out.append(.spawnResults(id: tid, resultsJson: text))
+            if let tid = tr["toolUseId"] as? String {
+                let payload = firstToolJson(tr["content"])
+                // Emitting "" beats emitting nothing. A tool that errored, or a
+                // result with no readable payload, is the case where silence
+                // left the tree claiming to still be working; `apply` reads the
+                // empty string as "the batch ended without reporting".
+                out.append(.spawnResults(id: tid,
+                                         resultsJson: payload.map { Self.jsonString($0) } ?? ""))
             }
 
         // pay_x402 + make_payment: the callback returns an object → the SDK

@@ -173,23 +173,106 @@ import Foundation
 // ── SpawnTreeItem.apply ───────────────────────────────────────────────────
 
 @Suite struct SpawnTreeTests {
+    private func tree(_ n: Int) -> SpawnTreeItem {
+        SpawnTreeItem(id: "t1",
+                      nodes: (1...n).map { SpawnNode(id: $0, prompt: "task \($0)", ok: nil, result: nil) },
+                      elapsedMs: nil)
+    }
+
     @Test func resultsFlipNodes() {
-        var item = SpawnTreeItem(id: "t1", nodes: [
-            SpawnNode(id: 1, prompt: "a", ok: nil, result: nil),
-            SpawnNode(id: 2, prompt: "b", ok: nil, result: nil),
-        ], elapsedMs: nil)
+        var item = tree(2)
         item.apply(resultsJson: #"{"elapsed_ms": 1500, "results": [{"task": 1, "ok": true, "result": "done"}]}"#)
         #expect(item.nodes[0].ok == true)
         #expect(item.nodes[0].result == "done")
-        // Unreported task = failure (batch timeout isolation)
-        #expect(item.nodes[1].ok == false)
         #expect(item.elapsedMs == 1500)
+        #expect(item.outcome == .settled)
+        // ⚠️ CHANGED, deliberately. This used to assert `ok == false` under the
+        // comment "unreported task = failure". Terminal, yes — but the app never
+        // saw it run, so calling it a failure is a claim about work it has no
+        // record of. It stays `nil` and reads as "didn't run", which is the
+        // whole of what is known.
+        #expect(item.nodes[1].ok == nil)
+        #expect(item.state(of: item.nodes[1]) == .didNotRun)
     }
 
-    @Test func malformedJsonIsNoop() {
-        var item = SpawnTreeItem(id: "t1", nodes: [SpawnNode(id: 1, prompt: "a", ok: nil, result: nil)], elapsedMs: nil)
+    /// ⚠️ This test was called `malformedJsonIsNoop` and it PASSED — it pinned
+    /// the bug. A no-op leaves every node `nil` with the tree still `.live`, so
+    /// the card spun its "running" spinner forever over a batch that had already
+    /// ended. The no-op was the symptom; the test asserted it as the rule.
+    @Test func malformedJsonEndsTheBatch() {
+        var item = tree(1)
         item.apply(resultsJson: "not json")
         #expect(item.nodes[0].ok == nil)
+        #expect(item.outcome == .aborted)
+        #expect(item.state(of: item.nodes[0]) == .didNotRun)
+        #expect(item.state(of: item.nodes[0]) != .running, "the spinner outlives the batch again")
+    }
+
+    /// The empty string is how the decoder says "the tool errored, or its result
+    /// carried nothing readable" — the case that used to emit no event at all.
+    @Test func nothingReadableIsNotStillRunning() {
+        var item = tree(3)
+        item.apply(resultsJson: "")
+        #expect(item.outcome == .aborted)
+        #expect(item.nodes.allSatisfy { item.state(of: $0) == .didNotRun })
+    }
+
+    @Test("a background fan-out is queued, not three failures")
+    func pendingIsNotFailure() {
+        var item = tree(3)
+        // wait:false — what the server actually returns: no results, ever, on
+        // this stream. The old sweep read that as a total wipeout.
+        item.apply(resultsJson: #"{"ok": true, "pending": true, "batch_id": "batch_x", "tasks": 3}"#)
+        #expect(item.outcome == .background)
+        #expect(item.nodes.allSatisfy { item.state(of: $0) == .queued })
+        #expect(item.nodes.allSatisfy { item.state(of: $0) != .failed })
+        // Nothing has been timed, so there is nothing to report as elapsed.
+        #expect(item.elapsedMs == nil)
+    }
+
+    @Test("a reported failure is still a failure, and keeps the server's reason")
+    func reportedFailuresSurvive() {
+        var item = tree(2)
+        item.apply(resultsJson: #"{"results": [{"task": 1, "ok": false, "error": "task timeout"}, {"task": 2, "ok": true, "result": "ok"}]}"#)
+        #expect(item.state(of: item.nodes[0]) == .failed)
+        #expect(item.nodes[0].result == "task timeout")
+        #expect(item.state(of: item.nodes[1]) == .succeeded)
+    }
+
+    @Test("ok answers for itself; only a silent node depends on how the batch ended")
+    func stateTruthTable() {
+        for outcome in [SpawnTreeItem.Outcome.live, .background, .settled, .aborted] {
+            #expect(SpawnTreeItem.state(ok: true, outcome: outcome) == .succeeded)
+            #expect(SpawnTreeItem.state(ok: false, outcome: outcome) == .failed)
+        }
+        #expect(SpawnTreeItem.state(ok: nil, outcome: .live) == .running)
+        #expect(SpawnTreeItem.state(ok: nil, outcome: .background) == .queued)
+        #expect(SpawnTreeItem.state(ok: nil, outcome: .settled) == .didNotRun)
+        #expect(SpawnTreeItem.state(ok: nil, outcome: .aborted) == .didNotRun)
+        // The one collapse that would put the bug back.
+        #expect(SpawnTreeItem.state(ok: nil, outcome: .settled) != .failed)
+    }
+
+    /// Restored history predates `outcome`. It must NOT default to `.live`: that
+    /// stream is gone, so a node that never reported can never report, and a
+    /// spinner in scrolled-back history spins until the app is killed.
+    @Test func restoredHistoryDoesNotSpin() throws {
+        let old = #"{"id":"t1","nodes":[{"id":1,"prompt":"a"}],"elapsedMs":null}"#
+        let item = try JSONDecoder().decode(SpawnTreeItem.self, from: Data(old.utf8))
+        #expect(item.outcome == .settled)
+        #expect(item.state(of: item.nodes[0]) == .didNotRun)
+        #expect(item.state(of: item.nodes[0]) != .running)
+    }
+
+    @Test("VoiceOver can tell the five states apart") func spokenStatesAreDistinct() {
+        // CaseIterable, so a sixth state added later cannot skip this check.
+        let said = SpawnState.allCases.map(\.spoken)
+        #expect(SpawnState.allCases.count == 5)
+        #expect(Set(said).count == said.count)
+        #expect(said.allSatisfy { !$0.isEmpty })
+        // The pair that shares a glyph — dimmed vs full red — so the words are
+        // the only thing separating them for a screen-reader user.
+        #expect(SpawnState.didNotRun.spoken != SpawnState.failed.spoken)
     }
 }
 

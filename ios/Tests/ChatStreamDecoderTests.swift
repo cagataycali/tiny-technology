@@ -393,14 +393,33 @@ struct ChatStreamDecoderFramingTests {
         #expect(prompts == ["one", "two"])
 
         // And the results, unnamed — the same recovery the payment card needs.
+        //
+        // ⚠️ The payload here USED to be `[{"ok":true}]` — a bare JSON array,
+        // a shape `runBatch` cannot produce on any of its three return paths
+        // (all three are objects) and `apply` cannot read (it casts to
+        // [String: Any]). The old assertion was `json.contains("ok")`, true of
+        // the raw text and true of nothing the tree could use: this test went
+        // green over a fan-out that would have spun forever. Asserted through
+        // `apply` now, so a decode that yields unusable JSON fails here.
         let after = d.decode(line: frame([
             "type": "afterToolCallEvent",
-            "toolResult": ["toolUseId": "sa1", "content": [["text": "[{\"ok\":true}]"]]],
+            "toolResult": ["toolUseId": "sa1", "content": [["json": [
+                "ok": true, "elapsed_ms": 1200, "completed": 2, "failed": 0,
+                "results": [["task": 1, "ok": true, "result": "first"],
+                            ["task": 2, "ok": true, "result": "second"]],
+            ]]]],
         ]))
-        guard case .spawnResults(_, let json) = after.last else {
+        guard case .spawnResults(let rid, let json) = after.last else {
             Issue.record("unnamed spawn results must still land: \(after)"); return
         }
-        #expect(json.contains("ok"))
+        #expect(rid == "sa1")
+        var item = SpawnTreeItem(id: id, nodes: prompts.enumerated().map {
+            SpawnNode(id: $0.offset + 1, prompt: $0.element, ok: nil, result: nil)
+        }, elapsedMs: nil)
+        item.apply(resultsJson: json)
+        #expect(item.outcome == .settled)
+        #expect(item.nodes.map(\.result) == ["first", "second"])
+        #expect(item.elapsedMs == 1200)
     }
 
     @Test func usageIsReportedOnlyWhenThereAreTokens() {
@@ -454,5 +473,140 @@ struct ChatStreamDecoderFramingTests {
         #expect(hasQuote, "the turn must end with an approvable card: \(events)")
         let texts = events.compactMap { if case .text(let t) = $0 { return t }; return nil }
         #expect(texts == ["Checking", " — approve?"])
+    }
+}
+
+// ── spawn_agents ──────────────────────────────────────────────────────────
+
+/// 🏷️ THE SECOND UNNAMED-RESULT CLASS, and a worse one: the branch here HAD a
+/// name and still matched nothing, because it asked the wrong content block.
+///
+/// `runBatch` (app/api/chat/route.ts) returns an OBJECT, so the SDK wraps it as
+/// `[{json:{…}}]` — `serializeToolContent` keeps the block shape and only calls
+/// toJSON() on it, it never converts json to text. iOS read `content[].text`,
+/// found nothing, and emitted no `.spawnResults` at all: every fan-out tree spun
+/// its "running" spinner forever with the results already in hand.
+///
+/// ⚠️ Android's decoder documented the iOS bug in a comment the whole time —
+/// `TinyApi.kt`: "take whichever is present (iOS reads `text`, but this server
+/// emits `json`)". A note about the other client's bug is not a fix for it.
+@Suite("ChatStreamDecoder — spawn_agents fan-out results")
+struct ChatStreamDecoderSpawnTests {
+
+    private func resultEvent(id: String, content: Any?) -> [String: Any] {
+        var tr: [String: Any] = ["toolUseId": id, "name": "spawn_agents"]
+        if let content { tr["content"] = content }
+        return ["type": "afterToolCallEvent", "toolResult": tr]
+    }
+
+    private func spawnJson(_ events: [Api.ChatEvent]) -> String? {
+        events.compactMap { if case .spawnResults(_, let j) = $0 { return j }; return nil }.first
+    }
+
+    /// The wire shape the server actually sends. Asserted through `apply`, since
+    /// a JSON string that re-serialises differently is still correct.
+    @Test func aJsonBlockReachesTheTree() {
+        var d = ChatStreamDecoder()
+        let events = d.decode(event: resultEvent(id: "tu_s1", content: [["json": [
+            "ok": true,
+            "elapsed_ms": 1500,
+            "completed": 2,
+            "failed": 0,
+            "results": [["task": 1, "ok": true, "result": "done"],
+                        ["task": 2, "ok": true, "result": "also done"]],
+        ]]]), type: "afterToolCallEvent")
+
+        guard let json = spawnJson(events) else {
+            Issue.record("no .spawnResults for a json block — the tree spins forever: \(events)"); return
+        }
+        var item = SpawnTreeItem(id: "tu_s1", nodes: [
+            SpawnNode(id: 1, prompt: "a", ok: nil, result: nil),
+            SpawnNode(id: 2, prompt: "b", ok: nil, result: nil),
+        ], elapsedMs: nil)
+        item.apply(resultsJson: json)
+        #expect(item.outcome == .settled)
+        #expect(item.nodes.allSatisfy { $0.ok == true })
+        #expect(item.elapsedMs == 1500)
+    }
+
+    /// A text block holding JSON must keep working: `firstToolJson` accepts both,
+    /// and an older server (or a string-returning tool) is exactly the case this
+    /// decoder exists to survive.
+    @Test func aJsonStringInATextBlockStillWorks() {
+        var d = ChatStreamDecoder()
+        let raw = #"{"elapsed_ms":900,"results":[{"task":1,"ok":false,"error":"task timeout"}]}"#
+        let events = d.decode(event: resultEvent(id: "tu_s2", content: [["text": raw]]),
+                             type: "afterToolCallEvent")
+        guard let json = spawnJson(events) else { Issue.record("no .spawnResults: \(events)"); return }
+        var item = SpawnTreeItem(id: "tu_s2", nodes: [SpawnNode(id: 1, prompt: "a", ok: nil, result: nil)], elapsedMs: nil)
+        item.apply(resultsJson: json)
+        #expect(item.state(of: item.nodes[0]) == .failed)
+        #expect(item.nodes[0].result == "task timeout")
+    }
+
+    /// wait:false — no `results` key, ever, on this stream. The event must still
+    /// be emitted, because it is the ONLY thing that stops the spinner.
+    @Test func aBackgroundBatchStopsTheSpinnerWithoutFailing() {
+        var d = ChatStreamDecoder()
+        let events = d.decode(event: resultEvent(id: "tu_s3", content: [["json": [
+            "ok": true, "pending": true, "batch_id": "batch_7", "tasks": 3,
+            "note": "running in the background",
+        ]]]), type: "afterToolCallEvent")
+        guard let json = spawnJson(events) else { Issue.record("no .spawnResults: \(events)"); return }
+        var item = SpawnTreeItem(id: "tu_s3", nodes: (1...3).map { SpawnNode(id: $0, prompt: "t\($0)", ok: nil, result: nil) },
+                                 elapsedMs: nil)
+        item.apply(resultsJson: json)
+        #expect(item.outcome == .background)
+        #expect(item.nodes.allSatisfy { item.state(of: $0) == .queued })
+    }
+
+    /// The case that used to emit NOTHING, which is the whole defect: silence
+    /// leaves the card claiming to still be working. An empty string is a
+    /// terminal answer; no event is not an answer at all.
+    @Test("an unreadable result still ends the batch") func noReadablePayloadIsStillAnEnding() {
+        for content in [nil, [] as [Any], [["text": "not json"]] as [Any], [["image": ["bytes": "…"]]] as [Any]] as [Any?] {
+            var d = ChatStreamDecoder()
+            let events = d.decode(event: resultEvent(id: "tu_s4", content: content), type: "afterToolCallEvent")
+            guard let json = spawnJson(events) else {
+                Issue.record("no .spawnResults for content \(String(describing: content)) — spinner forever"); continue
+            }
+            var item = SpawnTreeItem(id: "tu_s4", nodes: [SpawnNode(id: 1, prompt: "a", ok: nil, result: nil)], elapsedMs: nil)
+            item.apply(resultsJson: json)
+            #expect(item.outcome == .aborted)
+            #expect(item.state(of: item.nodes[0]) == .didNotRun)
+        }
+    }
+
+    /// Same rescue as pay_x402: the fan-out tree is addressed by `toolUseId`, so
+    /// an after-event that omits `name` must still find its way home.
+    @Test func anUnnamedSpawnResultIsRecovered() {
+        var d = ChatStreamDecoder()
+        _ = d.decode(event: ["type": "modelContentBlockStartEvent",
+                             "toolStart": ["name": "spawn_agents", "toolUseId": "tu_s5"]],
+                     type: "modelContentBlockStartEvent")
+        var tr: [String: Any] = ["toolUseId": "tu_s5", "content": [["json": ["results": [["task": 1, "ok": true, "result": "r"]]]]]]
+        tr.removeValue(forKey: "name")
+        let events = d.decode(event: ["type": "afterToolCallEvent", "toolResult": tr], type: "afterToolCallEvent")
+        #expect(spawnJson(events) != nil, "an unnamed batch result must still reach its tree: \(events)")
+    }
+
+    /// The full turn, in order: tasks announced, then reported. The tree is
+    /// created by `.spawnTasks` and can only be completed by `.spawnResults`.
+    @Test func theWholeTurnResolves() {
+        var d = ChatStreamDecoder()
+        var events: [Api.ChatEvent] = []
+        events += d.decode(line: frame(["type": "beforeToolCallEvent", "toolCall": [
+            "name": "spawn_agents", "toolUseId": "tu_s6",
+            "input": ["tasks": [["prompt": "search"], ["prompt": "summarise"]]],
+        ], "seq": 1]))
+        events += d.decode(line: frame(resultEvent(id: "tu_s6", content: [["json": [
+            "ok": true, "elapsed_ms": 2100,
+            "results": [["task": 1, "ok": true, "result": "found"], ["task": 2, "ok": true, "result": "wrote"]],
+        ]]]).merging(["seq": 2]) { a, _ in a }))
+
+        #expect(d.dropped == 0)
+        let tasks = events.compactMap { if case .spawnTasks(_, let p) = $0 { return p }; return nil }.first
+        #expect(tasks == ["search", "summarise"])
+        #expect(spawnJson(events) != nil, "announced two agents and never reported them: \(events)")
     }
 }
