@@ -5,7 +5,8 @@
  * a phone generates an image on-device, uploads it here once, and every
  * client renders it by URL — no base64 in histories, no relay size caps.
  *
- *   POST /media/upload        { userId, data(base64), contentType } → { key, url }   (internal-key)
+ *   POST /media/upload        { userId | deviceId+token, data(base64), contentType }
+ *                                                            → { key, url }   (internal-key)
  *   GET  /media/:key          → bytes (public; keys are unguessable UUIDs)
  *   POST /device/tool-result  { userId, toolUseId, payload }        → { ok }         (internal-key)
  *   GET  /device/tool-result?userId=&toolUseId=                     → { result? }    (internal-key)
@@ -20,11 +21,17 @@
  *   - upload/post/get-result ride the internal-key channel only; the app
  *     proxies front them and stamp the session's userId (a client can never
  *     write another user's mailbox or attribute media to someone else)
+ *   - a DEVICE may upload without a session, but only by presenting its own
+ *     enrolled token: the owner is looked up from (id, token_hash, revoked=0),
+ *     never taken from the request. This is what lets a wearable — whose flash
+ *     is readable by anyone holding it — carry a narrow revocable credential
+ *     instead of the account's bearer JWT.
  *   - /media/:key GETs are public-but-unguessable (UUID keys, like every
  *     CDN share link); owner rides R2 customMetadata for future auditing
  */
 import { OpenAPIRoute, Query, Str } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
+import { hashDeviceToken } from "./devices";
 
 const json = (data: any, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -54,6 +61,12 @@ const EXT: Record<string, string> = {
   // the public GET (no HTML/JS surface); the 6MB cap above still governs.
   "video/mp4": "mp4",
 };
+
+/** Resolve an uploading device's owner. Identical shape to
+ *  RELAY_DEVICE_AUTH_SQL: a device id alone proves nothing, and a revoked
+ *  device stops resolving the moment the owner revokes it. */
+export const MEDIA_DEVICE_AUTH_SQL = `
+  SELECT user_id FROM devices WHERE id = ?1 AND token_hash = ?2 AND revoked = 0`;
 
 export const TOOL_RESULT_INSERT_SQL = `
   INSERT INTO tool_results (id, user_id, tool_use_id, payload, created_at)
@@ -88,7 +101,9 @@ export class MediaUploadCall extends OpenAPIRoute {
     tags: ["Media"],
     summary: "Internal: store device-generated media in R2, get a stable URL.",
     requestBody: {
-      userId: new Str({ required: true }),
+      userId: new Str({ required: false, description: "owner; OR authenticate with deviceId+token" }),
+      deviceId: new Str({ required: false, description: "enrolled device uploading on its own token" }),
+      token: new Str({ required: false, description: "that device's token (verified by hash)" }),
       data: new Str({ required: true, description: "base64 bytes, ≤6MB decoded" }),
       contentType: new Str({ required: true, description: "image/jpeg|png|webp|gif, audio/mp4|mpeg|wav|ogg" }),
     },
@@ -98,8 +113,27 @@ export class MediaUploadCall extends OpenAPIRoute {
   async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
     if (!env.MEDIA) return json({ error: "media store not provisioned" }, 424);
-    const { userId, data: b64, contentType } = data.body;
-    if (!userId) return json({ error: "userId required" }, 400);
+    const { userId, deviceId, token, data: b64, contentType } = data.body;
+
+    // Two ways to name the owner, and the DEVICE never gets to assert it.
+    // A wearable's flash is readable by whoever holds the wearable, so the
+    // necklace carries only its own revocable device token — not the account
+    // bearer JWT it used to need to reach the app's /api/media proxy. The
+    // owner is resolved from (id, token_hash) exactly as relay poll/reply do,
+    // so a stolen token uploads to its own account and dies on revoke.
+    let owner: string;
+    if (deviceId && token) {
+      const row = await env.DB.prepare(MEDIA_DEVICE_AUTH_SQL)
+        .bind(String(deviceId), await hashDeviceToken(String(token))).first();
+      // Wrong token and revoked device are indistinguishable — same no-oracle
+      // property as heartbeat: no probing which device ids exist.
+      if (!row?.user_id) return json({ error: "unknown device" }, 401);
+      owner = String(row.user_id);
+    } else if (userId) {
+      owner = String(userId);
+    } else {
+      return json({ error: "userId or deviceId+token required" }, 400);
+    }
 
     const ext = EXT[String(contentType || "")];
     if (!ext) return json({ error: `contentType must be one of: ${Object.keys(EXT).join(", ")}` }, 400);
@@ -110,7 +144,7 @@ export class MediaUploadCall extends OpenAPIRoute {
     const key = `${crypto.randomUUID()}.${ext}`;
     await env.MEDIA.put(key, bytes, {
       httpMetadata: { contentType: String(contentType) },
-      customMetadata: { user_id: String(userId) },
+      customMetadata: { user_id: owner },
     });
 
     const url = `${new URL(request.url).origin}/media/${key}`;

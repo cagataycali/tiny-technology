@@ -19,6 +19,7 @@
  */
 import { OpenAPIRoute, Query, Str } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
+import { emitEvent } from "./events";
 
 const json = (data: any, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -128,6 +129,37 @@ export const ENDPOINT_GET_SQL = `
 
 export const DEVICE_REVOKE_SQL = `
   UPDATE devices SET revoked = 1 WHERE id = ?1 AND user_id = ?2`;
+
+/**
+ * Re-key a device the caller already owns: same row, new token.
+ *
+ * Enroll mints a token exactly once and only ever stores its SHA-256, so a
+ * client that loses the plaintext has no way back — and the only workaround was
+ * to enroll the hardware AGAIN, which mints a NEW row and leaves the old one
+ * permanently offline in the owner's fleet. That is how a Nicla Voice paired
+ * from a laptop became unreachable from the phone: the phone had the session and
+ * could see the row, but not the credential to speak for it.
+ *
+ * Owner-scoped like DEVICE_REVOKE_SQL: (id, user_id), so a leaked device id is
+ * not enough to steal a device. `revoked = 0` is required too — rotating a
+ * revoked device would silently resurrect a credential the owner killed on
+ * purpose, which is the one thing revoke is supposed to guarantee.
+ *
+ * Rotation is implicitly a revoke of the OLD token: the previous hash is
+ * overwritten, so anything still holding it fails its next heartbeat. That is
+ * the intended behaviour (two clients sharing one device row would fight over a
+ * single BLE connection slot anyway), but it means rotate is a mutation to
+ * authorize carefully, never a read.
+ *
+ * `kind != 'endpoint'` is a privilege guard, not tidiness. Endpoint devices are
+ * stored with token_hash = '' ON PURPOSE — they dial OUT and are authenticated
+ * by the url+secret pair, so nothing inbound may speak as them. Rotating one
+ * would hand its caller a working inbound credential for a device that is not
+ * supposed to have one, turning a re-key into a privilege escalation.
+ */
+export const DEVICE_ROTATE_TOKEN_SQL = `
+  UPDATE devices SET token_hash = ?3
+  WHERE id = ?1 AND user_id = ?2 AND revoked = 0 AND kind != 'endpoint'`;
 
 export class DeviceEnrollCall extends OpenAPIRoute {
   static schema = {
@@ -500,5 +532,120 @@ export class DeviceRevokeCall extends OpenAPIRoute {
 
     const res = await env.DB.prepare(DEVICE_REVOKE_SQL).bind(String(deviceId), String(userId)).run();
     return json({ ok: true, revoked: Number(res?.meta?.changes || 0) });
+  }
+}
+
+/**
+ * Internal: re-key a device the caller owns, so a second client can adopt it
+ * WITHOUT re-enrolling the hardware.
+ *
+ * The problem this exists for: enroll returns the plaintext token once and keeps
+ * only its hash, so "I own this device but don't have its token" had exactly one
+ * answer — enroll it again. That mints a new row, and the old row never goes
+ * offline gracefully; it just sits in the fleet forever, last_seen frozen. A
+ * Nicla Voice paired from a laptop was unreachable from the phone for this
+ * reason alone: the phone could SEE the row and even scan the board's beacon,
+ * but had no credential to act as it.
+ *
+ * Deliberately a POST, not a GET: it MUTATES (the old token stops working
+ * immediately, see DEVICE_ROTATE_TOKEN_SQL), and a credential-issuing GET is the
+ * kind of thing that ends up in a log, a referrer, or a prefetch.
+ *
+ * 0 rows changed means "not yours, revoked, or an endpoint device" and answers
+ * 404 for all three. Distinguishing them would confirm the existence of another
+ * user's device id, which is the same oracle DEVICE_HEARTBEAT_SQL avoids.
+ */
+export class DeviceRotateTokenCall extends OpenAPIRoute {
+  static schema = {
+    tags: ["Devices"],
+    summary: "Internal: rotate a device's token; returns the new one ONCE.",
+    requestBody: {
+      userId: new Str({ required: true }),
+      deviceId: new Str({ required: true }),
+    },
+    responses: { "200": { description: "Rotated", schema: { response: "Rotated" } } },
+  };
+
+  async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
+    if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
+    const { userId, deviceId } = data.body;
+    if (!userId || !deviceId) return json({ error: "userId and deviceId required" }, 400);
+
+    const token = mintToken();
+    const res = await env.DB.prepare(DEVICE_ROTATE_TOKEN_SQL)
+      .bind(String(deviceId), String(userId), await hashDeviceToken(token))
+      .run();
+
+    // Check BEFORE returning the token. Handing back a freshly minted token on a
+    // no-op UPDATE would give the caller a credential that authenticates nothing
+    // — every heartbeat would fail with no clue why.
+    if (Number(res?.meta?.changes || 0) === 0) {
+      return json({ error: "device not found" }, 404);
+    }
+    return json({ ok: true, device_id: String(deviceId), device_token: token });
+  }
+}
+
+/**
+ * 🎙️ Device → the owner's event ring. The PUSH half of the device model.
+ *
+ * Every other device surface is pull: the relay hands a device work and waits
+ * for its reply. That is the right shape for "take a photo" but the wrong shape
+ * for something the device notices on its own — a Nicla Voice wake word fires
+ * when it fires, and nothing asked for it.
+ *
+ * The event ring is the surface every client already polls (ActivityHUD, iOS
+ * Activity.swift, Android Activity.kt) AND that the next turn's system prompt
+ * carries (lib/chat/prompt.ts eventsBlock), so a wake becomes something the
+ * agent can mention unprompted, on any client, from a single write.
+ *
+ * Auth is the device token, not a session: the Nicla Voice has no WiFi and its
+ * events arrive through whichever phone is gatewaying it, which may have nobody
+ * logged in on screen. The token resolves the OWNER, so a device can only ever
+ * write to its own user's ring — an important property when the caller is a
+ * relay rather than the device itself.
+ *
+ * `kind` is an allowlist, not free text. This route is reachable by anything
+ * holding a device token, and the ring is what the agent reads as ground truth
+ * about what happened; a device that could emit arbitrary kinds could forge a
+ * `device_result` or a scheduler fire.
+ */
+export const DEVICE_EVENT_KINDS = ["nicla_wake", "nicla_sentry", "nicla_transcript", "device_note"] as const;
+
+export const DEVICE_EVENT_AUTH_SQL = `
+  SELECT user_id, name FROM devices WHERE id = ?1 AND token_hash = ?2 AND revoked = 0`;
+
+export class DeviceEventCall extends OpenAPIRoute {
+  static schema = {
+    tags: ["Devices"],
+    summary: "Internal: device-authored event onto its owner's ring (token in-body).",
+    requestBody: {
+      deviceId: new Str({ required: true }),
+      token: new Str({ required: true }),
+      kind: new Str({ required: true, description: DEVICE_EVENT_KINDS.join(" | ") }),
+      detail: new Str({ required: false, description: "Human-readable detail (≤300 chars)." }),
+    },
+    responses: { "200": { description: "Emitted", schema: { response: "Emitted" } } },
+  };
+
+  async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
+    if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
+    const { deviceId, token, kind, detail } = data.body;
+    if (!deviceId || !token || !kind) return json({ error: "deviceId, token and kind required" }, 400);
+    if (!DEVICE_EVENT_KINDS.includes(String(kind) as any)) {
+      return json({ error: "unsupported kind" }, 400);
+    }
+
+    const row = await env.DB.prepare(DEVICE_EVENT_AUTH_SQL)
+      .bind(String(deviceId), await hashDeviceToken(String(token))).first();
+    // Same no-oracle property as heartbeat: a wrong token and a revoked device
+    // are indistinguishable from outside.
+    if (!row?.user_id) return json({ error: "unknown device" }, 401);
+
+    // Name the device in the detail. The ring is read as prose by the agent, and
+    // "heard 'alexa'" with no subject is unattributable once a user owns two.
+    const name = String(row.name || "device").slice(0, 40);
+    await emitEvent(env, String(row.user_id), String(kind), `${name}: ${String(detail || "").slice(0, 240)}`);
+    return json({ ok: true });
   }
 }

@@ -32,12 +32,13 @@ import { TelegramApiCall } from "./telegram-api";
 import { PrefsGetCall, PrefsSetCall } from "./prefs";
 import { ModelConfigGetCall, ModelConfigSetCall } from "./model-config";
 import { AccountVoiceGetCall, AccountVoiceSetCall } from "./account-voice";
-import { DeviceEnrollCall, DeviceHeartbeatCall, DevicesListCall, DeviceRevokeCall, DeviceEndpointCallRoute } from "./devices";
+import { DeviceEnrollCall, DeviceHeartbeatCall, DevicesListCall, DeviceRevokeCall, DeviceRotateTokenCall, DeviceEndpointCallRoute, DeviceEventCall } from "./devices";
+import { TranscriptAddCall, TranscriptListCall, TranscriptGetCall } from "./transcripts";
 import { LocationBeatCall, LocationsListCall, LocationDeleteCall, LOCATION_SWEEP_SQL, LOCATION_SWEEP_AGE_S } from "./locations";
 import { PayBalanceCall, PayInvokeCall, PayTransferCall, PayRefundCall, PayPriceSetCall, PayPricingCall, PayCreditCall, PaySpendCall, PaySpendReverseCall, PaySpendSentCall, PaySettleUnknownCall, PayReconcileStatusCall, reconcileSentSpends, reconcileSettleUnknown } from "./payments";
 import { PayLinkAddressCall, PayClaimCall, PayDepositInfoCall, PayFaucetCall } from "./deposits";
 import { WithdrawRequestCall, WithdrawCompleteCall, WithdrawFailCall } from "./withdrawals";
-import { RelaySendCall, RelayPollCall, RelayReplyCall, RelayRecvCall } from "./relay";
+import { RelaySendCall, RelayPollCall, RelayReplyCall, RelayRecvCall, RelayDepositCall, RelayTaskResultCall } from "./relay";
 import { RingGetCall, RingAddCall } from "./ring";
 import { VisitCall } from "./visit";
 import { MessageSendCall, MessagesListCall, MessagesUnreadCall, MessageDeleteCall } from "./messages";
@@ -128,9 +129,23 @@ router.post('/device/enroll', DeviceEnrollCall)
 router.post('/device/heartbeat', DeviceHeartbeatCall)
 router.get('/device/list', DevicesListCall)
 router.delete('/device', DeviceRevokeCall)
+// Re-key a device the caller already owns, so a second client can adopt it
+// without re-enrolling the hardware (which would mint a new row and orphan the
+// old one). POST because it mutates: the previous token stops working at once.
+router.post('/device/rotate-token', DeviceRotateTokenCall)
+// 🎙️ Devices that notice things on their own (Nicla Voice wake word) push onto
+// the owner's event ring — the one path in the device model that isn't pull.
+router.post('/device/event', DeviceEventCall)
 // 🤖 Endpoint devices dial OUT: the worker holds the bearer and makes the call,
 // so the credential never reaches the edge app (docs/endpoint-devices-vision).
 router.post('/device/endpoint/call', DeviceEndpointCallRoute)
+// 🎤 Nicla Voice recorder (migration 0030): after a wake (or a nicla_voice_record
+// envelope) the paired phone records + transcribes on-device and stores the text
+// here. The write authenticates like /device/event (token resolves the owner);
+// the reads are userId-stamped by the app proxy / agent tools.
+router.post('/transcript', TranscriptAddCall)
+router.get('/transcript/list', TranscriptListCall)
+router.get('/transcript', TranscriptGetCall)
 // 🗺️ Map presence — heartbeat IS the opt-in, delete is the opt-out; the
 // staleness window (locations.ts) hides dead clients on its own
 router.post('/location/heartbeat', LocationBeatCall)
@@ -140,6 +155,12 @@ router.post('/device/relay/send', RelaySendCall)
 router.post('/device/relay/poll', RelayPollCall)
 router.post('/device/relay/reply', RelayReplyCall)
 router.get('/device/relay/recv', RelayRecvCall)
+// 🤖 spawn_agents wait:false parks its finished batch here under a batch_*
+// ticket — redeemed by the SAME recv, announced by the same push pattern.
+router.post('/device/relay/deposit', RelayDepositCall)
+// 💻 A daemon's use_tasks completion (device-token auth): deposit + ring
+// event + push — closes the "Task started…" in-window reply gap.
+router.post('/device/task-result', RelayTaskResultCall)
 // 💸 Payments (PR1 ledger-core) — internal-key except public pricing read
 router.get('/pay/balance', PayBalanceCall)
 router.post('/pay/invoke', PayInvokeCall)
@@ -350,10 +371,18 @@ export default {
         console.log(err);
       }
 
-      await fetch('https://api.cloudflare.com/client/v4/accounts/6a90286f3c58aac2b1466ab21214f454/email/routing/addresses', options)
-        .then(response => response.json())
-        .then(response => console.log(response))
-        .catch(err => console.error(err));
+      // CF_ACCOUNT_ID is the deployer's own Cloudflare account (Dashboard →
+      // Workers → right sidebar). It is a per-fork identifier, not a secret and
+      // not a credential — CLOUDFLARE_API_TOKEN above is what authorizes the
+      // call — but hardcoding one operator's account into a public template
+      // makes every fork silently POST at THEM, so it is read from env like
+      // every other binding and the route no-ops when unset.
+      if (env.CF_ACCOUNT_ID) {
+        await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.CF_ACCOUNT_ID}/email/routing/addresses`, options)
+          .then(response => response.json())
+          .then(response => console.log(response))
+          .catch(err => console.error(err));
+      }
       message.setReject("Error when forwarding");
     }
   },

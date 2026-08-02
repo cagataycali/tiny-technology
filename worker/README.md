@@ -60,6 +60,7 @@ else's namespaces.
 | `BASE_RPC_URL` / `BASE_SEPOLIA_RPC_URL` | deposit watching on public Base chains |
 | `RECONCILE_ALARM_USER` | who gets paged when a payment row stays blocked (see the note in `wrangler.toml`) |
 | `CLOUDFLARE_API_TOKEN` | Vectorize index housekeeping |
+| `CF_ACCOUNT_ID` | registering forward destinations for tiny inboxes (your own account id — Dashboard → Workers → sidebar; unset → that call is skipped) |
 | `TINY_CHAIN_*`, `PAYMENTS_NETWORK` (vars) | which chain payments settle on — see [chain/README.md](../chain/README.md) |
 
 ## Wire it to the rest

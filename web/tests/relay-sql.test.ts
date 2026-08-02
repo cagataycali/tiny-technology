@@ -90,28 +90,30 @@ describe.skipIf(skip())('relay SQL invariants', () => {
     expect(first(SQL.RELAY_RECV_SQL, { 1: 'e1', 2: 'u2' })).toBeUndefined()
   })
 
-  it('sweep removes old rows only — but SPARES undelivered device envelopes', () => {
-    // ⚠️ The write-path sweep no longer reaps everything past the window. A row
-    // that is still `delivered = 0` and addressed to a device is the evidence
-    // that a task never reached its device, and `sweepMissedTasks` (relay-missed.ts,
-    // per-minute cron) has to see it before it is destroyed — this sweep runs on
-    // every SEND, i.e. exactly when an active device is around, so reaping here
-    // would delete the evidence between ticks. See tests/relay-missed.test.ts.
+  it('sweep is two-tier: stale UNDELIVERED requests die at the short cutoff; delivered work and replies get the settled window', () => {
     const now = Math.floor(Date.now() / 1000)
-    const old = now - 7200
-    run(SQL.RELAY_INSERT_SQL, { 1: 'stale', 2: 'u1', 3: 'd1', 4: null, 5: '{}', 6: old })
-    run(SQL.RELAY_INSERT_SQL, { 1: 'done', 2: 'u1', 3: 'd1', 4: null, 5: '{}', 6: old })
-    run(SQL.RELAY_MARK_SQL, { 1: 'done' })
-    const args = { 1: now - 3600, 2: now - SQL.RELAY_HARD_AGE_S }
-    run(SQL.RELAY_SWEEP_SQL, args)
-    // delivered → gone; undelivered-to-a-device → kept for the reporter
-    expect(db.prepare(`SELECT id FROM relay_messages WHERE id='done'`).get()).toBeUndefined()
-    expect(db.prepare(`SELECT id FROM relay_messages WHERE id='stale'`).get()?.id).toBe('stale')
-    expect(db.prepare(`SELECT id FROM relay_messages WHERE id='r1'`).get()?.id).toBe('r1')
+    // 2h-old UNDELIVERED request — a device that wasn't polling must not come
+    // back hours later and execute a stale command
+    run(SQL.RELAY_INSERT_SQL, { 1: 'stale', 2: 'u1', 3: 'd1', 4: null, 5: '{}', 6: now - 7200 })
+    // 2h-old DELIVERED request — its device claimed it and is mid-task; the
+    // reply handler still needs this row (before the two-tier sweep, deleting
+    // it here made any >1h task's reply a silent 404 — G5)
+    run(SQL.RELAY_INSERT_SQL, { 1: 'working', 2: 'u1', 3: 'd1', 4: null, 5: '{}', 6: now - 7200 })
+    run(SQL.RELAY_MARK_SQL, { 1: 'working' })
+    // 25h-old delivered request — even the settled window ends
+    run(SQL.RELAY_INSERT_SQL, { 1: 'ancient', 2: 'u1', 3: 'd1', 4: null, 5: '{}', 6: now - 90_000 })
+    run(SQL.RELAY_MARK_SQL, { 1: 'ancient' })
+    // 2h-old reply (to_device='', never marked delivered) — the redemption
+    // window must outlive the push notification the user may tap hours later
+    run(SQL.RELAY_INSERT_SQL, { 1: 'r2', 2: 'u1', 3: '', 4: 'working', 5: '{"result":"done"}', 6: now - 7200 })
 
-    // …and the hard backstop still bounds the table if the cron never runs.
-    run(SQL.RELAY_SWEEP_SQL, { 1: now - 3600, 2: now - 1 })
-    expect(db.prepare(`SELECT id FROM relay_messages WHERE id='stale'`).get()).toBeUndefined()
+    run(SQL.RELAY_SWEEP_SQL, { 1: now - SQL.SWEEP_AGE_S, 2: now - SQL.SWEEP_SETTLED_AGE_S })
+    const ids = (db.prepare(`SELECT id FROM relay_messages`).all() as any[]).map(r => r.id)
+    expect(ids).not.toContain('stale')    // undelivered: short tier
+    expect(ids).not.toContain('ancient')  // settled tier still bounded
+    expect(ids).toContain('working')      // delivered + inside the window: kept
+    expect(ids).toContain('r2')           // reply inside the window: kept
+    expect(ids).toContain('r1')           // fresh reply from the earlier test: untouched
   })
 
   it('payload sanitizer: bounds + JSON validity', () => {

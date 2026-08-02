@@ -23,6 +23,13 @@ import { OpenAPIRoute, Query, Str, Int } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
 import { hashDeviceToken } from "./devices";
 import { emitEvent } from "./events";
+import { sendPushToUser, type PushPayload } from "./push";
+import { RELAY_INSERT_SQL } from "./relay-shared";
+
+// Re-export: the INSERT moved to relay-shared.ts (leaf) so relay ⇄ push never
+// cycle (push.ts writes notify envelopes with it; this file calls push). Tests
+// and older importers keep reading it from here.
+export { RELAY_INSERT_SQL };
 
 const json = (data: any, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -31,12 +38,20 @@ const json = (data: any, status = 200) =>
   });
 
 const PAYLOAD_MAX = 8192;
-const SWEEP_AGE_S = 3600; // envelopes older than 1h are garbage
 
-// SQL as exported constants (devices.ts pattern) for worker-gated tests
-export const RELAY_INSERT_SQL = `
-  INSERT INTO relay_messages (id, user_id, to_device, in_reply_to, payload, created_at, delivered)
-  VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)`;
+/**
+ * Two-tier sweep (use_device async, G5): one 1h cutoff for everything used to
+ * mean a task longer than 1h could never DELIVER — the reply handler requires
+ * the original envelope row (RELAY_ENVELOPE_SQL), the sweep had deleted it,
+ * and the daemon swallows the failed PATCH. So:
+ *   - UNDELIVERED requests keep the tight bound: a device that wasn't polling
+ *     must not come back hours later and execute a stale command.
+ *   - DELIVERED requests (a device claimed it and is presumably working) and
+ *     REPLIES (the result the user redeems — possibly hours after the push
+ *     notification) live a day. That day IS the redemption window.
+ */
+export const SWEEP_AGE_S = 3600; // undelivered envelopes: dead-letter bound
+export const SWEEP_SETTLED_AGE_S = 86400; // delivered requests + replies: redemption window
 
 export const RELAY_DEVICE_AUTH_SQL = `
   SELECT user_id FROM devices WHERE id = ?1 AND token_hash = ?2 AND revoked = 0`;
@@ -62,34 +77,38 @@ export const RELAY_RECV_SQL = `
   WHERE in_reply_to = ?1 AND user_id = ?2 AND to_device = ''
   ORDER BY created_at ASC LIMIT 1`;
 
-/**
- * Opportunistic hygiene on the write path.
- *
- * ⚠️ It deliberately SPARES rows that are still `delivered = 0` and addressed to
- * a device: those are the evidence `sweepMissedTasks` reports on, and this runs
- * on every relay SEND — which is exactly when a healthy, active device is around.
- * Reaping them here would destroy the record of a lost task between cron ticks,
- * and would do it *preferentially for busy users*, so the rail would appear to
- * work in testing and fire least for the people with the most at stake.
- *
- * The cron reaps them by id within a minute of expiry, once reported. ?2 is a
- * BACKSTOP for the case where that never happens (cron unconfigured, this module
- * deployed ahead of index.ts, a persistently failing tick): unbounded growth is
- * not an acceptable price for a notification, so anything older than
- * RELAY_HARD_AGE_S goes regardless of what has or hasn't been said about it.
- */
+// Replies have to_device = '' and are never marked delivered (recv is a
+// repeatable read), so the "settled" tier must be keyed on to_device, not on
+// the delivered flag alone — `delivered = 0` alone would sweep every reply at
+// the short cutoff and re-open the exact gap this fixes.
 export const RELAY_SWEEP_SQL = `
   DELETE FROM relay_messages
-   WHERE (created_at < ?1 AND NOT (delivered = 0 AND to_device != ''))
-      OR created_at < ?2`;
+  WHERE (to_device != '' AND delivered = 0 AND created_at < ?1)
+     OR created_at < ?2`;
+
+// The push needs a human name for its title ("💻 studio-mac finished") — the
+// auth query deliberately stays untouched (its exact shape is pinned by tests
+// as a security invariant), so the name is its own late-path-only lookup.
+export const RELAY_DEVICE_NAME_SQL = `
+  SELECT name FROM devices WHERE id = ?1`;
 
 /**
- * The backstop age for RELAY_SWEEP_SQL — deliberately far above SWEEP_AGE_S so
- * that in a working system the cron always wins the race and gets to speak
- * first. If this ever becomes the thing deleting undelivered invokes, the report
- * is broken, and a day of table growth is the cheaper failure.
+ * The grace the write-path sweep gives an undelivered envelope so the per-minute
+ * reporter can speak first.
+ *
+ * RELAY_SWEEP_SQL's short tier exists to stop a device that was offline for hours
+ * from waking up and executing a stale command — a bound worth keeping. But that
+ * sweep runs on every relay SEND, i.e. exactly when a healthy, active device is
+ * around, so with no grace it destroys the evidence `sweepMissedTasks` reports on
+ * *preferentially for busy users* — the rail would appear to work in testing and
+ * fire least for the people with the most at stake.
+ *
+ * So the cron reports at SWEEP_AGE_S and reaps by id (relay-missed.ts); the write
+ * path only reaps what the cron missed, five minutes later. Executability stays
+ * bounded (~65 min, not the 24h a settled-tier-only sweep would allow) and no
+ * report is ever destroyed before it is made.
  */
-export const RELAY_HARD_AGE_S = 86400;
+export const MISSED_SWEEP_GRACE_S = 300;
 
 /**
  * 💻 THE TASK THAT WAS NEVER DELIVERED — the other end of buildLateReplyEvent.
@@ -100,8 +119,9 @@ export const RELAY_HARD_AGE_S = 86400;
  *
  * `delivered` flips in exactly one place — RELAY_MARK_SQL, inside RelayPollCall,
  * which only the DEVICE calls. So `delivered = 0` past the sweep window means no
- * device ever fetched this envelope, and RELAY_SWEEP_SQL is about to delete it.
- * Nothing reads relay_messages on a cron; the row simply disappears.
+ * device ever fetched this envelope, and RELAY_SWEEP_SQL's short tier is about to
+ * delete it. Before this rail existed nothing read relay_messages on a cron; the
+ * row simply disappeared.
  *
  * What the user was told meanwhile (lib/chat/tools/platform.ts, the 45s
  * timeout): *"The task was DELIVERED; fetch the outcome with use_device
@@ -131,9 +151,11 @@ export const RELAY_HARD_AGE_S = 86400;
  *
  *  (2) NEVER BEFORE THE WINDOW. A `delivered = 0` row inside SWEEP_AGE_S is the
  *      HEALTHY state — it is a laptop that has not polled in the last few
- *      seconds. Only a row the sweep is entitled to delete is provably terminal,
- *      which is why this shares the sweep's own cutoff instead of a threshold of
- *      its own: the two can never disagree about what "expired" means.
+ *      seconds. So this shares the sweep's short-tier cutoff (SWEEP_AGE_S)
+ *      rather than picking a threshold of its own: the two can never disagree
+ *      about what "expired" means. The write-path sweep waits a further
+ *      MISSED_SWEEP_GRACE_S before reaping, so "expired" is always REPORTED
+ *      before it is deleted — reporting early would call a live task lost.
  *
  * The `type` test is NOT done in SQL. A `payload LIKE '%"type":"invoke"%'` would
  * let a device PROMPT containing that text decide its own envelope's class, and
@@ -271,10 +293,10 @@ export const relayDeleteByIdsSql = (n: number) =>
  * use_device waits 15×3s ≈ 45s and then hands the model a claim ticket
  * (lib/chat/tools/platform.ts: { pending:true, envelope_id }). That fixed the
  * dead-end error, but it left the OTHER half open: when the device finally
- * replies, nothing anywhere knows. The reply sits in the mailbox for its ~1h
- * (SWEEP_AGE_S) and is only ever seen if someone happens to ask the agent to
- * redeem the ticket in that same conversation — close the tab, ask on the
- * phone, or simply forget, and a completed task is silently discarded.
+ * replies, nothing anywhere knows. The reply sits in the mailbox for its day
+ * (SWEEP_SETTLED_AGE_S) and is only ever seen if someone happens to ask the
+ * agent to redeem the ticket — close the tab, ask on the phone, or simply
+ * forget, and a completed task is silently discarded.
  *
  * So a reply that lands after the waiter gave up now emits an event. The event
  * ring is the one surface every client already polls (ActivityHUD on web,
@@ -289,27 +311,78 @@ export const relayDeleteByIdsSql = (n: number) =>
 export const LATE_REPLY_S = 45; // == use_device's 15 × 3s wait budget
 export const LATE_REPLY_KIND = "device_result";
 
+/**
+ * The one lateness gate, shared by the ring event AND the push so the two
+ * announcement rails can never drift: what events also pushes, what stays
+ * silent stays silent on both.
+ *   - A non-finite/negative age means clock skew or a missing created_at —
+ *     "not provably late", stay silent rather than announce a fresh reply.
+ *   - notify envelopes are one-way banners; nobody is waiting on a result.
+ */
+function parseLateInvoke(requestPayload: unknown, ageSeconds: number): { ask: string; secs: number } | null {
+  if (!Number.isFinite(ageSeconds) || ageSeconds <= LATE_REPLY_S) return null;
+  let request: any = null;
+  try {
+    request = typeof requestPayload === "string" ? JSON.parse(requestPayload) : requestPayload;
+  } catch { /* unparseable original — fall through to the generic text */ }
+  if (request && request.type && request.type !== "invoke") return null;
+  const ask = String(request?.prompt || "").replace(/\s+/g, " ").trim();
+  return { ask, secs: Math.round(ageSeconds) };
+}
+
 export function buildLateReplyEvent(p: {
   envelopeId: string;
   requestPayload: unknown;
   ageSeconds: number;
 }): { kind: string; detail: string } | null {
-  // A non-finite/negative age means clock skew or a missing created_at — treat
-  // as "not provably late" and stay silent rather than event a fresh reply.
-  if (!Number.isFinite(p.ageSeconds) || p.ageSeconds <= LATE_REPLY_S) return null;
-  let request: any = null;
-  try {
-    request = typeof p.requestPayload === "string" ? JSON.parse(p.requestPayload) : p.requestPayload;
-  } catch { /* unparseable original — fall through to the generic detail */ }
-  // notify envelopes are one-way banners; nobody is waiting on a result.
-  if (request && request.type && request.type !== "invoke") return null;
-  const ask = String(request?.prompt || "").replace(/\s+/g, " ").trim().slice(0, 90);
-  const secs = Math.round(p.ageSeconds);
+  const late = parseLateInvoke(p.requestPayload, p.ageSeconds);
+  if (!late) return null;
+  const ask = late.ask.slice(0, 90);
   return {
     kind: LATE_REPLY_KIND,
     detail:
-      `💻 device finished after ${secs}s${ask ? `: "${ask}"` : ""} — read it with ` +
+      `💻 device finished after ${late.secs}s${ask ? `: "${ask}"` : ""} — read it with ` +
       `use_device action:'result' envelope_id:'${p.envelopeId}'`,
+  };
+}
+
+/**
+ * 🔔 The push half of a late device completion (use_device async, ask 1).
+ *
+ * The ring event above only surfaces when a client happens to poll or the
+ * user happens to send another message — close the laptop after "run the full
+ * build on my Mac" and the finished result told nobody. This payload rides
+ * sendPushToUser, which already fans out BOTH ways: web push (OS notification
+ * via sw.js) and a {type:'notify'} relay envelope every fresh phone banners.
+ *
+ * Privacy: the body carries the user's own ask (words they typed, already on
+ * the event ring), NEVER the device's reply — a result preview on the lock
+ * screen stays out until the user opts in.
+ *
+ * The url IS the redemption UX (design P3): the web app's ?q= deep link
+ * auto-sends a visible turn (lib/chat/deep-link.ts — plain ?q= sends unless
+ * the tiny is locked or a share is being viewed), so tapping the notification
+ * lands the user on the FETCHED RESULT, not an empty chat with homework. The
+ * turn's text names the claim ticket, so it also documents the redeem move.
+ */
+export function buildDeviceResultPush(p: {
+  envelopeId: string;
+  deviceName?: unknown;
+  requestPayload: unknown;
+  ageSeconds: number;
+}): PushPayload | null {
+  const late = parseLateInvoke(p.requestPayload, p.ageSeconds);
+  if (!late) return null;
+  const name = String(p.deviceName || "").trim().slice(0, 40) || "your device";
+  const ask = late.ask.slice(0, 140);
+  const redeem =
+    `My device finished a background task — fetch it with use_device ` +
+    `action:'result' envelope_id:'${p.envelopeId}' and show me the result.`;
+  return {
+    title: `💻 ${name} finished`,
+    body: ask ? `"${ask}" is done — tap to read the result.` : "A background task finished — tap to read the result.",
+    url: `/?q=${encodeURIComponent(redeem)}`,
+    tag: `device-result-${p.envelopeId}`,
   };
 }
 
@@ -340,7 +413,11 @@ function sweep(env: any, ctx?: any): void {
   // unbounded), and a sync try/catch can't catch an async .run() rejection.
   const now = Math.floor(Date.now() / 1000);
   const p = env.DB.prepare(RELAY_SWEEP_SQL)
-    .bind(now - SWEEP_AGE_S, now - RELAY_HARD_AGE_S).run()
+    // ⚠️ The undelivered tier is bound SWEEP_AGE_S + MISSED_SWEEP_GRACE_S back,
+    // not SWEEP_AGE_S: this runs on every SEND, and reaping an expired invoke
+    // here would destroy the evidence sweepMissedTasks (relay-missed.ts) reports
+    // on before the per-minute cron ever sees it. See MISSED_SWEEP_GRACE_S.
+    .bind(now - SWEEP_AGE_S - MISSED_SWEEP_GRACE_S, now - SWEEP_SETTLED_AGE_S).run()
     .catch(() => { /* sweep is best-effort */ });
   try { ctx?.waitUntil?.(p); } catch { }
 }
@@ -453,18 +530,174 @@ export class RelayReplyCall extends OpenAPIRoute {
     // FIRST, event second: the reply row is the payload the user actually
     // needs, so an emit failure must never fail the device's PATCH. waitUntil
     // keeps the write alive past the response like sweep() does.
+    // A missing created_at must read as NaN ("not provably late"), NOT as
+    // epoch 0 — `|| 0` there would make every reply look 56 years old.
+    const ageSeconds = orig.created_at == null ? NaN : now - Number(orig.created_at);
     const late = buildLateReplyEvent({
       envelopeId: String(inReplyTo),
       requestPayload: orig.payload,
-      // A missing created_at must read as NaN ("not provably late"), NOT as
-      // epoch 0 — `|| 0` there would make every reply look 56 years old.
-      ageSeconds: orig.created_at == null ? NaN : now - Number(orig.created_at),
+      ageSeconds,
     });
     if (late) {
       const p = emitEvent(env, owner, late.kind, late.detail).catch(() => { /* best-effort */ });
       try { ctx?.waitUntil?.(p); } catch { }
+      // 🔔 …and tell the user NOW, not next-poll: web push + notify envelopes
+      // to their fresh phones (sendPushToUser does both legs). Same lateness
+      // gate as the event (shared parseLateInvoke), so an in-window reply —
+      // already returned inline as the tool result — never double-reports.
+      // Best-effort like the event: the reply row is already committed.
+      const q = (async () => {
+        const dev = await env.DB.prepare(RELAY_DEVICE_NAME_SQL).bind(String(deviceId)).first();
+        const push = buildDeviceResultPush({
+          envelopeId: String(inReplyTo),
+          deviceName: dev?.name,
+          requestPayload: orig.payload,
+          ageSeconds,
+        });
+        if (push) await sendPushToUser(env, owner, push);
+      })().catch(() => { /* best-effort */ });
+      try { ctx?.waitUntil?.(q); } catch { }
     }
     return json({ ok: true });
+  }
+}
+
+/**
+ * 🤖 Batch deposit (spawn_agents async — web repo
+ * docs/spawn-agents-async-design-2026-08-02.md).
+ *
+ * An app-side background continuation (spawn_agents wait:false runs its
+ * fan-out via next/server after(), past the closed stream) parks the
+ * aggregated result here under a synthetic ticket. The row is a normal
+ * reply row (to_device = '', in_reply_to = ticket), so EVERYTHING built
+ * for late device replies just works unchanged: the same recv redeems it,
+ * the same 24h settled-sweep tier bounds it, the same self-redeeming ?q=
+ * push pattern announces it.
+ *
+ * The ticket MUST live in its own namespace (batch_*): replies are
+ * redeemed oldest-first per (in_reply_to, user_id), so a deposit under a
+ * REAL envelope id could shadow a genuine device reply. The namespace
+ * check makes that collision structurally impossible.
+ */
+export function isBatchTicket(raw: unknown): boolean {
+  return typeof raw === "string" && /^batch_[A-Za-z0-9-]{8,64}$/.test(raw);
+}
+
+export class RelayDepositCall extends OpenAPIRoute {
+  static schema = {
+    tags: ["Devices"],
+    summary: "Internal: deposit a background result under a batch_* ticket.",
+    requestBody: {
+      userId: new Str({ required: true }),
+      ticket: new Str({ required: true, description: "batch_* ticket, never a device envelope id" }),
+      payload: new Str({ required: true, description: "JSON string, ≤8KB" }),
+    },
+    responses: { "200": { description: "Deposited", schema: { response: "Deposited" } } },
+  };
+
+  async handle(request: Request, env: any, ctx: any, data: Record<string, any>) {
+    if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
+    const { userId, ticket, payload } = data.body;
+    if (!userId || !isBatchTicket(ticket)) {
+      return json({ error: "userId and a batch_* ticket required" }, 400);
+    }
+    const clean = sanitizeRelayPayload(payload);
+    if (clean === null) return json({ error: "payload must be valid JSON ≤8KB" }, 400);
+    await env.DB.prepare(RELAY_INSERT_SQL).bind(
+      crypto.randomUUID(), String(userId), "", String(ticket), clean, Math.floor(Date.now() / 1000)
+    ).run();
+    sweep(env, ctx);
+    return json({ ok: true });
+  }
+}
+
+/**
+ * 💻 Daemon task completions (use_device async — the LAST hole in "trigger
+ * and forget on the Mac"). A relay invoke that the daemon's agent offloads to
+ * its own use_tasks runner replies IN-WINDOW ("Task started…"), so the
+ * late-reply push never fires; when the task finishes minutes later, the
+ * daemon only showed a DESKTOP notification. This endpoint is the missing
+ * rail: the daemon posts the finished task here on its DEVICE TOKEN, and the
+ * result gets the full late-reply treatment — a deposit row redeemable via
+ * use_device action:'result', a ring event (kind device_task_result: the
+ * `device` prefix already renders 💻 on every surface), and ONE push whose
+ * url is the same self-redeeming ?q= pattern.
+ *
+ * Ticket = task_<device-id-8>_<taskId>: the task_ namespace can never collide
+ * with envelope uuids or batch_ tickets, and the device-id prefix scopes a
+ * device-supplied taskId to the device that authed — one daemon can never
+ * shadow another device's (or another user's) tickets.
+ */
+export function taskTicket(deviceId: string, taskId: string): string | null {
+  if (!/^[A-Za-z0-9_-]{1,48}$/.test(taskId)) return null;
+  return `task_${deviceId.replace(/-/g, "").slice(0, 8)}_${taskId}`;
+}
+
+export function buildTaskResultPush(p: {
+  ticket: string;
+  deviceName?: unknown;
+  summary?: unknown;
+}): PushPayload {
+  const name = String(p.deviceName || "").trim().slice(0, 40) || "your device";
+  const summary = String(p.summary || "").replace(/\s+/g, " ").trim().slice(0, 140);
+  const redeem =
+    `My device finished a background task — fetch it with use_device ` +
+    `action:'result' envelope_id:'${p.ticket}' and show me the result.`;
+  return {
+    title: `💻 ${name} finished a background task`,
+    body: summary ? `"${summary}" is done — tap to read the result.` : "A background task finished — tap to read the result.",
+    url: `/?q=${encodeURIComponent(redeem)}`,
+    tag: `task-result-${p.ticket}`,
+  };
+}
+
+export class RelayTaskResultCall extends OpenAPIRoute {
+  static schema = {
+    tags: ["Devices"],
+    summary: "Internal: a daemon's background task finished — deposit + announce (device token auth).",
+    requestBody: {
+      deviceId: new Str({ required: true }),
+      token: new Str({ required: true }),
+      taskId: new Str({ required: true, description: "The daemon's task id (use_tasks), [A-Za-z0-9_-]{1,48}" }),
+      summary: new Str({ required: false, description: "One-line what-was-asked (≤140 shown on the push)" }),
+      result: new Str({ required: true, description: "The finished result text (deposited, ≤7KB)" }),
+    },
+    responses: { "200": { description: "Announced", schema: { response: "Announced" } } },
+  };
+
+  async handle(request: Request, env: any, ctx: any, data: Record<string, any>) {
+    if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
+    const { deviceId, token, taskId, summary, result } = data.body;
+    const owner = await authDevice(env, deviceId, token);
+    if (!owner) return json({ error: "unauthorized" }, 401);
+
+    const ticket = taskTicket(String(deviceId), String(taskId ?? ""));
+    if (!ticket) return json({ error: "taskId must be [A-Za-z0-9_-]{1,48}" }, 400);
+
+    const clean = sanitizeRelayPayload(JSON.stringify({ result: String(result ?? "").slice(0, 7000) }));
+    if (clean === null) return json({ error: "result payload must fit 8KB" }, 400);
+
+    // Deposit FIRST (the payload the user redeems), announcements second —
+    // the same order the late-reply path pins.
+    await env.DB.prepare(RELAY_INSERT_SQL).bind(
+      crypto.randomUUID(), owner, "", ticket, clean, Math.floor(Date.now() / 1000)
+    ).run();
+
+    const dev = await env.DB.prepare(RELAY_DEVICE_NAME_SQL).bind(String(deviceId)).first();
+    const name = String(dev?.name || "device");
+    const brief = String(summary || "").replace(/\s+/g, " ").trim().slice(0, 90);
+    const p = emitEvent(
+      env, owner, "device_task_result",
+      `💻 ${name} finished${brief ? `: "${brief}"` : " a background task"} — read it with ` +
+      `use_device action:'result' envelope_id:'${ticket}'`,
+    ).catch(() => { /* best-effort */ });
+    try { ctx?.waitUntil?.(p); } catch { }
+    const q = sendPushToUser(env, owner, buildTaskResultPush({ ticket, deviceName: dev?.name, summary }))
+      .catch(() => { /* best-effort */ });
+    try { ctx?.waitUntil?.(q); } catch { }
+
+    sweep(env, ctx);
+    return json({ ok: true, ticket });
   }
 }
 

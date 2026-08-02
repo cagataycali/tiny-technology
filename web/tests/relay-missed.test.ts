@@ -359,26 +359,55 @@ describe.skipIf(!present)('reporting is idempotent because it reaps', () => {
 })
 
 describe.skipIf(!present)('the write-path sweep must not destroy the evidence first', () => {
-  it('RELAY_SWEEP_SQL spares undelivered device envelopes, so the cron can still see them', () => {
+  it('the write path binds a GRACE, so a just-expired envelope outlives the send it rode in on', () => {
     // `sweep()` runs on every relay SEND — precisely when an active device is
-    // around. A blind delete there reaps lost tasks between cron ticks, and does
-    // it most for the busiest users: the rail would look fine and fire least for
-    // the people with the most at stake.
+    // around. Reaping an expired invoke there destroys lost tasks between cron
+    // ticks, and does it most for the busiest users: the rail would look fine
+    // and fire least for the people with the most at stake.
+    //
+    // ⚠️ The sparing lives in the BINDING, not in the statement. RELAY_SWEEP_SQL's
+    // short tier deliberately targets undelivered device envelopes (a device that
+    // was offline for hours must not wake and run a stale command — use_device
+    // async G5), so the statement alone reaps exactly the evidence this rail
+    // reports on. sweep() therefore binds ?1 at SWEEP_AGE_S + MISSED_SWEEP_GRACE_S:
+    // the per-minute cron always gets to speak first, and executability stays
+    // bounded at ~65 minutes instead of the settled tier's day.
     const P = (s: string) => s.replace(/\?(\d)/g, '?')
-    send('lost', { ageS: 2 * HOUR })                       // undelivered invoke
-    send('done', { ageS: 2 * HOUR, delivered: 1 })         // delivered
+    const graced = NOW - relay.SWEEP_AGE_S - relay.MISSED_SWEEP_GRACE_S
+    send('lost', { ageS: relay.RELAY_SWEEP_AGE_S + 30 })   // expired, inside the grace
+    send('done', { ageS: 2 * HOUR, delivered: 1 })         // delivered: settled tier
     send('reply', { ageS: 2 * HOUR, toDevice: '', replyTo: 'x' })
-    db.prepare(P(relay.RELAY_SWEEP_SQL)).run(NOW - relay.RELAY_SWEEP_AGE_S, NOW - relay.RELAY_HARD_AGE_S)
-    expect(rows()).toEqual(['lost'])                       // the others are gone
+    db.prepare(P(relay.RELAY_SWEEP_SQL)).run(graced, NOW - relay.SWEEP_SETTLED_AGE_S)
+    // reportable AND still there; the settled pair rides the day-long window
+    expect(rows().sort()).toEqual(['done', 'lost', 'reply'])
+
+    // …and once the grace is up, the write path reaps what the cron didn't.
+    send('stale', { ageS: relay.RELAY_SWEEP_AGE_S + relay.MISSED_SWEEP_GRACE_S + 30 })
+    db.prepare(P(relay.RELAY_SWEEP_SQL)).run(graced, NOW - relay.SWEEP_SETTLED_AGE_S)
+    expect(rows()).not.toContain('stale')
+    expect(rows()).toContain('lost')
   })
 
-  it('but a hard backstop still bounds the table if the cron never runs', () => {
+  it('sweep() actually binds that grace — a comment cannot enforce it', () => {
+    // The two-tier statement is shared with the settled window, so the only
+    // thing standing between an unreported task and a blind delete is this one
+    // call site. Pin it: the grace must be SUBTRACTED at the bind, and the
+    // constant must be positive (a zero grace is the original bug).
+    const src = readFileSync(join(WORKER_SRC, 'relay.ts'), 'utf8')
+    const bind = src.match(/RELAY_SWEEP_SQL\)[\s\S]{0,600}?\.bind\(([^)]*)\)/)
+    expect(bind, 'sweep() must bind RELAY_SWEEP_SQL').toBeTruthy()
+    expect(bind![1].replace(/\s+/g, ' ')).toContain('now - SWEEP_AGE_S - MISSED_SWEEP_GRACE_S')
+    expect(relay.MISSED_SWEEP_GRACE_S).toBeGreaterThan(0)
+  })
+
+  it('but the settled window still bounds the table if the cron never runs', () => {
     // Unbounded growth is not an acceptable price for a notification. If the
     // reporting tick is broken/undeployed, a day-old row goes regardless.
     const P = (s: string) => s.replace(/\?(\d)/g, '?')
-    expect(relay.RELAY_HARD_AGE_S).toBeGreaterThan(relay.RELAY_SWEEP_AGE_S)
-    send('ancient', { ageS: relay.RELAY_HARD_AGE_S + HOUR })
-    db.prepare(P(relay.RELAY_SWEEP_SQL)).run(NOW - relay.RELAY_SWEEP_AGE_S, NOW - relay.RELAY_HARD_AGE_S)
+    expect(relay.SWEEP_SETTLED_AGE_S).toBeGreaterThan(relay.RELAY_SWEEP_AGE_S + relay.MISSED_SWEEP_GRACE_S)
+    send('ancient', { ageS: relay.SWEEP_SETTLED_AGE_S + HOUR })
+    db.prepare(P(relay.RELAY_SWEEP_SQL))
+      .run(NOW - relay.SWEEP_AGE_S - relay.MISSED_SWEEP_GRACE_S, NOW - relay.SWEEP_SETTLED_AGE_S)
     expect(rows()).toEqual([])
   })
 })

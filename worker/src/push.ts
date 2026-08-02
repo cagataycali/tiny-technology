@@ -20,7 +20,10 @@
  */
 import { OpenAPIRoute, Str } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
-import { RELAY_INSERT_SQL } from "./relay";
+// From the leaf module, NOT relay.ts: relay.ts imports sendPushToUser from
+// here (late device replies push), so reading the INSERT from relay.ts would
+// close an import cycle.
+import { RELAY_INSERT_SQL } from "./relay-shared";
 
 const json = (data: any, status = 200) =>
   new Response(JSON.stringify(data), {
