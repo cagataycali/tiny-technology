@@ -1451,6 +1451,219 @@ import Foundation
     }
 }
 
+// ── ⏰ JobCadence ──────────────────────────────────────────────────────────
+
+/// 🔴 The Jobs panel used to render `ran Jul 20, 09:00 · fired 0×` — one row
+/// contradicting itself, with the false half the one a person acts on.
+///
+/// `let done = fired > 0 || !enabled` treated a cleared `enabled` flag as proof
+/// of a run, and the scheduler clears it for the opposite reason too: a `once`
+/// job due more than 24h ago is switched OFF, `fire_count` untouched
+/// (`scheduler.ts` skip-stale). Since `JOB_ABANDONED_KIND` the worker also
+/// PUSHES "⏰ <name> never ran" for exactly that row — so the notification and
+/// the panel were telling the user opposite things about the same job.
+///
+/// These are the web's rules (`lib/chat/job-cadence.ts`, pinned by
+/// `tests/job-cadence.test.ts`) now that iOS shares them. `now` is injected, so
+/// every case here is a fixed clock rather than a race.
+@Suite struct JobCadenceTests {
+    /// A fixed "now" — 2026-08-02T12:00:00Z. No `Date()` anywhere in this suite.
+    let now: Double = 1_785_412_800
+    var hour: Double { 3600 }
+
+    // ── the defect itself ─────────────────────────────────────────────────
+
+    @Test("a one-shot that was switched off having never fired does not claim to have run")
+    func theAbandonedOneShotTellsTheTruth() {
+        // The exact row the worker's skip-stale branch leaves behind:
+        // enabled = 0, fire_count = 0, run_at in the past.
+        let s = JobCadence.oneShotState(runAt: now - 30 * hour, fired: 0, enabled: false, now: now)
+        #expect(s == .missed)
+        #expect(JobCadence.prefix(s) == "didn't run")
+        // The old expression's verdict, for the record — this is what shipped.
+        #expect((0 > 0 || !false) == true)
+    }
+
+    @Test("the cadence line for that job no longer says ran")
+    func theCadenceStringChanged() {
+        let line = JobsView.cadence(schedule: nil, runAt: now - 30 * hour,
+                                    fired: 0, enabled: false, now: now)
+        #expect(line.hasPrefix("didn't run "))
+        // The two strings this row used to be able to show, and neither is true
+        // of it: "ran …" was what it did show, "once at …" is the other branch.
+        #expect(!line.hasPrefix("ran "))
+        #expect(!line.hasPrefix("once at"))
+        // The date itself is still there — the fix is the verb, not the loss of
+        // the one fact the row had.
+        #expect(line.count > "didn't run ".count)
+    }
+
+    // ── the rest of the state machine ─────────────────────────────────────
+
+    @Test("a recorded run outranks every flag, including a still-enabled row")
+    func aRunOutranksTheFlags() {
+        // The post-fire disable is a separate statement, so enabled=1+fired=1 exists.
+        #expect(JobCadence.oneShotState(runAt: now - hour, fired: 1, enabled: true, now: now) == .ran)
+        #expect(JobCadence.oneShotState(runAt: now - hour, fired: 1, enabled: false, now: now) == .ran)
+        // …and it outranks an unreadable run_at too (that is the first branch).
+        #expect(JobCadence.oneShotState(runAt: nil, fired: 2, enabled: false, now: now) == .ran)
+    }
+
+    @Test("a job whose time just passed is in flight, not overdue forever")
+    func theInFlightJobIsDue() {
+        let s = JobCadence.oneShotState(runAt: now - 60, fired: 0, enabled: true, now: now)
+        #expect(s == .due)
+        #expect(JobCadence.prefix(s) == "due")
+        // The exact tick it comes due belongs to `.due`, not `.pending`: the
+        // scheduler skips only while `due > now`, so at equality it fires.
+        #expect(JobCadence.oneShotState(runAt: now, fired: 0, enabled: true, now: now) == .due)
+        #expect(JobCadence.oneShotState(runAt: now + 1, fired: 0, enabled: true, now: now) == .pending)
+    }
+
+    @Test("still enabled but past the catch-up window is already lost")
+    func theCatchUpBoundary() {
+        // The scheduler's own test is `now - due > CATCH_UP_SECONDS`, so exactly
+        // 24h old is still catchable — the boundary belongs to `.due`.
+        #expect(JobCadence.oneShotState(runAt: now - JobCadence.catchUpSeconds,
+                                        fired: 0, enabled: true, now: now) == .due)
+        #expect(JobCadence.oneShotState(runAt: now - JobCadence.catchUpSeconds - 1,
+                                        fired: 0, enabled: true, now: now) == .missed)
+    }
+
+    @Test("a future one-shot is still coming")
+    func thePendingJob() {
+        let s = JobCadence.oneShotState(runAt: now + hour, fired: 0, enabled: true, now: now)
+        #expect(s == .pending)
+        #expect(JobCadence.prefix(s) == "once at")
+    }
+
+    // ── the 1970 guard ────────────────────────────────────────────────────
+
+    @Test("an unusable run_at is unknown, not a job scheduled for 1970")
+    func epochZeroIsNotADate() {
+        for bad: Double? in [0, -1, .nan, .infinity, nil] {
+            #expect(JobCadence.usableSec(bad) == nil)
+            #expect(JobCadence.oneShotState(runAt: bad, fired: 0, enabled: true, now: now) == .unknown)
+        }
+        #expect(JobCadence.prefix(.unknown) == nil)
+        // …and the panel falls back to "?" rather than printing Jan 1, 1970.
+        let line = JobsView.cadence(schedule: nil, runAt: 0, fired: 0, enabled: true, now: now)
+        #expect(line == "?")
+        #expect(!line.contains("1970"))
+    }
+
+    // ── last_fired_at, the field the scheduler overwrites when it gives up ──
+
+    @Test("nothing says last about a job that never fired")
+    func lastNeedsAFireBehindIt() {
+        #expect(JobCadence.lastFiredWord(fired: 1, state: .ran) == "last")
+        // The abandoned row: the timestamp is real, but it is the moment the
+        // scheduler switched the job off — so that is what it is called.
+        #expect(JobCadence.lastFiredWord(fired: 0, state: .missed) == "switched off")
+        // A recurring job that skipped a stale slot also gets last_fired_at
+        // bumped with no fire. Nothing true to say, so nothing is said.
+        #expect(JobCadence.lastFiredWord(fired: 0, state: .unknown) == nil)
+        #expect(JobCadence.lastFiredWord(fired: 0, state: .pending) == nil)
+        #expect(JobCadence.lastFiredWord(fired: 0, state: .due) == nil)
+    }
+
+    // ── colour ────────────────────────────────────────────────────────────
+
+    @Test("green is never spent on a job that isn't going to happen")
+    func toneFollowsTheState() {
+        #expect(JobCadence.tone(schedule: "*/5m", state: .unknown, enabled: true) == .live)
+        #expect(JobCadence.tone(schedule: "*/5m", state: .unknown, enabled: false) == .muted)
+        #expect(JobCadence.tone(schedule: nil, state: .pending, enabled: true) == .live)
+        #expect(JobCadence.tone(schedule: nil, state: .due, enabled: true) == .live)
+        #expect(JobCadence.tone(schedule: nil, state: .ran, enabled: false) == .done)
+        #expect(JobCadence.tone(schedule: nil, state: .missed, enabled: false) == .warn)
+        #expect(JobCadence.tone(schedule: nil, state: .unknown, enabled: true) == .muted)
+        // An empty schedule string is not a schedule (the payload is taken raw).
+        #expect(JobCadence.tone(schedule: "", state: .missed, enabled: true) == .warn)
+    }
+
+    /// The one step where the rule meets SwiftUI. `tone` is covered above, but
+    /// Tone → Color was pinned only by a source read in
+    /// tests/ios-job-cadence.test.ts — so a mutant painting `.warn` green
+    /// survived this suite while the row said "didn't run" in the colour of
+    /// success. Compared as text: the exact hue names are the source pin's job,
+    /// and these tests stay off SwiftUI.
+    @Test("the colour a person actually sees separates the four tones")
+    func tintTranslatesTheTone() {
+        func hue(_ tone: JobCadence.Tone) -> String { String(describing: JobsView.tint(tone)) }
+        #expect(hue(.warn) != hue(.live), "a job that will never run is painted as live")
+        #expect(hue(.done) != hue(.live), "a job that already ran is painted as still coming")
+        #expect(hue(.warn) != hue(.done), "the warning is indistinguishable from a finished job")
+        // Spent and paused are deliberately the same quiet colour.
+        #expect(hue(.muted) == hue(.done))
+    }
+
+    // ── daily@HH:MM speaks the viewer's clock, like the web ───────────────
+
+    /// ⚠️ Foundation separates the time from AM/PM with U+202F (narrow no-break
+    /// space), not U+0020 — so `"6:00 PM" == "6:00 PM"` fails while printing two
+    /// identical-looking strings. Normalise before comparing; the app itself ships
+    /// the real character, which is correct typography and not worth changing.
+    private func norm(_ s: String?) -> String? {
+        s?.replacingOccurrences(of: "\u{202F}", with: " ")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+    }
+
+    @Test("a daily job is shown on the reader's own clock, not in UTC")
+    func theDailyDSLConverts() {
+        let anchor = Date(timeIntervalSince1970: now)
+        let posix = Locale(identifier: "en_US_POSIX")
+        // Tokyo is UTC+9 with no DST, so 09:00 UTC is 18:00 there — a reader who
+        // had to do that sum themselves is what the old "UTC" label asked for.
+        #expect(norm(JobCadence.dailyLocal("daily@09:00", now: anchor,
+                                           output: TimeZone(identifier: "Asia/Tokyo")!,
+                                           locale: posix)) == "6:00 PM")
+        #expect(norm(JobCadence.dailyLocal("daily@09:00", now: anchor,
+                                           output: TimeZone(identifier: "UTC")!,
+                                           locale: posix)) == "9:00 AM")
+        // Crossing midnight backwards still names the right wall-clock time.
+        #expect(norm(JobCadence.dailyLocal("daily@02:30", now: anchor,
+                                           output: TimeZone(identifier: "America/Los_Angeles")!,
+                                           locale: posix)) == "7:30 PM")
+        // A 24-hour locale gets 24-hour text from the same call — the conversion
+        // is the point, the rendering stays the reader's own.
+        #expect(norm(JobCadence.dailyLocal("daily@09:00", now: anchor,
+                                           output: TimeZone(identifier: "Asia/Tokyo")!,
+                                           locale: Locale(identifier: "de_DE"))) == "18:00")
+    }
+
+    @Test("an unrecognised schedule is shown verbatim, never silently reworded")
+    func malformedSchedulesArePassedThrough() {
+        let anchor = Date(timeIntervalSince1970: now)
+        for bad in ["daily@9:00", "daily@0900", "daily@", "daily@25:00", "daily@09:61",
+                    "daily@ab:cd", "*/5m", "0 9 * * *"] {
+            #expect(JobCadence.dailyLocal(bad, now: anchor) == nil, "\(bad) should not parse")
+        }
+        // …and the panel then prints the raw DSL rather than a guess.
+        #expect(JobsView.cadence(schedule: "0 9 * * *", runAt: nil, fired: 0,
+                                 enabled: true, now: now) == "0 9 * * *")
+        #expect(JobsView.cadence(schedule: "daily@9:00", runAt: nil, fired: 0,
+                                 enabled: true, now: now) == "daily@9:00")
+    }
+
+    @Test("the recurring DSL still reads the way it always did")
+    func recurringUnchanged() {
+        #expect(JobsView.cadence(schedule: "*/5m", runAt: nil, fired: 0, enabled: true, now: now)
+                == "every 5 min")
+        #expect(JobsView.cadence(schedule: "*/2h", runAt: nil, fired: 3, enabled: true, now: now)
+                == "every 2 hr")
+    }
+
+    @Test("iOS and the worker still agree on the catch-up window")
+    func theSharedConstant() {
+        // scheduler.ts: CATCH_UP_SECONDS = 24 * 60 * 60, and the whole `.missed`
+        // rule is only true while that is the number. tests/ios-job-cadence.test.ts
+        // asserts the two sources really do still say it; this asserts the value
+        // this app computes with.
+        #expect(JobCadence.catchUpSeconds == 86_400)
+    }
+}
+
 @Suite struct ProfileToolParamsTests {
     // Mirrors web ProfileToolCard: params arrive as a JSON object OR a
     // stringified JSON blob — both must normalize to [String:String].

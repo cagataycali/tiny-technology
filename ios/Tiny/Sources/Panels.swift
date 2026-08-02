@@ -1260,13 +1260,175 @@ private struct ToolboxRow: View {
 
 // ── ⏰ Jobs ────────────────────────────────────────────────────────────────
 
+/// 🔴 What a job's schedule line MEANS — the question this panel answered by
+/// guessing, in the one direction that invents history.
+///
+/// The row said `ran Jul 20, 09:00` beside `fired 0×`, about a reminder that
+/// never happened, because the cadence line read:
+///
+///     let done = fired > 0 || !enabled
+///     return "\(done ? "ran" : "once at") \(dt)"
+///
+/// 🔑 `!enabled` is NOT evidence that a job ran. The scheduler clears the flag
+/// from two places and only one of them is a run (verified against the CURRENT
+/// `worker/src/scheduler.ts`, since its line numbers have moved
+/// since the web wrote this rule down):
+///
+///   • after a successful fire — `UPDATE jobs SET enabled = 0` (:238), preceded
+///     by CLAIM_SQL (:35), which increments `fire_count`.
+///   • when it gives UP — the skip-stale branch (:171) writes
+///     `last_fired_at = now, enabled = 0` for a `once` job that was due more
+///     than `CATCH_UP_SECONDS` (24h) ago. `fire_count` is untouched. The job
+///     never ran and now never will: it is disabled precisely so the tick stops
+///     re-evaluating it.
+///
+/// So `fire_count` is the ONLY field that records a run, and `last_fired_at` on
+/// such a row is the moment of ABANDONMENT — a time the job provably did not run
+/// at, which this panel was rendering as "last 2 days ago".
+///
+/// ⚠️ And the two halves of this app now contradict each other out loud: since
+/// `JOB_ABANDONED_KIND` the worker PUSHES "⏰ <name> never ran" (:130-142). The
+/// user reads that notification, opens this panel, and is told the job ran.
+///
+/// Ported from the web's `lib/chat/job-cadence.ts`, which fixed this and whose
+/// rules are already pinned by `tests/job-cadence.test.ts`. Pure and
+/// `now`-injectable so the same rules are testable here — the panel formats the
+/// time, this decides what the time means.
+enum JobCadence {
+    /// Mirror of the scheduler's `CATCH_UP_SECONDS`. `tests/ios-job-cadence.test.ts`
+    /// asserts this, the web module and the worker still agree on the number —
+    /// three languages, one rule, previously matched only by comment.
+    static let catchUpSeconds: Double = 24 * 60 * 60
+
+    /// What a one-shot job's fire time means right now.
+    ///
+    ///  `.ran`     — it fired. The only state `fire_count` can attest to.
+    ///  `.missed`  — it will never fire: either already dropped (disabled, no
+    ///               runs) or past the point where it can be (still enabled but
+    ///               due beyond the catch-up window, so the very next tick takes
+    ///               the skip-stale branch). Deliberately ONE state — "already
+    ///               abandoned" and "certain to be abandoned" differ in
+    ///               bookkeeping, not in anything the user can do about it.
+    ///  `.due`     — its time has passed, it is enabled, and it is inside the
+    ///               catch-up window: a job in flight, not a broken one.
+    ///  `.pending` — its time is still ahead.
+    ///  `.unknown` — no usable `run_at`.
+    enum OneShot: String { case ran, missed, due, pending, unknown }
+
+    /// How the line should FEEL, decided here rather than in the view so it can
+    /// be tested. Green is this app's "live" colour and the cadence line used to
+    /// be green unconditionally, so "didn't run" would arrive dressed as success.
+    enum Tone: String { case live, done, warn, muted }
+
+    /// The usable-timestamp guard (seconds > 0), shared with the web's
+    /// `usableSec`. ⚠️ Without it `run_at: 0` — a finite value the payload can
+    /// carry, since the worker validates `runAt` only as finite — dates the job
+    /// to `Jan 1, 1970` and reads as long-missed.
+    static func usableSec(_ v: Double?) -> Double? {
+        guard let v, v.isFinite, v > 0 else { return nil }
+        return v
+    }
+
+    /// Classify a one-shot. `now` is unix SECONDS, matching the payload.
+    ///
+    /// Order matters, and the first branch is the whole point: a recorded run
+    /// outranks every flag, including a still-enabled row (the post-fire disable
+    /// is a separate statement, so `enabled = 1, fire_count = 1` can exist and it
+    /// means the job RAN).
+    static func oneShotState(runAt: Double?, fired: Int, enabled: Bool, now: Double) -> OneShot {
+        if fired > 0 { return .ran }
+        guard let due = usableSec(runAt) else { return .unknown }
+        // Never ran, and nothing left to run it.
+        if !enabled { return .missed }
+        if due > now { return .pending }
+        // Due. Whether it still gets to run is exactly the scheduler's own test.
+        return now - due > catchUpSeconds ? .missed : .due
+    }
+
+    /// The word before the formatted time, or nil when there is nothing to say
+    /// about a time we cannot read.
+    static func prefix(_ state: OneShot) -> String? {
+        switch state {
+        case .ran: return "ran"
+        // Names the outcome, not the flag: true for both halves of `.missed` and
+        // impossible to mistake for a schedule.
+        case .missed: return "didn't run"
+        // Not "once at" — the time has passed, so a future tense reads as a job
+        // that is still coming and makes an in-flight run look overdue forever.
+        case .due: return "due"
+        case .pending: return "once at"
+        case .unknown: return nil
+        }
+    }
+
+    /// The truthful word for `last_fired_at`, or nil when that timestamp records
+    /// nothing a person would call a run.
+    ///
+    /// "last" needs `fire_count` behind it. On a `.missed` job the same field is
+    /// the moment the scheduler switched the job off, which is worth showing —
+    /// under its real name. A recurring job that skipped a stale slot also gets
+    /// `last_fired_at` bumped with no fire (:173), and lands here at `fired == 0`
+    /// with `.unknown`: nothing true to say, so nothing is said — the row's own
+    /// "fired 0×" already covers it.
+    static func lastFiredWord(fired: Int, state: OneShot) -> String? {
+        if fired > 0 { return "last" }
+        if state == .missed { return "switched off" }
+        return nil
+    }
+
+    /// The colour rule. Recurring jobs are judged by their switch (a live
+    /// `every 5 min` row is the common case and stays green); one-shots by what
+    /// their time now means.
+    static func tone(schedule: String?, state: OneShot, enabled: Bool) -> Tone {
+        if let s = schedule, !s.isEmpty { return enabled ? .live : .muted }
+        switch state {
+        case .pending, .due: return .live
+        case .ran: return .done
+        case .missed: return .warn
+        case .unknown: return .muted
+        }
+    }
+
+    /// `daily@HH:MM` (the worker DSL stores UTC) → the viewer's own clock.
+    ///
+    /// The one-shot branch formats in the DEVICE's timezone, so labelling this
+    /// one "UTC" put two different clocks in one list and left every non-UTC
+    /// reader doing the arithmetic to find out when their own job runs. Anchoring
+    /// on `now` is the right approximation — it reflects the current UTC offset
+    /// (DST included) the job fires under around now.
+    ///
+    /// nil when the string isn't that exact shape, so an unrecognised schedule is
+    /// shown verbatim rather than silently reworded.
+    static func dailyLocal(_ schedule: String, now: Date,
+                           output: TimeZone = .current, locale: Locale = .current) -> String? {
+        guard schedule.hasPrefix("daily@") else { return nil }
+        let parts = schedule.dropFirst(6).split(separator: ":", omittingEmptySubsequences: false)
+        guard parts.count == 2, parts[0].count == 2, parts[1].count == 2,
+              let h = Int(parts[0]), let m = Int(parts[1]),
+              (0...23).contains(h), (0...59).contains(m) else { return nil }
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        guard let fires = utc.date(bySettingHour: h, minute: m, second: 0, of: now) else { return nil }
+        let fmt = DateFormatter()
+        fmt.timeStyle = .short
+        fmt.dateStyle = .none
+        fmt.timeZone = output
+        fmt.locale = locale
+        return fmt.string(from: fires)
+    }
+}
+
 struct JobRow: Identifiable {
     let id: String
     let name: String
     let cadence: String
+    /// Drives the cadence line's colour — see `JobCadence.tone`.
+    let tone: JobCadence.Tone
+    /// The honest rendering of `last_fired_at`, or nil when that timestamp
+    /// records nothing a person would call a run (`JobCadence.lastFiredWord`).
+    let lastFiredLabel: String?
     let enabled: Bool
     let fireCount: Int
-    let lastFired: Date?
 }
 
 /// One row of a job's run history (worker job_runs: ✓/✗ + 300-char preview).
@@ -1342,12 +1504,25 @@ struct JobsView: View {
                                                 StatusDot(on: j.enabled, onLabel: "enabled", offLabel: "paused")
                                                 Text(j.name).fontWeight(.medium)
                                                 Spacer()
-                                                Text(j.cadence).font(.caption).foregroundStyle(.green)
+                                                // Green ONLY when something is
+                                                // still going to happen — see
+                                                // `JobCadence.tone`. This line was
+                                                // green unconditionally, so a job
+                                                // that "didn't run" said so in the
+                                                // colour this app uses for live.
+                                                Text(j.cadence).font(.caption)
+                                                    .foregroundStyle(JobsView.tint(j.tone))
                                             }
                                             HStack {
                                                 Text("fired \(j.fireCount)×").font(.caption2).foregroundStyle(.secondary)
-                                                if let lf = j.lastFired {
-                                                    Text("· last \(lf.formatted(.relative(presentation: .named)))")
+                                                // Was "· last <when>" for any
+                                                // `last_fired_at` at all — but the
+                                                // scheduler sets that field when it
+                                                // GIVES UP too, so this row named a
+                                                // time the job provably did not run
+                                                // at, right next to "fired 0×".
+                                                if let lf = j.lastFiredLabel {
+                                                    Text("· \(lf)")
                                                         .font(.caption2).foregroundStyle(.secondary)
                                                 }
                                             }
@@ -1445,8 +1620,20 @@ struct JobsView: View {
             .sorted { ($0.fires ?? .distantFuture) < ($1.fires ?? .distantFuture) }
     }
 
-    /// Same cadence phrasing as the web's JobsPanel
-    private static func cadence(schedule: String?, runAt: Double?, fired: Int, enabled: Bool) -> String {
+    /// Tone → colour. The only place SwiftUI meets the rule, so the rule itself
+    /// stays testable without a view.
+    static func tint(_ tone: JobCadence.Tone) -> Color {
+        switch tone {
+        case .live: return .green
+        case .warn: return .orange
+        case .done, .muted: return .secondary
+        }
+    }
+
+    /// Same cadence phrasing as the web's JobsPanel — the rules live in
+    /// `JobCadence` (ported from `lib/chat/job-cadence.ts`); this formats a date.
+    static func cadence(schedule: String?, runAt: Double?, fired: Int, enabled: Bool,
+                        now: Double = Date().timeIntervalSince1970) -> String {
         if let s = schedule {
             // every-N-minutes/hours DSL (string parse; see worker scheduler.ts)
             if s.hasPrefix("*/"), let unit = s.last, unit == "m" || unit == "h" {
@@ -1455,13 +1642,21 @@ struct JobsView: View {
                     return "every \(n)\(unit == "m" ? " min" : " hr")"
                 }
             }
-            if s.hasPrefix("daily@") { return "daily at \(s.dropFirst(6)) UTC" }
+            // Was `"daily at \(s.dropFirst(6)) UTC"` — see `JobCadence.dailyLocal`
+            // for why a UTC label on a list whose other rows are local is worse
+            // than no label at all.
+            if let local = JobCadence.dailyLocal(s, now: Date(timeIntervalSince1970: now)) {
+                return "daily at \(local)"
+            }
             return s
         }
-        if let r = runAt {
-            let done = fired > 0 || !enabled
-            let dt = Date(timeIntervalSince1970: r).formatted(date: .abbreviated, time: .shortened)
-            return "\(done ? "ran" : "once at") \(dt)"
+        // ⚠️ Was `fired > 0 || !enabled ? "ran" : "once at"`, which told people
+        // their abandoned reminder had happened. `JobCadence` reads `fire_count`
+        // as the only record of a run, and its `usableSec` guard is what keeps a
+        // `run_at: 0` from being dated to Jan 1, 1970.
+        let state = JobCadence.oneShotState(runAt: runAt, fired: fired, enabled: enabled, now: now)
+        if let prefix = JobCadence.prefix(state), let at = JobCadence.usableSec(runAt) {
+            return "\(prefix) \(Date(timeIntervalSince1970: at).formatted(date: .abbreviated, time: .shortened))"
         }
         return "?"
     }
@@ -1472,19 +1667,30 @@ struct JobsView: View {
         do { d = try await Api.get("/api/jobs", token: token) }
         catch { state = .failed(LoadFailure.message(error)); return }
         let raw = d["jobs"] as? [[String: Any]] ?? []
+        let now = Date().timeIntervalSince1970
         jobs = raw.compactMap { j in
             guard let id = j["id"] as? String else { return nil }
             let enabled = (j["enabled"] as? Int ?? 0) == 1
             let fired = j["fire_count"] as? Int ?? 0
+            let schedule = j["schedule"] as? String
+            let runAt = (j["run_at"] as? NSNumber)?.doubleValue
+            let state = JobCadence.oneShotState(runAt: runAt, fired: fired, enabled: enabled, now: now)
+            // Same `usableSec` guard as the cadence line: `last_fired_at: 0`
+            // would otherwise render as a relative age counted from 1970.
+            let firedAt = JobCadence.usableSec((j["last_fired_at"] as? NSNumber)?.doubleValue)
+            var lastLabel: String?
+            if let word = JobCadence.lastFiredWord(fired: fired, state: state), let at = firedAt {
+                lastLabel = "\(word) \(Date(timeIntervalSince1970: at).formatted(.relative(presentation: .named)))"
+            }
             return JobRow(
                 id: id,
                 name: j["name"] as? String ?? "job",
-                cadence: Self.cadence(schedule: j["schedule"] as? String,
-                                      runAt: (j["run_at"] as? NSNumber)?.doubleValue,
-                                      fired: fired, enabled: enabled),
+                cadence: Self.cadence(schedule: schedule, runAt: runAt,
+                                      fired: fired, enabled: enabled, now: now),
+                tone: JobCadence.tone(schedule: schedule, state: state, enabled: enabled),
+                lastFiredLabel: lastLabel,
                 enabled: enabled,
-                fireCount: fired,
-                lastFired: (j["last_fired_at"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) })
+                fireCount: fired)
         }
         // job_runs come newest-first (worker ORDER BY id DESC LIMIT 30).
         runs = (d["runs"] as? [[String: Any]] ?? []).compactMap { r in
