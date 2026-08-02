@@ -5,8 +5,11 @@ import { join } from 'node:path'
 
 import {
   makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool,
-  resolveFlipperHost, parseCaps, listenBudget, FLIPPER_CAP, MAX_LISTEN_S,
+  resolveFlipperHosts, parseCaps, listenBudget, FLIPPER_CAP, FLIPPER_BLE_CAP, MAX_LISTEN_S,
 } from '../lib/chat/tools/flipper'
+
+/** The cabled route only — what this suite was written about. */
+const resolveCable = async (u: string) => (await resolveFlipperHosts(u)).cable
 
 /**
  * flipper_* — the tools for a Flipper Zero, which reaches tiny.technology by a
@@ -93,16 +96,47 @@ describe('flipper tool identity', () => {
 describe('resolving the host', () => {
   it('finds the host by CAPABILITY, never by a flipper platform string', async () => {
     stubWorker([host()])
-    const found = await resolveFlipperHost('u1')
+    const found = await resolveCable('u1')
     expect(found?.id).toBe('h1')
+    expect(found?.transport).toBe('cable')
     // The Flipper cannot enroll itself, so no roster may filter for one. Checked
     // against code with the comments stripped — the header explains this rule by
     // quoting the very pattern it forbids, and matching that is a false alarm.
     const text = src('lib/chat/tools/flipper.ts')
     const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
     expect(code).not.toMatch(/platform === 'flipper/)
-    expect(text).toMatch(/parseCaps\(x\.capabilities\)\.includes\(FLIPPER_CAP\)/)
+    expect(text).toMatch(/parseCaps\(x\.capabilities\)\.includes\(cap\)/)
+    expect(text).toMatch(/pick\(FLIPPER_CAP, 'cable'\)/)
     expect(FLIPPER_CAP).toBe('flipper')
+  })
+
+  it('a phone holding it over Bluetooth resolves as the OTHER route, not the cable', () => {
+    // Two labels, two slots. A phone landing in `.cable` would be offered an IR
+    // capture it cannot perform; a cabled laptop landing in `.ble` would be sent
+    // a structured envelope it has no handler for.
+    expect(FLIPPER_BLE_CAP).toBe('flipper_ble')
+    expect(src('lib/chat/tools/flipper.ts')).toMatch(/pick\(FLIPPER_BLE_CAP, 'ble'\)/)
+  })
+
+  it('resolves both routes independently', async () => {
+    stubWorker([
+      host({ id: 'phone', name: 'my-iphone', platform: 'ios-arm64',
+             capabilities: JSON.stringify(['flipper_ble']) }),
+      host(),
+    ])
+    const both = await resolveFlipperHosts('u1')
+    expect(both.cable?.id).toBe('h1')
+    expect(both.ble?.id).toBe('phone')
+    expect(both.ble?.transport).toBe('ble')
+  })
+
+  it('a phone-only account has no cable route at all', async () => {
+    // The state the whole feature exists for: the Flipper is in a pocket and the
+    // laptop is not in the picture.
+    stubWorker([host({ id: 'phone', capabilities: JSON.stringify(['flipper_ble']) })])
+    const both = await resolveFlipperHosts('u1')
+    expect(both.cable).toBeNull()
+    expect(both.ble?.id).toBe('phone')
   })
 
   it('ignores nodes with no Flipper attached, and the necklaces', async () => {
@@ -111,12 +145,12 @@ describe('resolving the host', () => {
       { id: 'n1', name: 'tiny', platform: 'nicla-vision', online: true, capabilities: JSON.stringify(['camera', 'mic']) },
       { id: 'v1', name: 'voice', platform: 'nicla-voice', online: true, capabilities: JSON.stringify(['mic', 'wake']) },
     ])
-    expect(await resolveFlipperHost('u1')).toBeNull()
+    expect(await resolveCable('u1')).toBeNull()
   })
 
   it('prefers an online host over a stale one', async () => {
     stubWorker([host({ id: 'asleep', online: false }), host({ id: 'awake', online: true })])
-    expect((await resolveFlipperHost('u1'))?.id).toBe('awake')
+    expect((await resolveCable('u1'))?.id).toBe('awake')
   })
 
   it('parseCaps survives every shape the capabilities column takes', () => {

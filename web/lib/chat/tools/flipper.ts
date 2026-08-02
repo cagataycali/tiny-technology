@@ -52,6 +52,40 @@ const ikey = () => ({
 export const FLIPPER_CAP = 'flipper'
 
 /**
+ * The capability a PHONE declares while it holds the Flipper over Bluetooth.
+ *
+ * A second label rather than a second host wearing the first one, and the reason
+ * is not tidiness — it is that the two transports are not the same device:
+ *
+ *   • over USB the Flipper speaks a text CLI. Everything the firmware exposes is
+ *     there, including the receive commands (`ir rx`, `subghz rx`, `rfid read`).
+ *   • over BLE it speaks protobuf RPC. Storage, device info, power, alerts and
+ *     the GPIO are all there — richer, even, since sizes and md5s arrive as
+ *     fields instead of text to parse — but there is **no receive RPC at all**.
+ *
+ * Neither is a superset. So a phone that declared plain `flipper` would be
+ * offered an IR capture it can never perform, and the honest failure ("nothing
+ * received") is indistinguishable from a capture of a quiet room. Splitting the
+ * label lets `pickFlipperHost` refuse at the routing layer instead.
+ *
+ * The second reason is cheaper to describe and worse to hit: the relay's only
+ * generic envelope is {type:'invoke', prompt}, and a phone answers one by
+ * proxying the prompt through /api/chat — where the agent has flipper_status,
+ * which would resolve the same phone again, forever. The BLE rail therefore gets
+ * a STRUCTURED {type:'flipper', action, args} envelope the phone executes
+ * directly (ios/Tiny/Sources/Session.swift handleFlipperEnvelope).
+ */
+export const FLIPPER_BLE_CAP = 'flipper_ble'
+
+export type FlipperHost = {
+  id: string
+  name: string
+  online: boolean
+  platform: string
+  transport: 'cable' | 'ble'
+}
+
+/**
  * Longest listen window a tool will ask for. The host holds its serial lock (and
  * the Flipper's radio) for the whole capture, so this is also how long the node
  * cannot answer anything else.
@@ -77,43 +111,94 @@ export function parseCaps(raw: unknown): string[] {
  * a serial port at its last beat (≤30s ago). The Flipper itself has no presence
  * of its own and never will — it cannot report anything without the cable.
  */
-export async function resolveFlipperHost(userId: string):
-    Promise<{ id: string; name: string; online: boolean; platform: string } | null> {
+export async function resolveFlipperHosts(userId: string):
+    Promise<{ cable: FlipperHost | null; ble: FlipperHost | null }> {
   const d = await fetch(`${WORKER}/device/list?userId=${encodeURIComponent(userId)}`, {
     headers: ikey(), cache: 'no-store',
   }).then(r => r.json()).catch(() => null)
-  const hosts = (d?.devices || []).filter((x: any) => parseCaps(x.capabilities).includes(FLIPPER_CAP))
-  if (!hosts.length) return null
-  const best = hosts.find((x: any) => x.online) || hosts[0]
-  return {
-    id: best.id,
-    name: String(best.name ?? 'host'),
-    online: !!best.online,
-    platform: String(best.platform ?? ''),
+  const pick = (cap: string, transport: 'cable' | 'ble'): FlipperHost | null => {
+    const hosts = (d?.devices || []).filter((x: any) => parseCaps(x.capabilities).includes(cap))
+    if (!hosts.length) return null
+    const best = hosts.find((x: any) => x.online) || hosts[0]
+    return {
+      id: best.id,
+      name: String(best.name ?? (transport === 'ble' ? 'phone' : 'host')),
+      online: !!best.online,
+      platform: String(best.platform ?? ''),
+      transport,
+    }
   }
+  return { cable: pick(FLIPPER_CAP, 'cable'), ble: pick(FLIPPER_BLE_CAP, 'ble') }
 }
 
 /**
- * Send the host an instruction to run one use_flipper action, then poll.
+ * Which of the two routes actually gets the work.
  *
- * The envelope carries a natural-language prompt because that is the only shape
- * the relay defines ({type:'invoke', prompt}) and the host answers it with a full
- * agent turn. Being explicit about the action and its arguments keeps the host
- * from improvising a different one — and keeps the transcript readable about what
- * was actually asked of the hardware.
+ * The cable wins when it is awake, because it is the strict superset of what the
+ * phone can do and it does not spend the phone's battery. The phone is the
+ * fallback that makes this feature exist at all: the user carries the Flipper,
+ * and the laptop it was last plugged into is usually asleep.
+ *
+ * The last two branches deliberately return an OFFLINE host instead of null —
+ * "the machine your Flipper is plugged into is asleep" is a far more useful
+ * sentence than "no Flipper found", and it is the difference between the user
+ * waking a laptop and the user hunting for a lost board.
  */
-async function flipperInvoke(userId: string, instruction: string, waitS: number):
-    Promise<{ result?: string; error?: string; offline?: boolean }> {
-  const host = await resolveFlipperHost(userId)
+export function pickFlipperHost(
+  hosts: { cable: FlipperHost | null; ble: FlipperHost | null },
+  opts: { overBle: boolean },
+): FlipperHost | null {
+  if (hosts.cable?.online) return hosts.cable
+  if (opts.overBle && hosts.ble?.online) return hosts.ble
+  return hosts.cable || (opts.overBle ? hosts.ble : null)
+}
+
+/**
+ * Send the chosen host one Flipper action, then poll for its answer.
+ *
+ * TWO envelope shapes, because the two hosts are two different programs:
+ *
+ *   • cable → {type:'invoke', prompt}. That is the only generic shape the relay
+ *     defines, and the laptop answers it with a full agent turn that has
+ *     use_flipper in its toolset. Being explicit about the action and its
+ *     arguments keeps the host from improvising a different one — and keeps the
+ *     transcript readable about what was actually asked of the hardware.
+ *   • BLE → {type:'flipper', action, args}. Structured, executed directly by the
+ *     phone's relay loop. See FLIPPER_BLE_CAP for why sending a phone a prompt
+ *     here would be a loop rather than a slower answer.
+ *
+ * Pass `ble: null` for an action the BLE transport genuinely cannot perform; the
+ * routing then refuses in words instead of asking a phone to fake it.
+ */
+async function flipperInvoke(
+  userId: string,
+  instruction: string,
+  waitS: number,
+  ble: { action: string; args?: Record<string, unknown> } | null,
+): Promise<{ result?: string; error?: string; offline?: boolean; transport?: 'cable' | 'ble'; host?: string }> {
+  const hosts = await resolveFlipperHosts(userId)
+  const host = pickFlipperHost(hosts, { overBle: !!ble })
   if (!host) {
+    // Distinguish "you own no route to a Flipper" from "the only route you have
+    // can't do THIS" — the second is a real capability the user has, and telling
+    // them to buy a cable they already own would be nonsense.
+    if (hosts.ble && !ble) {
+      return {
+        error: `This needs the Flipper's serial CLI, and the only link on this account is Bluetooth from "${hosts.ble.name}". Capturing IR, Sub-GHz, RFID or iButton has no Bluetooth equivalent — the firmware exposes no receive command over BLE. Plug the Flipper into a machine running the tiny CLI (\`npx tiny-tech mesh\`) for this one. Over Bluetooth the phone can still do status, browse and read the SD card, and make it beep.`,
+      }
+    }
     return {
-      error: 'No Flipper Zero is reachable. It appears on the account when it is plugged into a machine running the tiny CLI (`npx tiny-tech mesh`) — the host declares it within 30s of the cable going in.',
+      error: 'No Flipper Zero is reachable. It appears on the account either plugged into a machine running the tiny CLI (`npx tiny-tech mesh`), or linked over Bluetooth to the tiny app on a phone (Devices → your phone → Find my Flipper).',
     }
   }
   if (!host.online) {
     return {
       offline: true,
-      error: `"${host.name}" — the machine the Flipper is plugged into — is not heartbeating, so nothing can reach the Flipper right now. It is asleep, offline, or the tiny CLI is not running. The Flipper has no network of its own.`,
+      transport: host.transport,
+      host: host.name,
+      error: host.transport === 'ble'
+        ? `"${host.name}" — the phone holding the Flipper over Bluetooth — is not heartbeating, so nothing can reach the Flipper right now. The Flipper has no network of its own.`
+        : `"${host.name}" — the machine the Flipper is plugged into — is not heartbeating, so nothing can reach the Flipper right now. It is asleep, offline, or the tiny CLI is not running.${hosts.ble ? ` The Bluetooth link on "${hosts.ble.name}" is not answering either.` : ' The Flipper has no network of its own.'}`,
     }
   }
 
@@ -121,7 +206,11 @@ async function flipperInvoke(userId: string, instruction: string, waitS: number)
     method: 'POST', headers: ikey(),
     body: JSON.stringify({
       userId, toDevice: host.id,
-      payload: JSON.stringify({ type: 'invoke', prompt: instruction }),
+      payload: JSON.stringify(
+        host.transport === 'ble'
+          ? { type: 'flipper', action: ble!.action, args: ble!.args ?? {} }
+          : { type: 'invoke', prompt: instruction },
+      ),
     }),
   }).then(r => r.json()).catch(e => ({ error: String(e) }))
   if (sent.error || !sent.id) return { error: sent.error || 'relay send failed' }
@@ -135,13 +224,17 @@ async function flipperInvoke(userId: string, instruction: string, waitS: number)
     if (!d?.reply?.payload) continue
     try {
       const p = JSON.parse(d.reply.payload)
-      return { result: String(p.result ?? '') }
+      return { result: String(p.result ?? ''), transport: host.transport, host: host.name }
     } catch {
-      return { result: String(d.reply.payload) }
+      return { result: String(d.reply.payload), transport: host.transport, host: host.name }
     }
   }
   return {
-    error: `No answer within ${waitS}s. A capture holds the device for its whole window, so the host may still be listening — ask again, or read the outcome with use_device.`,
+    transport: host.transport,
+    host: host.name,
+    error: host.transport === 'ble'
+      ? `No answer within ${waitS}s from "${host.name}". The phone is heartbeating but the Flipper may have moved out of Bluetooth range of it, or its Bluetooth may be switched off in the Flipper's own settings.`
+      : `No answer within ${waitS}s. A capture holds the device for its whole window, so the host may still be listening — ask again, or read the outcome with use_device.`,
   }
 }
 
@@ -159,26 +252,48 @@ export function listenBudget(listenS: number, budgetS?: number): number {
 
 export const makeFlipperStatusTool = (userId: string | null | undefined) => tool({
   name: 'flipper_status',
-  description: "Check whether the user's Flipper Zero is reachable: which machine it is plugged into, whether that machine is online right now, and the Flipper's firmware and battery. Use this before any other flipper_* tool, and to answer 'is my Flipper connected?'. Cheap and fast.",
+  description: "Check whether the user's Flipper Zero is reachable: which machine it is plugged into (or which phone holds it over Bluetooth), whether that host is online right now, and the Flipper's firmware and battery. Use this before any other flipper_* tool, and to answer 'is my Flipper connected?'. Cheap and fast.",
   inputSchema: z.object({}),
   callback: async () => {
     if (!userId) return { ok: false, error: 'Login required — devices belong to the user account.' }
-    const host = await resolveFlipperHost(userId)
+    const hosts = await resolveFlipperHosts(userId)
+    const host = pickFlipperHost(hosts, { overBle: true })
     if (!host) {
       return {
         ok: false,
-        error: 'No Flipper Zero is reachable on this account. Plug it into a machine running the tiny CLI (`npx tiny-tech mesh`); it is declared automatically within 30s.',
+        error: 'No Flipper Zero is reachable on this account. Either plug it into a machine running the tiny CLI (`npx tiny-tech mesh`), or link it over Bluetooth to the tiny app on a phone (Devices → your phone → Find my Flipper). Either route is declared automatically within 30s.',
       }
     }
     if (!host.online) {
+      const where = host.transport === 'ble'
+        ? `linked over Bluetooth to "${host.name}"`
+        : `plugged into "${host.name}"`
       return {
-        ok: true, reachable: false, host: host.name,
-        note: `The Flipper was last seen plugged into "${host.name}", but that machine is not heartbeating — so the Flipper is unreachable. It has no network of its own: whatever it is doing now, nobody can ask it.`,
+        ok: true, reachable: false, host: host.name, transport: host.transport,
+        note: `The Flipper was last seen ${where}, but that host is not heartbeating — so the Flipper is unreachable. It has no network of its own: whatever it is doing now, nobody can ask it.`,
       }
     }
-    const r = await flipperInvoke(userId, 'Run use_flipper with action "info", then use_flipper with action "power_info". Report the firmware version, hardware model, battery charge level and charge state. Do not run any other action.', 45)
-    if (r.error) return { ok: false, host: host.name, error: r.error }
-    return { ok: true, reachable: true, host: host.name, host_platform: host.platform, details: r.result }
+    const r = await flipperInvoke(
+      userId,
+      'Run use_flipper with action "info", then use_flipper with action "power_info". Report the firmware version, hardware model, battery charge level and charge state. Do not run any other action.',
+      45,
+      { action: 'status' },
+    )
+    if (r.error) return { ok: false, host: host.name, transport: host.transport, error: r.error }
+    return {
+      ok: true, reachable: true, host: host.name, host_platform: host.platform,
+      // Name the transport in the result, not just in the routing: "over
+      // Bluetooth from your phone" is the difference between a board on a desk
+      // in another city and one in the user's pocket, and only the tool knows.
+      transport: r.transport,
+      via: r.transport === 'ble'
+        ? `Bluetooth from "${host.name}" — no cable involved`
+        : `USB cable into "${host.name}"`,
+      details: r.result,
+      ...(r.transport === 'ble' ? {
+        note: 'Over Bluetooth the Flipper can report status, browse and read its SD card, and beep. Capturing IR / Sub-GHz / RFID / iButton needs the USB cable — the firmware has no receive command over BLE.',
+      } : {}),
+    }
   },
 })
 
@@ -219,9 +334,15 @@ This BLOCKS for the whole listen window and needs a human to present the card or
       userId,
       `Run use_flipper with ${action}. Report its output verbatim, including the case where nothing was received. Do not run any other action and do not transmit anything.`,
       wait,
+      // 🚫 CABLE ONLY, forever. Not an unimplemented feature — the Flipper's BLE
+      // RPC has no receive command of any kind, so a phone asked to capture
+      // could only ever answer "nothing received", which is exactly what a
+      // working capture of a silent room says. `null` makes the router refuse
+      // in words instead.
+      null,
     )
     if (r.error) return { ok: false, error: r.error, offline: r.offline }
-    return { ok: true, radio: input.radio, listened_s: secs, captured: r.result }
+    return { ok: true, radio: input.radio, listened_s: secs, captured: r.result, transport: r.transport }
   },
 })
 
@@ -239,8 +360,12 @@ export const makeFlipperFilesTool = (userId: string | null | undefined, budgetS?
       userId,
       `Run use_flipper with action "ls" and path "${folder}". Report the listing verbatim. Do not read, send, receive or delete any file, and do not run any other action.`,
       Math.min(45, listenBudget(0, budgetS)),
+      // Storage.List is the one place BLE is genuinely nicer than the CLI: sizes
+      // and md5s arrive as protobuf fields, so nothing has to be parsed out of a
+      // text table.
+      { action: 'files', args: { path: folder } },
     )
     if (r.error) return { ok: false, error: r.error, offline: r.offline }
-    return { ok: true, folder, listing: r.result }
+    return { ok: true, folder, listing: r.result, transport: r.transport, host: r.host }
   },
 })

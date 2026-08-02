@@ -103,6 +103,11 @@ const CAPABILITY_HINTS: Record<string, string> = {
   telegram: 'Telegram bot (use_telegram)',
   adb: 'a plugged-in Android (use_adb)',
   flipper: 'a Flipper Zero over USB (use_flipper)',
+  // Declared by a PHONE, not a CLI daemon: the tiny app holds the Flipper over
+  // Bluetooth so it answers with no cable and no laptop awake. A separate label
+  // because the two transports are not interchangeable — BLE has no receive
+  // command at all (lib/chat/tools/flipper.ts FLIPPER_BLE_CAP).
+  flipper_ble: 'a Flipper Zero over Bluetooth from that phone — status, SD card, beep, but no radio capture (flipper_status / flipper_files)',
   files: 'shell + files',
   mcp: '',   // every CLI node speaks MCP — noise in a per-device line
   // Always registered, so it carries no information about THIS machine — but it
@@ -115,7 +120,10 @@ const CAPABILITY_HINTS: Record<string, string> = {
 /**
  * Every label a current daemon can declare — the roster, in the order
  * makeDeviceTools() pushes them (tiny-tech/src/agent/device-tools.ts) after
- * buildCapabilities prepends the base pair (tiny-tech/src/device.ts).
+ * buildCapabilities prepends the base pair (tiny-tech/src/device.ts) — plus the
+ * ones a PHONE declares, which are not daemon labels at all but reach the same
+ * prompt line through the same column (`flipper_ble`, from the tiny app's
+ * Session.beatCapabilities).
  *
  * ⚠️ Why a hand-kept copy instead of an import: tiny-tech is a SEPARATE repo,
  * gitignored here and not an npm dependency of the web app, so there is nothing
@@ -129,6 +137,7 @@ export const DEVICE_LABELS = [
   'apple', 'spotify', 'computer', 'browse', 'desktop',
   'windows', 'voice', 'ocr', 'see',                 // label-only: ride on the two above
   'flipper', 'adb', 'whatsapp', 'google', 'telegram', 'integrations',
+  'flipper_ble',                                    // app-declared, not a daemon
 ] as const
 
 /**
