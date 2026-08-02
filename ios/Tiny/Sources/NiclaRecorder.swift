@@ -268,6 +268,20 @@ final class NiclaRecorder: ObservableObject {
     /// the speaker is very likely still talking.
     private static let minRestartSeconds: TimeInterval = 2
 
+    /// How long a take waits for more words before it accepts that the speaker
+    /// is done. Long enough to cross the pause between two sentences (measured
+    /// around 1s in normal speech), short enough that the take doesn't sit on
+    /// the microphone after the room goes quiet.
+    /// `nonisolated` for the same reason shouldExtend is: a constant that inherits
+    /// the class's @MainActor can't be read from the pure rule that needs it.
+    nonisolated static let silenceGrace: TimeInterval = 3
+
+    /// Absolute ceiling on one take, extensions included. Was inline in record()
+    /// as the clamp on `seconds`; named because shouldExtend needs the same value
+    /// — an extended take must never be able to outlast a take that asked for the
+    /// maximum outright.
+    nonisolated static let maxSeconds = 120
+
     /// Set by stopEarly() to end the take in progress before its deadline.
     /// Reset when a take CLAIMS the mic, not when one finishes: a stopEarly()
     /// that arrives just after a take ends would otherwise sit here set and kill
@@ -313,12 +327,61 @@ final class NiclaRecorder: ObservableObject {
         return full
     }
 
+    /// Should a take that reached its deadline keep going?
+    ///
+    /// The wake word is the record button, and `handleWake` asks for 10 seconds.
+    /// A person who says the wake word and then talks for thirty gets the first
+    /// ten and silently loses the rest — the m4a ends, the transcript ends, and
+    /// nothing in the result says it was cut. That is the wrong shape for a
+    /// recorder: the take should end when the SPEAKER stops, not when a number a
+    /// caller guessed runs out.
+    ///
+    /// So `seconds` becomes a floor rather than a promise, and the take keeps
+    /// running while words are still arriving. Two bounds, because "extend while
+    /// speaking" alone is an open microphone:
+    ///
+    ///   - `hardCap` is absolute. A noisy room can produce words forever, and a
+    ///     take that never ends never uploads, never transcribes and never
+    ///     releases the mic — a worse failure than a truncated one.
+    ///   - `silenceGrace` since the last new words. Not "since the last audio":
+    ///     level alone can't tell speech from a fan, and the point of the check
+    ///     is whether the RECOGNIZER is still producing text.
+    ///
+    /// `nonisolated` and pure for the same reason as betterTranscript — this is
+    /// the whole stop rule, and it has to be testable without a microphone.
+    /// The ceiling a take is actually allowed to reach.
+    ///
+    /// Extracted from record() because it is the whole opt-in gate, and leaving it
+    /// inline made it untestable — a mutation that let EVERY take extend passed the
+    /// entire suite, which is precisely the regression that would break
+    /// `nicla_voice_record` (it polls for `seconds + 25` and would be answered by a
+    /// take that had run to two minutes).
+    nonisolated static func hardCapSeconds(requested: Int, extendWhileSpeaking: Bool) -> Int {
+        extendWhileSpeaking ? maxSeconds : requested
+    }
+
+    nonisolated static func shouldExtend(now: Date, deadline: Date, hardCap: Date,
+                                         lastGrowthAt: Date, stopRequested: Bool) -> Bool {
+        if stopRequested { return false }        // the user's Stop always wins
+        if now >= hardCap { return false }
+        if now < deadline { return true }        // still inside what was asked for
+        return now.timeIntervalSince(lastGrowthAt) < silenceGrace
+    }
+
     // ── The take ──────────────────────────────────────────────────────────
 
     /// One-shot: record `seconds` of phone mic audio while transcribing
     /// on-device. Returns a Sendable outcome every caller can relay.
-    func record(seconds: Int, label: String, token: String?) async -> NiclaRecordResult {
-        let clamped = min(max(seconds, 5), 120)
+    /// - Parameter extendWhileSpeaking: treat `seconds` as a FLOOR and keep
+    ///   recording while words are still arriving (see shouldExtend). Off by
+    ///   default, and that default is the contract: `nicla_voice_record` polls the
+    ///   relay for only `seconds + 25`, so a take that extended to two minutes
+    ///   would answer an agent that stopped listening — the transcript would be
+    ///   stored but the caller would be told it timed out. The wake path has no
+    ///   caller waiting on a budget, which is why it is the one that opts in.
+    func record(seconds: Int, label: String, token: String?,
+                extendWhileSpeaking: Bool = false) async -> NiclaRecordResult {
+        let clamped = min(max(seconds, 5), Self.maxSeconds)
         guard !isRecording else { return .failure("already recording") }
         guard !VoiceMode.shared.active else {
             return .failure("voice mode is using the microphone — stop it first")
@@ -437,8 +500,16 @@ final class NiclaRecorder: ObservableObject {
         // a dead recognizer, which is why the loop cannot become one long sleep.
         let startedAt = Date()
         let deadline = startedAt.addingTimeInterval(Double(clamped))
-        while Date() < deadline {
-            if stopRequested { break }
+        // `clamped` is a FLOOR, not a promise — see shouldExtend. The hard cap is
+        // what actually bounds the take, and it is the same 120s ceiling record()
+        // already clamps to, so an extended take can never outlast a take that
+        // asked for the maximum.
+        let hardCap = startedAt.addingTimeInterval(Double(
+            Self.hardCapSeconds(requested: clamped, extendWhileSpeaking: extendWhileSpeaking)))
+        var lastGrowthAt = startedAt
+        var seenChars = 0
+        while Self.shouldExtend(now: Date(), deadline: deadline, hardCap: hardCap,
+                                lastGrowthAt: lastGrowthAt, stopRequested: stopRequested) {
 
             // ONE task reports ONE utterance, then goes silent while still
             // accepting buffers. On a take of up to 120s that meant everything
@@ -478,14 +549,27 @@ final class NiclaRecorder: ObservableObject {
             // not `transcript` — after a restart the live task holds only the
             // latest utterance, so the card would appear to forget the sentence
             // the user just watched it type.
-            partial = box.fullText
+            let text = box.fullText
+            partial = text
+            // Growth, measured on the text the recognizer has actually produced.
+            // Length, not inequality: a task restart can REPLACE the live
+            // utterance with a shorter re-reading of the same words, and treating
+            // that as new speech would hold the mic open through silence.
+            if text.count > seenChars {
+                seenChars = text.count
+                lastGrowthAt = Date()
+            }
             try? await Task.sleep(for: .milliseconds(200))
         }
         // What the take REALLY captured. Storing `clamped` here would label a
         // 4-second stopped-early take as 60 seconds, which is a lie in the list,
         // in the agent's context, and in the duration the server keeps. Floor of
         // 1 so a stop within the first tick isn't recorded as a 0-second take.
-        let actualSeconds = max(1, min(clamped, Int(Date().timeIntervalSince(startedAt).rounded())))
+        // Clamped to maxSeconds, NOT to `clamped`: now that a take can run past
+        // what was asked for, using `clamped` as the ceiling would label a 40s
+        // extended take as 10s — the same lie in the other direction, and the one
+        // that matters more because the extra audio really is in the file.
+        let actualSeconds = max(1, min(Self.maxSeconds, Int(Date().timeIntervalSince(startedAt).rounded())))
         stopRequested = false
 
         slot.current?.endAudio()      // the CURRENT request, not the first one

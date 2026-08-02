@@ -63,9 +63,16 @@ describe('NiclaRecorder — the take shows the words as they arrive', () => {
     expect(callback, 'the recognition callback is publishing partials itself')
       .not.toMatch(/partial\s*=/)
 
-    // And the assignment IS on the loop's tick: the 200ms sleep is the very
-    // next statement, which is what makes the update rate bounded.
-    expect(REC).toMatch(/partial = box\.fullText\s*\n\s*try\? await Task\.sleep\(for: \.milliseconds\(200\)\)/)
+    // And the assignment IS on the loop's tick, which is what makes the update
+    // rate bounded. Re-anchored: the publish and the 200ms sleep are no longer
+    // adjacent lines — the growth bookkeeping the extension rule reads sits
+    // between them (see ios-wake-take-extends.test.ts) — so this pins the ORDER
+    // within one iteration instead of adjacency, on a slice bounded at the sleep.
+    const pub = REC.indexOf('let text = box.fullText')
+    expect(pub, 'the take loop no longer publishes box.fullText').toBeGreaterThan(0)
+    const tick = REC.slice(pub, REC.indexOf('try? await Task.sleep(for: .milliseconds(200))', pub))
+    expect(tick, 'the slice ran past the tick').not.toContain('box.finish()')
+    expect(tick, 'the publish is not on the tick that sleeps').toMatch(/\n\s*partial = text\n/)
   })
 
   it('publishes fullText, not the live task\'s transcript alone', () => {
@@ -74,9 +81,14 @@ describe('NiclaRecorder — the take shows the words as they arrive', () => {
     // to whatever sentence is in flight.
     expect(REC).toMatch(/var transcript: String \{/)
     expect(REC).toMatch(/var fullText: String \{/)
-    expect(REC).toContain('partial = box.fullText')
+    // Re-anchored via the local the take now reads once and reuses for both the
+    // card and the growth check — same claim, one more hop.
+    expect(REC).toContain('let text = box.fullText')
+    expect(REC).toMatch(/\n\s*partial = text\n/)
     expect(REC, 'the card would forget every sentence before the current one')
       .not.toContain('partial = box.transcript')
+    expect(REC, 'the take reads the live task only — the card forgets, and so does the grace')
+      .not.toContain('let text = box.transcript')
   })
 
   it('clears `partial` when the mic claim is given back', () => {

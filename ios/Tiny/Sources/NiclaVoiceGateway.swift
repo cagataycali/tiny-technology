@@ -317,8 +317,14 @@ final class NiclaVoiceGateway: NSObject, ObservableObject, @unchecked Sendable {
         // double-start, so a wake mid-recording is just the haptic + event.
         if Config.recordOnWake {
             Task { @MainActor in
+                // 10s is a FLOOR here, not the take's length: a person who says
+                // the wake word and then talks for thirty seconds kept only the
+                // first ten, and nothing in the stored row said it had been cut.
+                // Nobody is waiting on a deadline for a wake take, so this is the
+                // path that extends — see record(extendWhileSpeaking:).
                 _ = await NiclaRecorder.shared.record(
-                    seconds: 10, label: "wake: \(wake.label)", token: nil)
+                    seconds: 10, label: "wake: \(wake.label)", token: nil,
+                    extendWhileSpeaking: true)
             }
         }
     }

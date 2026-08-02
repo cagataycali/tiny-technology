@@ -4949,3 +4949,107 @@ import Foundation
         #expect(TinyLive.pickVision(from: rows)?.id == "b")
     }
 }
+
+/// 🎙️ A take ends when the SPEAKER stops, not when the caller's guess runs out.
+///
+/// The wake word is the record button and handleWake asks for 10 seconds. Say the
+/// wake word and talk for thirty and you kept the first ten: the m4a ended, the
+/// transcript ended, and nothing in the result said it had been cut. `seconds`
+/// is a floor now, and shouldExtend is the whole stop rule.
+@Suite struct NiclaTakeExtensionTests {
+    let t0 = Date(timeIntervalSince1970: 1_000_000)
+    func at(_ s: Double) -> Date { t0.addingTimeInterval(s) }
+
+    /// A 10s take with a 120s cap, still hearing words as of `lastGrowth`.
+    func extend(_ now: Double, lastGrowth: Double, stop: Bool = false) -> Bool {
+        NiclaRecorder.shouldExtend(now: at(now), deadline: at(10), hardCap: at(120),
+                                   lastGrowthAt: at(lastGrowth), stopRequested: stop)
+    }
+
+    @Test("inside the requested length the take always runs")
+    func insideTheAsk() {
+        // Even through dead silence: a caller that asked for 10s gets 10s, so a
+        // slow start ("…um") can't end the take before the speaker begins.
+        #expect(extend(0.2, lastGrowth: 0))
+        #expect(extend(9.9, lastGrowth: 0))
+    }
+
+    @Test("past the deadline it keeps going while words are still arriving")
+    func extendsWhileSpeaking() {
+        // The bug: at t=10 this returned false and 20 more seconds of speech were
+        // never recorded.
+        #expect(extend(10.5, lastGrowth: 10.4), "a take was cut off mid-sentence")
+        #expect(extend(45, lastGrowth: 44), "a long memo stopped at the caller's guess")
+    }
+
+    @Test("it crosses the pause between two sentences")
+    func gracePeriod() {
+        // Normal speech pauses around a second at a sentence boundary; a grace
+        // shorter than that would end the take between "…done." and "Also —".
+        #expect(NiclaRecorder.silenceGrace >= 2)
+        #expect(extend(11.5, lastGrowth: 10), "ended the take inside a normal pause")
+    }
+
+    @Test("silence past the grace ends the take")
+    func silenceEnds() {
+        // The other half. Without this, extend-while-speaking is an open mic that
+        // never uploads, never transcribes and never gives the mic back.
+        #expect(extend(14, lastGrowth: 10) == false, "held the mic through silence")
+        #expect(extend(90, lastGrowth: 10) == false)
+    }
+
+    @Test("the hard cap wins over speech that never stops")
+    func hardCapIsAbsolute() {
+        // A noisy room produces words forever. A take that never ends is a worse
+        // failure than a truncated one: nothing is stored at all.
+        #expect(extend(120, lastGrowth: 119.9) == false, "a take ran past its ceiling")
+        #expect(extend(500, lastGrowth: 499) == false)
+    }
+
+    @Test("Stop beats everything, including an active speaker")
+    func stopWins() {
+        #expect(extend(3, lastGrowth: 3, stop: true) == false, "Stop was ignored inside the ask")
+        #expect(extend(30, lastGrowth: 30, stop: true) == false, "Stop was ignored while speaking")
+    }
+
+    @Test("only the wake path gets a raised ceiling")
+    func onlyWakeExtends() {
+        // The gate itself. A first version left this inline in record(), and a
+        // mutation that let EVERY take extend passed all 8 tests — the decision
+        // was untestable where it lived, so it was unprotected.
+        #expect(NiclaRecorder.hardCapSeconds(requested: 10, extendWhileSpeaking: false) == 10,
+                "a fixed-length take was given room to run long")
+        #expect(NiclaRecorder.hardCapSeconds(requested: 10, extendWhileSpeaking: true) == 120,
+                "the wake take is still capped at what was asked for")
+        // A take that already asked for the maximum gains nothing either way, so
+        // the manual memo button (120s + Stop) behaves identically.
+        #expect(NiclaRecorder.hardCapSeconds(requested: 120, extendWhileSpeaking: true) == 120)
+    }
+
+    @Test("the agent path does not extend — its caller has a deadline")
+    func agentTakeIsExact() {
+        // record(extendWhileSpeaking: false) sets hardCap = deadline, and the cap
+        // is checked BEFORE the grace, so the take ends exactly when asked.
+        //
+        // This is the shape of the contract, not a detail: nicla_voice_record
+        // polls the relay for only `seconds + 25`. A take that extended to two
+        // minutes would reply to an agent that had already given up — the
+        // transcript stored, and the caller told it timed out.
+        let exact = { (now: Double, growth: Double) in
+            NiclaRecorder.shouldExtend(now: self.at(now), deadline: self.at(10),
+                                       hardCap: self.at(10), lastGrowthAt: self.at(growth),
+                                       stopRequested: false)
+        }
+        #expect(exact(9.9, 9.8), "the take ended before the length that was asked for")
+        #expect(exact(10, 9.9) == false, "a fixed-length take ran long — its caller is waiting")
+        #expect(exact(12, 11.9) == false)
+    }
+
+    @Test("the cap the loop honours is the cap record() clamps to")
+    func oneCeiling() {
+        // If these ever diverge, an extended take could outlast a take that asked
+        // for the maximum outright — and actualSeconds would report a duration the
+        // stored row can't reach.
+        #expect(NiclaRecorder.maxSeconds == 120)
+    }
+}
