@@ -133,6 +133,36 @@ const swiftCase = (body: string, label: string): string => {
  * red on correct code — and had the call sat at 401 it would have gone green
  * covering nothing.
  */
+/**
+ * A teardown body, following the ONE hop it is allowed to delegate through.
+ *
+ * The facts that stop being true when a link dies are shared by three callers now
+ * (a disconnect, Bluetooth going away, and a deliberate `stop()`), so they live in
+ * `linkLost()`. A pin demanding the assignment inside the caller's own braces
+ * would go red on exactly the change that removed the duplication — this file's
+ * most repeated self-inflicted wound. So: the caller's body plus the shared
+ * teardown's, when the caller really does call it.
+ */
+const teardownFor = (signature: string): string => {
+  const body = swiftBody(gateway, signature)
+  // ⚠️ The delegation has to be read out of CODE, not out of the body's text. Both
+  // callers explain in a comment why the list is shared, and those comments name
+  // `linkLost()` — so a raw `includes` follows a hop that a mutant had already
+  // deleted, and the shared body's assignments answered for a caller that no longer
+  // calls it. Measured: two mutations survived on that, one per caller.
+  if (!codeOnly(body, /\S/).includes('linkLost()')) return body
+  return `${body}\n${swiftBody(gateway, 'private func linkLost()')}`
+}
+
+/** The arms of the `centralManagerDidUpdateState` switch, label and body. */
+const stateArms = (): { label: string, body: string }[] => {
+  const body = swiftBody(gateway, 'func centralManagerDidUpdateState(')
+  const parts = body.split(/\n\s*(?=case |default:)/).slice(1)
+  expect(parts.length, 'no switch arms found in centralManagerDidUpdateState')
+    .toBeGreaterThan(1)
+  return parts.map(p => ({ label: p.slice(0, p.indexOf(':')).trim(), body: p }))
+}
+
 const observerFor = (init: string, notification: string): string => {
   const blocks = init.split('NotificationCenter.default.addObserver').slice(1)
   expect(blocks.length, 'no addObserver registrations found at all').toBeGreaterThan(0)
@@ -696,7 +726,7 @@ describe('the screen stream and buttons are wired to the numbers the firmware an
       ['stop()', 'func stop() {'],
       ['a disconnect', 'didDisconnectPeripheral peripheral:'],
     ] as const) {
-      const body = swiftBody(gateway, sig)
+      const body = teardownFor(sig)
       // Both the flag and the last picture: a mirror still showing its final
       // frame is claiming to be live.
       expect(body, `${where} must clear streaming`).toMatch(/streaming = false/)
@@ -1137,7 +1167,11 @@ describe('a link is proved only once it can answer, and a failed bond says so', 
     // `toMatch` then passes on the explanation with the call itself deleted.
     // Measured: that mutation survived until this line read code only.
     expect(errBlock(), 'the single central slot has to go back').toMatch(/stop\(\)/)
-    expect(codeOnly(swiftBody(gateway, 'func stop()'))).toMatch(/wanted = false/)
+    // mustKeep, not the bare ratio check: `stop()` handed its shared facts to
+    // `linkLost()` and what stayed behind is mostly the comment explaining why.
+    // The ratio is a whole-FILE heuristic and it tips on a correctly shrunk body.
+    expect(codeOnly(swiftBody(gateway, 'func stop()'), /wanted = false/))
+      .toMatch(/wanted = false/)
     expect(codeOnly(swiftBody(gateway, 'private func scheduleReconnect()')))
       .toMatch(/guard wanted else \{ return \}/)
   })
@@ -1166,7 +1200,8 @@ describe('a link is proved only once it can answer, and a failed bond says so', 
     // makes the next confirmed subscription a no-op — a link that cannot be
     // proved at all, which is worse than the bug being fixed.
     for (const fn of ['func stop()', 'func centralManager(_ central: CBCentralManager, didDisconnectPeripheral']) {
-      expect(codeOnly(swiftBody(gateway, fn)), `${fn} must clear linking`).toMatch(/linking = false/)
+      expect(codeOnly(teardownFor(fn), /linking/), `${fn} must clear linking`)
+        .toMatch(/linking = false/)
     }
   })
 
@@ -1288,8 +1323,11 @@ describe('a screen stream does not outlive the foreground', () => {
     // itself, and a sheet that is still open still wants its frames.
     expect(codeOnly(swiftBody(gateway, 'func stop() {'), /streamWanted/))
       .toMatch(/streamWanted = false/)
+    // Through the shared teardown, because that is where `streaming` went — and it
+    // is the half that must NOT mention `streamWanted`: a drop routes through it,
+    // so a debt cancelled there is cancelled for the drop too.
     const drop = codeOnly(
-      swiftBody(gateway, 'didDisconnectPeripheral peripheral:'), /streaming = false/)
+      teardownFor('didDisconnectPeripheral peripheral:'), /streaming = false/)
     expect(drop, 'a transient drop must not cancel the resume').not.toMatch(/streamWanted/)
   })
 
@@ -1522,5 +1560,151 @@ describe('a tap always lets go of the key, even when it fails halfway', () => {
     const handler = codeOnly(swiftBody(session, 'static func handleFlipperEnvelope('))
     expect(handler).not.toMatch(/\bsend\(/)
     expect(handler).not.toMatch(/press|release|SendInput/i)
+  })
+})
+
+/**
+ * c12 — losing Bluetooth is losing the link, and it used to be a lesser event.
+ *
+ * There are three ways to lose a Flipper and only one is a disconnect. The board
+ * going quiet calls `didDisconnectPeripheral`, which held a careful nine-fact
+ * teardown. But Bluetooth ITSELF going away — Control Center, Airplane mode, or
+ * `bluetoothd` restarting under `.resetting` — invalidates every peripheral
+ * through `centralManagerDidUpdateState`, a different callback, which cleared
+ * exactly one of those facts (`linked`). Nothing promises the disconnect event
+ * fires as well, and for `.resetting` there is none to wait for.
+ *
+ * So eight facts survived a Bluetooth toggle, and the worst of them did not
+ * recover on its own: `streaming` stuck true over the last `screenFrame` renders
+ * as a live mirror, and `resumeScreenStreamIfWanted` is guarded on `!streaming` —
+ * so the resume written in c10 to put a mirror back after a link returns was
+ * silently blocked forever. Bluetooth back, board relinked, mirror frozen, and the
+ * one recovery (close the sheet, reopen) never suggested. c10's defect, reopened
+ * through a door c10 did not enumerate.
+ */
+describe('losing Bluetooth is losing the link, not a lesser event', () => {
+  const lost = () => swiftBody(gateway, 'private func linkLost()')
+  const resume = () => swiftBody(gateway, 'func resumeScreenStreamIfWanted(')
+  // `linkLost()` is nine assignments under the paragraph explaining what each one
+  // did when it survived a Bluetooth toggle, so the ratio check in `codeOnly` — a
+  // whole-FILE heuristic — trips on it. Name a token that must survive instead.
+  const lostCode = (mustKeep: RegExp) => codeOnly(lost(), mustKeep)
+  // `/\S/` rather than the default ratio check: these arms are two lines under a
+  // comment, and `codeOnly`'s length heuristic is a whole-FILE ratio that fails on
+  // correct code at this scale. "Something survived the strip" is the real question.
+  const armCode = (body: string) => codeOnly(body, /\S/)
+
+  it('every state below poweredOn tears the link down', () => {
+    // Structural, not a list of three: add `case .resetting:` tomorrow and forget
+    // the teardown, and this reds. That is the mistake being fixed, one state over.
+    const arms = stateArms()
+    expect(arms.length, 'the switch lost its arms').toBeGreaterThan(2)
+    for (const arm of arms) {
+      if (arm.label.includes('.poweredOn')) continue
+      expect(armCode(arm.body), `${arm.label} must tear the link down`)
+        .toMatch(/linkLost\(\)/)
+    }
+  })
+
+  it('poweredOn is the wake-up, and it does NOT tear anything down', () => {
+    const on = stateArms().find(a => a.label.includes('.poweredOn'))
+    expect(on, 'no .poweredOn arm at all').toBeDefined()
+    const code = armCode(on!.body)
+    expect(code).toMatch(/connectIfPossible\(\)/)
+    // A teardown here would run on the way IN, against a link about to be rebuilt.
+    expect(code, 'poweredOn is a recovery, not a loss').not.toMatch(/linkLost/)
+  })
+
+  it('the frozen mirror is the reason: the flag and the picture both go', () => {
+    // The two together are the bug. `streaming` alone leaves the sheet rendering a
+    // stale frame; `screenFrame` alone leaves the empty state claiming to be live.
+    const body = lostCode(/streaming/)
+    expect(body).toMatch(/streaming = false/)
+    expect(body).toMatch(/screenFrame = nil/)
+  })
+
+  it('and so the c10 resume is reachable again after Bluetooth returns', () => {
+    // The link between the two cycles, asserted rather than assumed: the resume is
+    // guarded on `!streaming`, so a `streaming` left standing by a Bluetooth toggle
+    // disables it permanently. Both halves have to hold for the fix to mean
+    // anything — the guard arm, and the teardown that lets it become false.
+    expect(codeOnly(resume(), /!streaming/)).toMatch(/!streaming/)
+    expect(lostCode(/streaming = false/)).toMatch(/streaming = false/)
+  })
+
+  it('requests in flight fail now, instead of waiting out their own timers', () => {
+    // A status read waits 25s. With the link already gone, that wait can only end
+    // in a timeout — and a timeout is the sentence that blames Bluetooth range for
+    // a radio the user switched off deliberately.
+    expect(lostCode(/failAllPending/)).toMatch(/failAllPending\(FlipperError\.notLinked\)/)
+  })
+
+  it('the write characteristic is dropped, so the NEXT request refuses too', () => {
+    // `request()` has no `guard linked` by design and says so: `write()` is the gate.
+    // Left standing, `rxChar` hands frames to a peripheral iOS has invalidated,
+    // where a failed ATT write is invisible — nothing implements didWriteValueFor.
+    expect(lostCode(/rxChar/)).toMatch(/rxChar = nil/)
+    expect(codeOnly(swiftBody(gateway, 'private func request('), /enqueueWrite/))
+      .not.toMatch(/guard linked/)
+  })
+
+  it('a Bluetooth toggle is not the user unlinking the board', () => {
+    // `stop()` would clear `wanted` (no reconnect when the radio comes back) and
+    // `streamWanted` (no resume for a sheet still on screen). The teardown is the
+    // shared part; deciding the user is done is not.
+    for (const arm of stateArms()) {
+      expect(armCode(arm.body), `${arm.label} must not unlink the board`)
+        .not.toMatch(/\bstop\(\)/)
+    }
+    expect(lostCode(/linked = false/), 'the shared teardown must not cancel a wanted stream')
+      .not.toMatch(/streamWanted|wanted = false/)
+  })
+
+  it('nothing re-dials at a radio that is off', () => {
+    // `connectIfPossible()` is guarded on `.poweredOn`, so a timer would fire into a
+    // guard that returns — and every `scheduleReconnect()` DOUBLES the delay on its
+    // way past, inflating the backoff for the reconnect that will actually matter.
+    for (const arm of stateArms()) {
+      if (arm.label.includes('.poweredOn')) continue
+      expect(armCode(arm.body), `${arm.label} must not schedule a reconnect`)
+        .not.toMatch(/scheduleReconnect/)
+    }
+    // The shared teardown must not smuggle it in either — a disconnect re-dials, and
+    // that one line is deliberately the caller's.
+    expect(lostCode(/linked = false/)).not.toMatch(/scheduleReconnect/)
+    expect(codeOnly(teardownFor('didDisconnectPeripheral peripheral:'), /scheduleReconnect/))
+      .toMatch(/scheduleReconnect\(\)/)
+  })
+
+  it('the backoff reset is EARNED by a link that lasted, and the clock is reset with it', () => {
+    // Not part of the port — found by mutating it. Deleting the `goodLinkS`
+    // condition, and separately deleting `linkedAt = nil`, both survived every pin
+    // in this file, and both are the same silent failure: `scheduleReconnect()`
+    // doubles 1s → 32s precisely so a board that refuses us on sight is not
+    // re-dialled in a hot loop, on two batteries, forever. An unconditional reset
+    // spends the ceiling; a `linkedAt` left standing lets the NEXT failure measure
+    // its "good link" from a session that ended minutes ago and reach the same
+    // place. Neither shows up as an error anywhere.
+    const body = lostCode(/reconnectDelay/)
+    const reset = swiftBody(body, 'if let since = linkedAt')
+    expect(reset, 'the reset must be inside the did-it-last check')
+      .toMatch(/reconnectDelay = Self\.reconnectBaseS/)
+    expect(body, 'the reset must not also happen unconditionally')
+      .toMatch(/Date\(\)\.timeIntervalSince\(since\) >= Self\.goodLinkS/)
+    expect(body, 'a stale link clock makes the next quick failure look like a good link')
+      .toMatch(/linkedAt = nil/)
+    // And the doubling it protects, so the pair above cannot be read as arbitrary.
+    expect(codeOnly(swiftBody(gateway, 'private func scheduleReconnect()'), /reconnectDelay/))
+      .toMatch(/reconnectDelay = min\(delay \* 2, Self\.reconnectMaxS\)/)
+  })
+
+  it('the honest sentence survives the teardown', () => {
+    // "Bluetooth is off" is the one thing the user can act on, and the teardown must
+    // not overwrite it: `linkLost()` sets no `lastError`, so the arm's own line wins.
+    const off = stateArms().find(a => a.label.includes('.poweredOff'))
+    expect(off, 'no .poweredOff arm').toBeDefined()
+    expect(armCode(off!.body)).toMatch(/lastError = "Bluetooth is off/)
+    expect(lostCode(/linked = false/), 'a shared teardown cannot know why the link went')
+      .not.toMatch(/lastError = /)
   })
 })

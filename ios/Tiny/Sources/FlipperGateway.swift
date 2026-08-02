@@ -669,29 +669,85 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         wanted = false
         reconnectTask?.cancel()
         reconnectTask = nil
-        reconnectDelay = Self.reconnectBaseS
         stopScan()
         if let p = peripheral { central?.cancelPeripheralConnection(p) }
         peripheral = nil
-        rxChar = nil
-        linked = false
-        // Cleared here as well as in the ping's own catch: that runs a hop later,
-        // and a `linking` left standing would make the NEXT confirmed
-        // subscription a no-op — a link that can never be proved.
-        linking = false
-        linkedAt = nil
-        // The board's stream dies with the RPC session, so the flag and the last
-        // picture have to go too — a mirror that keeps showing its final frame
-        // claims to be live.
-        streaming = false
-        screenFrame = nil
+        linkLost()
+        // After `linkLost()`, which resets the backoff only for a link that lasted.
+        // A deliberate stop is user intent either way, so the next `start()` begins
+        // from a clean slate instead of inheriting the last link's penalty.
+        reconnectDelay = Self.reconnectBaseS
         // Unlinking is deliberate, so nothing is owed a resume: left standing, the
         // next background/foreground pair after a re-link would start a stream for
         // a mirror that closed long ago. A DISCONNECT is the opposite case and
         // deliberately leaves this alone — it reconnects by itself, and a sheet
         // that is still open still wants its frames.
         streamWanted = false
+    }
+
+    /// Everything that stops being true when the link goes away — in ONE place,
+    /// because there are three ways to lose a Flipper and only one of them is a
+    /// disconnect.
+    ///
+    /// ⚠️⚠️ The third is what this exists for: **Bluetooth itself going away**.
+    /// The user flips it off in Control Center, turns on Airplane mode, or
+    /// `bluetoothd` restarts under a `.resetting` state — and every peripheral is
+    /// invalidated through `centralManagerDidUpdateState`, which is a *different*
+    /// callback from the one that used to hold this list. The delegate contract
+    /// does not promise a disconnect event as well, and for `.resetting` there is
+    /// no disconnect to wait for at all, so a teardown that lives only in
+    /// `didDisconnectPeripheral` is a bet on which callback the system chooses to
+    /// deliver. That arm cleared exactly ONE of the facts below (`linked`) and the
+    /// other eight survived a Bluetooth toggle:
+    ///
+    /// - `streaming` stayed true over the last `screenFrame`, and the mirror sheet
+    ///   renders whatever frame it last saw — so a dead mirror kept showing the
+    ///   board's final picture as a live one, above a d-pad captioned "a press
+    ///   here is a press on the board".
+    /// - Worse, it did not recover. `resumeScreenStreamIfWanted` — whose whole job
+    ///   is putting the mirror back after a link returns — is guarded on
+    ///   `!streaming`, so once that flag was stuck the resume was silently blocked
+    ///   *forever*. Bluetooth came back, the board relinked, and the mirror stayed
+    ///   frozen with the only recovery (close the sheet and reopen it) never
+    ///   suggested. That is precisely the state the resume was written to end.
+    /// - Requests in flight waited out their own timers (up to 25s for a status
+    ///   read) instead of failing at once, and with `rxChar` still standing the
+    ///   NEXT request was handed to an invalidated peripheral — where a dropped
+    ///   ATT write is invisible, because nothing implements `didWriteValueFor`.
+    ///
+    /// Every line here is idempotent, so calling it from both paths is safe even
+    /// where the system does deliver both.
+    ///
+    /// ⚠️ NOT `stop()`, which is the caller's decision to make: that also clears
+    /// `wanted` and `streamWanted`, which would read a Bluetooth toggle as "the
+    /// user is done with the Flipper" — no reconnect when the radio comes back,
+    /// and no resume for a sheet still on screen.
+    private func linkLost() {
+        linked = false
+        // Cleared here as well as in the ping's own catch: that runs a hop later,
+        // and a `linking` left standing would make the NEXT confirmed
+        // subscription a no-op — a link that can never be proved.
+        linking = false
+        // `write()` is the gate `request()` relies on to refuse instantly; with the
+        // characteristic gone, a request fails as `.notLinked` rather than being
+        // written into a peripheral iOS has already invalidated.
+        rxChar = nil
+        inbox = []
+        // The board's stream dies with the RPC session, so the flag and the last
+        // picture have to go too — a mirror that keeps showing its final frame
+        // claims to be live.
+        streaming = false
+        screenFrame = nil
+        lock.withLock { credits = nil }
+        // Anything mid-flight is gone with the link. Failing it now turns a
+        // 15-second wait into an immediate, accurate answer.
         failAllPending(FlipperError.notLinked)
+        // Reset the backoff only for a link that LASTED — that is what tells
+        // walking out of range apart from a board that drops us on sight.
+        if let since = linkedAt, Date().timeIntervalSince(since) >= Self.goodLinkS {
+            reconnectDelay = Self.reconnectBaseS
+        }
+        linkedAt = nil
     }
 
     private func connectIfPossible() {
@@ -1446,19 +1502,32 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    /// ⚠️ Every state below `.poweredOn` invalidates the peripheral we were
+    /// holding, so every one of them is a lost link and gets the full teardown —
+    /// not just the `linked` flag this used to clear. See `linkLost()` for what the
+    /// other eight facts did when they survived a Bluetooth toggle.
+    ///
+    /// ⚠️ And none of them re-dials. `connectIfPossible()` is guarded on
+    /// `state == .poweredOn`, so a `scheduleReconnect()` here would fire into a
+    /// guard that returns — while still DOUBLING `reconnectDelay` on the way,
+    /// inflating the backoff for the reconnect that will actually matter. The
+    /// `.poweredOn` arm below is the wake-up, and it is immediate.
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         switch central.state {
         case .poweredOn:
             if unit != nil { connectIfPossible() }
             if scanning { beginScanIfPossible() }
         case .poweredOff:
-            linked = false
+            linkLost()
             lastError = "Bluetooth is off — the phone can't reach the Flipper without it."
         case .unauthorized:
-            linked = false
+            linkLost()
             lastError = "Bluetooth permission denied — the Flipper link needs it."
         default:
-            linked = false
+            // `.resetting` (bluetoothd restarting under us), `.unsupported`,
+            // `.unknown` — same invalidated peripheral, and `.resetting` in
+            // particular has no disconnect callback to fall back on.
+            linkLost()
         }
     }
 
@@ -1494,24 +1563,13 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
-        linked = false
-        linking = false
-        rxChar = nil
-        inbox = []
-        // The firmware closes the RPC session on disconnect, which takes the
-        // screen stream with it. Nothing to stop, and nothing true left to show.
-        streaming = false
-        screenFrame = nil
-        lock.withLock { credits = nil }
-        // Anything mid-flight is gone with the link. Failing it now turns a
-        // 15-second wait into an immediate, accurate answer.
-        failAllPending(FlipperError.notLinked)
-        // Reset the backoff only for a link that LASTED — that is what tells
-        // walking out of range apart from a board that drops us on sight.
-        if let since = linkedAt, Date().timeIntervalSince(since) >= Self.goodLinkS {
-            reconnectDelay = Self.reconnectBaseS
-        }
-        linkedAt = nil
+        // The firmware closes the RPC session on disconnect, which takes the screen
+        // stream with it — so there is nothing to stop and nothing true left to
+        // show. `linkLost()` holds that list, shared with the Bluetooth-went-away
+        // path so the two cannot drift apart again.
+        linkLost()
+        // The only line that is NOT shared, and the reason it isn't: this is the
+        // one loss the phone can dial its way out of. A radio that is off cannot.
         scheduleReconnect()
     }
 
