@@ -100,6 +100,32 @@ object NiclaVoiceGateway {
     private val _status = MutableStateFlow<VoiceStatus?>(null)
     val status: StateFlow<VoiceStatus?> = _status
 
+    private val _statusAt = MutableStateFlow<Long?>(null)
+
+    /**
+     * When [status] was actually READ off the board — not when someone last asked.
+     *
+     * ⚠️ These are the two facts a reading has and they have to travel together.
+     * [handleStatus] keeps the previous reading when a notify arrives unparseable,
+     * deliberately (a blank panel is worse than a stale line), and nothing here
+     * clears `_status` on disconnect either — so every consumer is holding
+     * something that may be minutes old with no way to tell. `listening`, a wake
+     * count and an uptime are exactly the kind of fact that reads as CURRENT.
+     *
+     * The panel already refuses to speak a reading once the link is down
+     * ([liveVoiceStatus]), which covers the case where the phone KNOWS it lost the
+     * board. This is the other one, and it is the one that survived: **the link
+     * stays up while the readings stop.** Status arrives only by BLE notify —
+     * `refreshStatus()` has no caller on either platform — so a board that boots,
+     * notifies once and then stops (a crashed firmware loop, a wedged NDP) leaves
+     * a connected link under a reading that never moves again. iOS `FlipperGateway
+     * .infoAt` (`43914e44`) is the same fix on a different transport.
+     *
+     * Moves ONLY when the reading moves, so nothing downstream can date a memory
+     * as fresh.
+     */
+    val statusAt: StateFlow<Long?> = _statusAt
+
     /**
      * Newest first, bounded — a wearable can fire all day and this is a UI
      * tail, not a log. The durable copy is the server event ring.
@@ -195,6 +221,10 @@ object NiclaVoiceGateway {
         stop()
         _unit.value = null
         _status.value = null
+        // With the reading, never after it: a date left behind would age a reading
+        // that no longer exists, and a date cleared without its reading would put
+        // an undated present-tense claim back on screen.
+        _statusAt.value = null
         _wakes.value = emptyList()
     }
 
@@ -455,7 +485,19 @@ object NiclaVoiceGateway {
         )
     }
 
+    /**
+     * Dated where the reading LANDS, beside the value it dates.
+     *
+     * A stamp written at the top of `refreshStatus()` — or anywhere outside this
+     * `let` — would date the ASK rather than the answer, which are not the same
+     * fact on a transport where the answer may never come. An unparseable notify
+     * (a truncated MTU write, firmware mid-flash) keeps the last good reading on
+     * purpose and must NOT re-date it: that is the whole defect, restored.
+     */
     private fun handleStatus(value: ByteArray) {
-        parseStatus(value)?.let { _status.value = it }
+        parseStatus(value)?.let {
+            _status.value = it
+            _statusAt.value = System.currentTimeMillis()
+        }
     }
 }

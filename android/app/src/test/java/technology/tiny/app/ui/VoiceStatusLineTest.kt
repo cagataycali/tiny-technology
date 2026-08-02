@@ -141,6 +141,124 @@ class VoiceStatusLineTest {
         assertNull(liveVoiceStatus(null, connected = false))
     }
 
+    // ── the age: the staleness the gate CANNOT see ───────────────────────────
+
+    /**
+     * 🕒 `liveVoiceStatus` withdraws a reading when the phone KNOWS it lost the
+     * board. These cover the case it doesn't: **the link stays up while the
+     * readings stop.** Status arrives only by BLE notify (`refreshStatus()` has no
+     * caller on either platform), so a board that boots, notifies once and then
+     * wedges — a crashed firmware loop, a `.synpkg` that never finishes loading —
+     * leaves `connected = true` under a figure that will never move again, and the
+     * badge goes on saying "listening" in the present tense about an hour ago.
+     */
+    @Test fun `a fresh reading is not dated, because the badge already says now`() {
+        // Silence is not news yet: on a panel this narrow, a "read 3s ago" beside a
+        // green badge is noise, and noise is what teaches a reader to skip the one
+        // line here that admits doubt.
+        val at = 1_780_000_000_000L
+        assertNull(voiceStatusAge(at, now = at))
+        assertNull(voiceStatusAge(at, now = at + 30_000L))
+        assertNull(voiceStatusAge(at, now = at + (STATUS_FRESH_S - 1) * 1_000L))
+    }
+
+    @Test fun `a reading that stopped moving says how long ago it was read`() {
+        // ⚠️ THE DEFECT: connected, so the badge is up and green, and this is the
+        // only element that can contradict it.
+        val at = 1_780_000_000_000L
+        assertEquals("read 60s ago", voiceStatusAge(at, now = at + 60_000L))
+        assertEquals("read 89s ago", voiceStatusAge(at, now = at + 89_000L))
+        assertEquals("read 2min ago", voiceStatusAge(at, now = at + 120_000L))
+        assertEquals("read 45min ago", voiceStatusAge(at, now = at + 45 * 60_000L))
+        assertEquals("read 2h ago", voiceStatusAge(at, now = at + 2 * 3_600_000L))
+        assertEquals("read 3d ago", voiceStatusAge(at, now = at + 3 * 86_400_000L))
+    }
+
+    @Test fun `every rung of the ladder is where it says it is`() {
+        // ⚠️ Each of these exists because a plausible one-token edit to the ladder
+        // leaves the round numbers above completely unchanged — an hour is an hour on
+        // any boundary, so only the awkward values pin the rungs.
+        val at = 1_780_000_000_000L
+        fun age(s: Long) = voiceStatusAge(at, now = at + s * 1_000L)
+        // Between the seconds rung and the hours rung, so a minutes window that stops
+        // at 3600 instead of 5400 changes this and nothing else.
+        assertEquals("read 80min ago", age(4_800))
+        // Between the hours rung and days: 1.16 days still reads in hours, because
+        // "read 1d ago" throws away the difference between last night and this morning.
+        assertEquals("read 28h ago", age(100_000))
+    }
+
+    @Test fun `the coarse rungs round while the day rung floors`() {
+        // ⚠️ Minutes and hours ROUND — 110s is nearer two minutes than one, and
+        // reporting "1min" understates the silence, which is the one direction this
+        // line must not err in.
+        val at = 1_780_000_000_000L
+        fun age(s: Long) = voiceStatusAge(at, now = at + s * 1_000L)
+        assertEquals("read 2min ago", age(100))
+        assertEquals("read 2h ago", age(6_600))
+        // …and days FLOOR, matching `ago()`'s "3d" everywhere else in this app: by the
+        // time a reading is days old the panel is only saying "not recently", and
+        // rounding 3.6 up to 4 would make it precise about a number it cannot support.
+        assertEquals("read 3d ago", age(311_040))
+    }
+
+    @Test fun `never read means nothing to date`() {
+        // Not "read 0s ago" and not an em-dash: with no reading at all
+        // `liveVoiceStatus` already returns null and the panel draws nothing above
+        // this line, so there is no claim here to qualify.
+        assertNull(voiceStatusAge(null))
+        assertNull(voiceStatusAge(null, now = 1_780_000_000_000L))
+    }
+
+    @Test fun `a clock that went backwards does not report a negative age`() {
+        // An NTP correction or a manual time change while the sheet is open. The
+        // reading is not stale on this evidence, so it reads as fresh rather than as
+        // "read -180s ago" — a line that makes the panel look broken instead of the
+        // board.
+        //
+        // ⚠️ This holds by TWO independent mechanisms and passes on either, so it
+        // cannot prove the clamp is there: a negative gap is trivially below
+        // STATUS_FRESH_S, so the freshness gate alone answers null. Deleting
+        // `coerceAtLeast(0L)` is therefore an equivalent mutant today and the
+        // structural pin lives in tests/android-voice-status-age.test.ts, where the
+        // reason it is kept anyway is written down — the clamp becomes load-bearing
+        // the moment anyone tightens the threshold.
+        val at = 1_780_000_000_000L
+        assertNull(voiceStatusAge(at, now = at - 180_000L))
+        // Every rung, in case a future threshold change hands one of them a negative.
+        assertNull(voiceStatusAge(at, now = at - 5 * 86_400_000L))
+    }
+
+    @Test fun `the age is an ELAPSED duration, never a wall-clock time`() {
+        // ⚠️ Deliberately not `ReadingAge.asOf`, whose reasoning is the opposite of
+        // this one's: a relative line rots in place when nothing re-renders, which
+        // is why the camera panels stamp a clock time — but this panel recomposes on
+        // every notify and carries its own 10s ticker, and its reader is asking "is
+        // this board alive RIGHT NOW", which is a duration question. A timestamp
+        // makes a person do arithmetic against a clock they have to go find.
+        val at = 1_780_000_000_000L
+        val line = voiceStatusAge(at, now = at + 600_000L)!!
+        assertTrue("the age reads as a timestamp: $line", line.contains("ago"))
+        assertTrue("the age lost the word that makes it a reading: $line", line.startsWith("read "))
+        assertTrue("a wall-clock time leaked into the age: $line", !line.contains(":"))
+    }
+
+    @Test fun `the threshold is far above any plausible notify cadence`() {
+        // ⚠️ The firmware is NOT in this tree, so its cadence cannot be pinned from
+        // here — this is a threshold for when SILENCE is worth reporting, not a
+        // guess at a period. Too low and a healthy necklace wears an age line
+        // between ordinary notifies. Pinned so a later "tighten it up" has to
+        // argue with the reason.
+        assertTrue("a healthy board would wear an age line", STATUS_FRESH_S >= 30L)
+        // And unrelated to the camera's 6s liveness window on purpose: there, a 2s
+        // poll is THIS app's own loop, so three missed ticks is a stall. Here the
+        // board decides when to speak and the phone only listens.
+        assertTrue(
+            "the status threshold collapsed onto the camera's frame window",
+            STATUS_FRESH_S * 1_000L > FrameLiveness.staleAfter,
+        )
+    }
+
     @Test fun `the badge and the detail line are gated by ONE decision`() {
         // The bug was one ungated read among TWO: the detail line
         // ("3 wake words · 12 heard · up 11h") already had its `connected` check

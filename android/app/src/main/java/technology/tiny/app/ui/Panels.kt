@@ -1479,6 +1479,64 @@ internal fun liveVoiceStatus(s: VoiceStatus?, connected: Boolean): VoiceStatus? 
     if (connected) s else null
 
 /**
+ * 🕒 How old a still-connected reading is — the OTHER way a present-tense claim
+ * goes stale, and the one [liveVoiceStatus] cannot see.
+ *
+ * That gate covers the case the phone knows about: the link dropped, so the
+ * reading is withdrawn. This covers the case it doesn't. Status arrives ONLY by
+ * BLE notify (`refreshStatus()` has no caller on either platform), so a board that
+ * boots, notifies once and then goes quiet — a crashed firmware loop, a wedged NDP
+ * load, a `.synpkg` that never finishes — leaves a link that is genuinely up under
+ * a reading that will never move again. `connected` is true, so the badge says
+ * "listening", in the present tense, about a figure from an hour ago.
+ *
+ * Returns null while a reading is FRESH, because a green badge already says
+ * "now" and a redundant "just now" beside it is noise on a one-line panel. It is
+ * an admission, not a decoration: it appears exactly when the badge above it has
+ * started overstating what this phone knows. iOS `FlipperGateway.statusLine`'s
+ * three branches (`43914e44`) reduced to the two this transport can be in — there
+ * is no "never answered yet" case here, because with no reading at all
+ * [liveVoiceStatus] already returns null and nothing is drawn to date.
+ *
+ * ⚠️ ELAPSED words, not [ReadingAge]'s clock time, and the reason is the opposite
+ * of that object's: a relative line rots in place when nothing re-renders, which
+ * is why the camera panels use a timestamp — but this panel recomposes on every
+ * notify and every connection change, and its reader is asking "is this board
+ * alive RIGHT NOW", which is a duration question. `12:04:31` makes a person do
+ * arithmetic against a clock they would have to go find.
+ */
+internal fun voiceStatusAge(
+    atMs: Long?,
+    now: Long = System.currentTimeMillis(),
+): String? {
+    if (atMs == null) return null
+    // A clock that went backwards (NTP correction, a manual change) must not
+    // produce "read -3s ago"; the reading is not stale on this evidence.
+    val s = ((now - atMs) / 1_000L).coerceAtLeast(0L)
+    if (s < STATUS_FRESH_S) return null
+    if (s < 90) return "read ${s}s ago"
+    if (s < 5_400) return "read ${Math.round(s / 60.0)}min ago"
+    if (s < 172_800) return "read ${Math.round(s / 3_600.0)}h ago"
+    return "read ${s / 86_400}d ago"
+}
+
+/**
+ * How long a status reading may sit before the panel starts dating it.
+ *
+ * ⚠️ NOT a guess at the firmware's notify cadence, which is not in this tree and
+ * so cannot be pinned from here — it is a threshold for when SILENCE is worth
+ * reporting to a person. Deliberately far above any plausible cadence: too low and
+ * a healthy necklace wears an age line between ordinary notifies, which trains the
+ * reader to ignore the one thing on this panel that admits doubt.
+ *
+ * Unrelated to [FrameLiveness.staleAfter] (6s), and the difference is the point: a
+ * 2s camera poll is this app's own loop, so three missed ticks IS a stall. Here the
+ * board decides when to speak and this phone only listens, so a gap proves nothing
+ * until it is long enough that no cadence explains it.
+ */
+internal const val STATUS_FRESH_S = 60L
+
+/**
  * "3 wake words · 12 heard · up 11h" — the Voice panel's one-line summary, with
  * segments joined only when they have something to say.
  *
@@ -1566,6 +1624,20 @@ internal fun VoiceDevicePanel(app: TinyApp, deviceId: String) {
     val unit by gw.unit.collectAsState()
     val connected by gw.connected.collectAsState()
     val status by gw.status.collectAsState()
+    val statusAt by gw.statusAt.collectAsState()
+    // ⚠️ The age line's whole job is to appear when NOTHING is arriving, and a
+    // Compose panel only recomposes when something changes — so with the board gone
+    // quiet, the one thing that would make the reading's age show up is the one
+    // thing that has stopped happening. Hence a clock of its own. 10s because the
+    // ladder below a minute counts in seconds; anything coarser would let a line
+    // read "read 61s ago" for a quarter of a minute.
+    var nowMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(10_000)
+            nowMs = System.currentTimeMillis()
+        }
+    }
     val wakes by gw.wakes.collectAsState()
     val lastError by gw.lastError.collectAsState()
     var adopting by remember { mutableStateOf(false) }
@@ -1710,6 +1782,17 @@ internal fun VoiceDevicePanel(app: TinyApp, deviceId: String) {
             // phone is still entitled to show.
             liveVoiceStatus(status, connected)?.let(::voiceStatusLine)?.let { line ->
                 Text(line, style = MaterialTheme.typography.labelSmall, color = TinyGray)
+            }
+            // 🕒 …and how old that reading is, once it is old enough to matter.
+            //
+            // Gated on the READING, not on the line above it: `voiceStatusLine`
+            // answers null for a board that reported nothing usable, and the badge
+            // is still up in that case — so hanging the age off the detail line
+            // would drop it exactly where a stale claim is least contradicted.
+            liveVoiceStatus(status, connected)?.let {
+                voiceStatusAge(statusAt, nowMs)?.let { age ->
+                    Text(age, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
+                }
             }
             lastError?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
