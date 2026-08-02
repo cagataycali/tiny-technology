@@ -163,7 +163,7 @@ final class Screenshot {
 
     /// Ask for consent and run the capture for a REMOTE ask — the web agent
     /// reached this phone through use_device, so there is no chat view on
-    /// screen to host the prompt (docs/remote-screenshot-consent-design-2026-08-02).
+    /// screen to host the prompt, so the executor presents it itself.
     ///
     /// Three things make this deliberately unlike the chat path:
     ///
@@ -262,12 +262,26 @@ final class Screenshot {
     /// telling the truth locally, not about the wire.
     enum ConsentOutcome { case allowed, denied, expired }
 
-    /// How long an "Allow once" tap stays good for. The server's callback polls
-    /// 90s (lib/chat/tools/platform.ts) — past that no result can reach the
-    /// model, so a capture would be pixels taken for nobody. The small grace
-    /// covers the capture+upload round trip for a tap that lands right at the
-    /// buzzer, which is worth more than the second of precision it costs.
-    static let consentWindow: TimeInterval = 100
+    /// How long the server callback waits for a result: `lib/chat/tools/platform.ts`
+    /// loops 45× over `sleep(2s)` THEN check — so its checks land at t≈2,4,…,90,
+    /// and a result must already be IN the mailbox at t=90 to be seen at all.
+    static let serverPollBudget: TimeInterval = 90
+
+    /// What still has to happen AFTER the tap before the result exists: ReplayKit's
+    /// first video frame, the JPEG encode, the upload to /api/media, then the
+    /// mailbox POST. None of it is instant (the two network legs are bounded at
+    /// 30s each), so the tap deadline has to be the poll budget MINUS this.
+    static let deliveryGrace: TimeInterval = 20
+
+    /// How long an "Allow once" tap stays good for.
+    ///
+    /// ⚠️ This must sit BELOW `serverPollBudget`, not above it. A window of 100s
+    /// (shipped briefly, 2026-08-02) let a tap at t=95s pass this check, capture
+    /// the screen, and store it in R2 *permanently* for a poll that had already
+    /// given up — the same rot the deadline exists to prevent, just bounded at ten
+    /// seconds instead of unbounded. Consent has to expire early enough that the
+    /// capture it authorises can still REACH someone.
+    static let consentWindow: TimeInterval = serverPollBudget - deliveryGrace
 
     static func isConsentStillLive(_ asked: Date) -> Bool {
         Date().timeIntervalSince(asked) < consentWindow

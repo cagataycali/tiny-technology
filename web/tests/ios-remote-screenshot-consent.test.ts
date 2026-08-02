@@ -8,8 +8,7 @@ import { join } from 'node:path'
  *    COST YOU YOUR NOTIFICATIONS TO ANSWER.
  *
  * `use_device` + `screenshot` used to refuse on iOS: the per-capture consent
- * prompt lived in ChatView, and a relay turn has no chat view on screen
- * (docs/remote-screenshot-consent-design-2026-08-02.md). The executor now
+ * prompt lived in ChatView, and a relay turn has no chat view on screen. The executor now
  * presents its own UIAlertController — but the way it does that carries one
  * non-obvious invariant that nothing else in the codebase can express:
  *
@@ -45,6 +44,7 @@ const androidPanels = readFileSync(join(ROOT, AND, 'ui/Panels.kt'), 'utf8')
 const views = readFileSync(join(ROOT, 'ios/Tiny/Sources/Views.swift'), 'utf8')
 const androidConsent = readFileSync(join(ROOT, AND, 'tools/ScreenshotConsentActivity.kt'), 'utf8')
 const androidShot = readFileSync(join(ROOT, AND, 'tools/Screenshot.kt'), 'utf8')
+const platform = readFileSync(join(ROOT, 'lib/chat/tools/platform.ts'), 'utf8')
 
 /** The `case .screenshot(...)` arm of runDeviceEvent, up to the next `case .`. */
 function relayScreenshotBranch(): string {
@@ -258,17 +258,70 @@ describe('a consent tap expires with the request', () => {
     expect(fn.slice(0, fn.indexOf('\n    }'))).toMatch(/asked <= 0L\) return false/)
   })
 
-  it('both phones use the same window, and it covers the 90s poll', () => {
-    const ios = Number(screenshot.match(/consentWindow: TimeInterval = (\d+)/)?.[1])
-    const and = Number(androidConsent.match(/CONSENT_WINDOW_MS = ([\d_]+)L/)?.[1]?.replace(/_/g, ''))
-    expect(ios, 'iOS consent window unreadable').toBeGreaterThan(0)
-    expect(and, 'Android consent window unreadable').toBeGreaterThan(0)
+  /**
+   * ⚠️ THE DIRECTION OF THE GRACE IS THE WHOLE POINT, AND THE FIRST VERSION OF
+   *    THIS TEST HAD IT BACKWARDS (asserted `>= 90`, shipped a 100s window).
+   *
+   * The poll is `for (i<45) { await sleep(2000); check }` — it sleeps FIRST, so
+   * checks land at t≈2,4,…,90 and the result has to already be IN the mailbox at
+   * t=90. A tap is not a result: ReplayKit's first frame, the JPEG encode, the
+   * /api/media upload and the mailbox POST all happen after it.
+   *
+   * So the window must be BELOW the poll budget by at least the delivery cost. A
+   * window above it re-creates the exact bug the deadline exists to kill —
+   * pixels captured and stored permanently for a poll that has already gone —
+   * just bounded to the overhang instead of unbounded.
+   */
+  const win = (src: string, re: RegExp, scale = 1) => {
+    const m = src.match(re)
+    const n = Number(m?.[1]?.replace(/_/g, ''))
+    expect(m, `unreadable: ${re}`).toBeTruthy()
+    expect(n).toBeGreaterThan(0)
+    return n * scale
+  }
+
+  it('the consent window closes BEFORE the server stops listening', () => {
+    const poll = win(screenshot, /serverPollBudget: TimeInterval = (\d+)/)
+    const grace = win(screenshot, /deliveryGrace: TimeInterval = (\d+)/)
+    const ios = poll - grace
+
+    // The recorded poll budget must match the server that actually polls, so a
+    // change to platform.ts can't leave the phones calibrated to a stale number.
+    // Scoped to makeScreenshotTool — platform.ts holds SEVEN of these loops with
+    // different budgets, and an unscoped regex reads the first one (15×3s).
+    const shotTool = platform.slice(
+      platform.indexOf('export const makeScreenshotTool'),
+      platform.indexOf('export const', platform.indexOf('export const makeScreenshotTool') + 10),
+    )
+    expect(shotTool, 'did not slice makeScreenshotTool').toContain("name: 'screenshot'")
+    const loops = Number(shotTool.match(/for \(let i = 0; i < (\d+); i\+\+\)/)?.[1])
+    const sleep = Number(shotTool.match(/setTimeout\(r, (\d+)\)/)?.[1])
+    expect(loops, 'screenshot poll loop unreadable').toBeGreaterThan(0)
+    expect(poll, "the phones' idea of the server budget drifted from the server")
+      .toBe((loops * sleep) / 1000)
+
+    // …and the tap deadline must leave real room for capture+upload+POST.
+    expect(ios, 'the consent window outlives the poll — a late tap still captures')
+      .toBeLessThan(poll)
+    expect(grace, 'the delivery grace is too thin for two 30s-bounded network legs')
+      .toBeGreaterThanOrEqual(15)
+    // Still has to be long enough to be usable: a human must be able to notice
+    // the prompt and tap it.
+    expect(ios).toBeGreaterThanOrEqual(45)
+  })
+
+  it('both phones compute the same window, from the same two numbers', () => {
+    const ios = win(screenshot, /serverPollBudget: TimeInterval = (\d+)/) -
+      win(screenshot, /deliveryGrace: TimeInterval = (\d+)/)
+    const and = win(androidConsent, /SERVER_POLL_BUDGET_MS = ([\d_]+)L/) -
+      win(androidConsent, /DELIVERY_GRACE_MS = ([\d_]+)L/)
     expect(and, 'the two phones disagree on how long consent lasts').toBe(ios * 1000)
-    // Must outlast the server's poll (2s × 45) or a tap at 85s is thrown away
-    // while the model is still waiting for it.
-    expect(ios).toBeGreaterThanOrEqual(90)
-    // …and must not be so long that it stops being a deadline at all.
-    expect(ios).toBeLessThanOrEqual(180)
+    // Derived, not restated: a hardcoded literal on either side would drift
+    // silently the next time the poll budget moves.
+    expect(screenshot, 'iOS hardcodes the window instead of deriving it')
+      .toMatch(/consentWindow: TimeInterval = serverPollBudget - deliveryGrace/)
+    expect(androidConsent, 'Android hardcodes the window instead of deriving it')
+      .toMatch(/CONSENT_WINDOW_MS = SERVER_POLL_BUDGET_MS - DELIVERY_GRACE_MS/)
   })
 
   it('the CHAT path shares the deadline instead of reasoning about it twice', () => {

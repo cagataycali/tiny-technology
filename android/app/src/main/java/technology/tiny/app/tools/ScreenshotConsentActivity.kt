@@ -96,16 +96,34 @@ class ScreenshotConsentActivity : ComponentActivity() {
         const val EXTRA_ASKED_AT = "askedAt"
 
         /**
-         * ⏱️ How long a grant stays good for — the web callback polls 90s
-         * (lib/chat/tools/platform.ts), plus a small grace for capture+upload.
-         * iOS shares the number (Screenshot.consentWindow).
+         * How long the server callback waits: lib/chat/tools/platform.ts loops 45×
+         * over `sleep(2s)` THEN check, so its last look is at t≈90s and the result
+         * must already be in the mailbox by then.
+         */
+        const val SERVER_POLL_BUDGET_MS = 90_000L
+
+        /**
+         * What still has to happen after the tap: MediaProjection start, one frame,
+         * the JPEG encode, /api/media, then the tool-result POST.
+         */
+        const val DELIVERY_GRACE_MS = 20_000L
+
+        /**
+         * ⏱️ How long a grant stays good for. iOS shares the arithmetic
+         * (Screenshot.consentWindow = serverPollBudget - deliveryGrace).
          *
-         * Without it the system dialog outlives its request: it sits on the lock
-         * screen indefinitely, and a tap an hour later captures whatever is on
+         * Without any window the system dialog outlives its request: it sits on the
+         * lock screen indefinitely, and a tap an hour later captures whatever is on
          * screen THEN, for a request that is long gone — consent applied to a
          * moment it was never given for.
+         *
+         * ⚠️ And the window must land BELOW the poll budget, not above it. At
+         * 100_000L (shipped briefly, 2026-08-02) a tap at t=95s counted as live,
+         * captured, and uploaded to R2 *permanently* for a poll that was already
+         * gone — the same rot, merely bounded. Consent must expire early enough
+         * that what it authorises can still reach someone.
          */
-        const val CONSENT_WINDOW_MS = 100_000L
+        const val CONSENT_WINDOW_MS = SERVER_POLL_BUDGET_MS - DELIVERY_GRACE_MS
 
         /** Open the consent dialog for a screenshot tool call (app may be backgrounded). */
         fun launch(context: Context, toolUseId: String) {

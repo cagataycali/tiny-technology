@@ -665,7 +665,7 @@ final class TinySession: NSObject, ObservableObject {
             _ = await ImageGen.shared.run(toolUseId: id, prompt: prompt, style: style, token: token)
             return DeviceActionAudit.toolLine("generate_image", ran: true)
         case .screenshot(let id, let reason):
-            // 📸 Remote consent (docs/remote-screenshot-consent-design-2026-08-02).
+            // 📸 Remote consent.
             // The web agent asked THIS phone for its screen. Ask the human here
             // — but DISPATCH, never await: this runs inside the relay poll
             // loop's iteration, and that loop claims the {type:"notify"}
@@ -775,7 +775,7 @@ final class TinySession: NSObject, ObservableObject {
     ///   glasses   = meta_* bridges (honest "not linked" when absent)
     ///   screenshot = ReplayKit capture behind a per-capture consent prompt the
     ///     relay path now presents itself (foreground-gated; backgrounded says
-    ///     so — docs/remote-screenshot-consent-design-2026-08-02.md)
+    ///     so)
     nonisolated static let capabilities = ["chat", "bluetooth_scan", "location", "record", "speak", "open_app", "image_gen", "glasses", "screenshot"]
 
     /// What to actually send on a beat: the static set, plus whatever is true
