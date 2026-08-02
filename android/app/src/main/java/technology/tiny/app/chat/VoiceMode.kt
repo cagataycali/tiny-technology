@@ -47,6 +47,29 @@ class VoiceMode(
     private var pending = "" // finalized text from rolled sessions
     private var lastHeardAt = 0L
 
+    /**
+     * Which rolled session the callbacks currently belong to — iOS `TakeBox`'s
+     * generation counter (`NiclaRecorder.swift:97`, `6a5eb026`) ported.
+     *
+     * ⚠️ ONE `listener` object is set on EVERY recognizer this class builds, and
+     * `destroy()` is asynchronous — so a callback from the session we just tore
+     * down arrives at the same listener that now serves its replacement, with
+     * nothing in the callback saying which session it came from. Two consequences,
+     * both silent:
+     *
+     *  · a late `onResults` appends its text to `pending` a SECOND time (the roll
+     *    in `onError` already absorbed `_partial` into `pending`), so the sent
+     *    message says a sentence twice — worse than dropping it, because a model
+     *    reads a repetition as two things being said;
+     *  · a late `onResults`/`onError` calls `startSession()` on a session that has
+     *    only just begun, tearing down a live recognizer mid-utterance and tripping
+     *    an immediate extra roll.
+     *
+     * `stop()` bumps this too, so a callback in flight when the user closes voice
+     * mode cannot re-arm the mic after `_status` went IDLE.
+     */
+    private var generation = 0
+
     // The device locale as a BCP-47 tag ("en-US", "de-DE") for the recognizer —
     // read once per session start so a mid-run system language change is picked up
     // on the next roll (iOS re-reads Locale.current when it recreates the recognizer).
@@ -91,6 +114,11 @@ class VoiceMode(
     }
 
     fun stop() {
+        // Bump FIRST: a callback already in flight must not re-arm the mic after the
+        // user closed voice mode. `active` alone doesn't cover it — `onError`'s
+        // debounced roll re-checks `active`, but `onResults` calls startSession()
+        // straight through, and a destroy-triggered error is exactly what arrives here.
+        generation += 1
         watcher?.cancel(); watcher = null
         recognizer?.destroy(); recognizer = null
         _status.value = Status.IDLE
@@ -100,9 +128,11 @@ class VoiceMode(
     }
 
     private fun startSession() {
+        generation += 1 // anything the outgoing session says from here is stale
+        val gen = generation
         recognizer?.destroy()
         recognizer = SpeechRecognizer.createSpeechRecognizer(context).apply {
-            setRecognitionListener(listener)
+            setRecognitionListener(listenerFor(gen))
             startListening(
                 Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -122,8 +152,21 @@ class VoiceMode(
         }
     }
 
-    private val listener = object : RecognitionListener {
+    /**
+     * A listener bound to the session that created it.
+     *
+     * ⚠️ A FUNCTION, not the single shared `val` this used to be: the binding IS
+     * the fix. Every callback below returns early unless it is still the live
+     * session, which is the only thing that distinguishes a real result from a
+     * teardown echo — `SpeechRecognizer` tells us nothing about which recognizer
+     * a callback came from.
+     */
+    private fun listenerFor(gen: Int) = object : RecognitionListener {
+        /** Still the session the mic belongs to. */
+        private val live: Boolean get() = gen == generation
+
         override fun onPartialResults(partialResults: Bundle?) {
+            if (!live) return
             val text = partialResults
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull().orEmpty()
@@ -131,11 +174,16 @@ class VoiceMode(
         }
 
         override fun onResults(results: Bundle?) {
+            // A superseded session reporting its final words: they are already in
+            // `pending` (the roll absorbed `_partial` before starting us), so
+            // appending them here says the same sentence twice — and rolling again
+            // would tear down a recognizer that has only just opened.
+            if (!live) return
             val text = results
                 ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
                 ?.firstOrNull().orEmpty()
             if (text.isNotBlank()) {
-                pending = listOf(pending, text).filter { it.isNotBlank() }.joinToString(" ")
+                pending = appendHeard(pending, text)
                 _partial.value = pending
                 lastHeardAt = System.currentTimeMillis()
             }
@@ -145,6 +193,10 @@ class VoiceMode(
         }
 
         override fun onError(error: Int) {
+            // ⚠️ Checked BEFORE the permission arm: a dying session's error must not
+            // flip the UI to DENIED or stop() a mic that is working. Android reports
+            // the teardown of a destroyed recognizer as an error like any other.
+            if (!live) return
             if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
                 _status.value = Status.DENIED
                 stop()
@@ -157,13 +209,27 @@ class VoiceMode(
             // recomputes `_partial = pending + newText` — clobbering them. Absorb the
             // visible transcript into `pending` before rolling so it survives (no-op
             // when nothing was heard or after an auto-send already cleared it).
-            pending = _partial.value
+            //
+            // A plain assignment is right here and dedupe is NOT needed: `_partial` is
+            // always `pending` plus the live text (both `heard` and `onResults` build
+            // it that way), so it already contains `pending` and re-joining would be
+            // the doubling this absorb exists to prevent.
+            pending = _partial.value.trim()
             // A call can be what ended the session — yield instead of re-rolling
             // into a mic the dialer now owns (this error would otherwise repeat
             // every 500ms for the whole call).
             if (active && inCall()) { stop(); return }
             // NO_MATCH / SPEECH_TIMEOUT etc. → debounced roll (iOS 0.5s parity)
-            if (active) scope.launch { delay(500); if (active && !inCall()) startSession() }
+            //
+            // ⚠️ Re-checks `live` after the wait, not just `active`. The generation can
+            // move DURING the 500ms — a stop() then start(), or a roll from another
+            // callback — and `active` is true again in exactly that case, so this
+            // lambda would destroy a recognizer that had only just opened. The check
+            // has to be re-read after the delay; capturing it before is no check.
+            if (active) scope.launch {
+                delay(500)
+                if (live && active && !inCall()) startSession()
+            }
         }
 
         override fun onReadyForSpeech(params: Bundle?) {}
@@ -172,8 +238,14 @@ class VoiceMode(
             // Android's RMS runs roughly -2 dB (silence) .. 10 dB (loud); map to
             // 0..1 for the meter, clamped. Only while listening — a stray late
             // callback shouldn't twitch the bar after the session ends.
+            //
+            // ⚠️ A dead session returns WITHOUT writing: zeroing here would blank the
+            // live session's meter mid-utterance, which is the bug this class exists
+            // to avoid, in miniature. Only the live session may drive the bar, and
+            // only it may zero it.
+            if (!live) return
             if (!active) { _level.value = 0f; return }
-            _level.value = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
+            _level.value = levelFor(rmsdB)
         }
         override fun onBufferReceived(buffer: ByteArray?) {}
         override fun onEndOfSpeech() {}
@@ -183,8 +255,47 @@ class VoiceMode(
     private fun heard(text: String) {
         speech.stop() // barge-in: any recognized speech silences TTS immediately
         _status.value = Status.HEARING
-        _partial.value = listOf(pending, text).filter { it.isNotBlank() }.joinToString(" ")
+        _partial.value = appendHeard(pending, text)
         lastHeardAt = System.currentTimeMillis()
+    }
+
+    companion object {
+        /**
+         * Join a rolled session's banked words to what was just heard.
+         *
+         * ⚠️ Dedupes, which the bare `joinToString(" ")` did not. iOS `TakeBox.bank`
+         * (`NiclaRecorder.swift:151`) carries the same rule and the same reason: a
+         * roll can hand the next session audio it has already transcribed, and **a
+         * transcript that reads a sentence twice is worse than one that clips it** —
+         * a model treats a repetition as two things being said. Compared
+         * case-insensitively because the recognizer re-capitalises freely between
+         * sessions ("okay" / "Okay" are one utterance, not two).
+         *
+         * Kept pure and in the companion so it is testable on the local JVM, like
+         * `Speech.scrub` — no `android.*` in here.
+         */
+        fun appendHeard(pending: String, heard: String): String {
+            val p = pending.trim()
+            val h = heard.trim()
+            if (h.isEmpty()) return p
+            if (p.isEmpty()) return h
+            val lowP = p.lowercase()
+            val lowH = h.lowercase()
+            // Already said: a late or replayed utterance the bank has in full.
+            if (lowP.contains(lowH)) return p
+            // A longer re-reading of the tail REPLACES it rather than doubling it —
+            // "so I said" then "so I said hello" is one sentence, heard twice.
+            if (lowH.contains(lowP)) return h
+            return "$p $h"
+        }
+
+        /**
+         * Android's RMS (~-2 dB silence .. 10 dB loud) mapped to the meter's 0..1.
+         *
+         * Extracted only so the clamp is testable: an unclamped value drives the
+         * level bar past its track, and a shouted syllable reports well over 10 dB.
+         */
+        fun levelFor(rmsdB: Float): Float = ((rmsdB + 2f) / 12f).coerceIn(0f, 1f)
     }
 
     /** 400ms poll; 3.0s of silence with text pending → auto-send (web DEFAULT_VAD parity). */
