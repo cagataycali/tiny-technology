@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -43,6 +43,47 @@ describe('README numbers agree with the code they cite', () => {
     const days = eval(expr) / 86_400
     expect(Number.isFinite(days)).toBe(true)
     expect(readme).toContain(`${days} days`)
+  })
+
+  it('built-in tool count (the roster the agent is handed)', () => {
+    // The README's capability table says "67 built-in tools" and then claims
+    // THIS test guards it. Derive the number the way the roster is actually
+    // assembled — every `name: '…'` across the tool modules plus the ones
+    // defined inline in the chat route — deduped, because render_ui is
+    // declared twice (web and native variants of the same tool).
+    const files = [
+      ...readdirSync(join(repoRoot, 'web/lib/chat/tools'))
+        .filter((f) => f.endsWith('.ts'))
+        .map((f) => join(repoRoot, 'web/lib/chat/tools', f)),
+      join(repoRoot, 'web/app/api/chat/route.ts'),
+    ]
+    const names = new Set<string>()
+    for (const f of files) {
+      // Array.from, not `for…of` over the iterator: tsconfig targets es5
+      // without downlevelIteration (same reason line 22 spells it this way).
+      Array.from(readFileSync(f, 'utf8').matchAll(/name: '([a-z_0-9]+)'/g)).forEach((m) => names.add(m[1]))
+    }
+    // Guard the scan itself: a rename that broke the pattern would otherwise
+    // read as "the roster shrank" and quietly agree with a stale README.
+    expect(names.size).toBeGreaterThan(40)
+    expect(names.has('use_device')).toBe(true)
+    expect(readme).toContain(`**${names.size} built-in tools**`)
+  })
+
+  it('D1 migration count', () => {
+    const n = readdirSync(join(repoRoot, 'worker/migrations')).filter((f) => f.endsWith('.sql')).length
+    expect(n).toBeGreaterThan(20)
+    expect(readme).toContain(`**${n} D1 migrations**`)
+    // worker/README.md states the same number in its bindings table.
+    const wk = readFileSync(join(repoRoot, 'worker/README.md'), 'utf8').replace(/\s+/g, ' ')
+    expect(wk).toContain(`${n} migrations in`)
+  })
+
+  it('web test-file count', () => {
+    const n = readdirSync(join(repoRoot, 'web/tests'))
+      .filter((f) => f.endsWith('.test.ts') || f.endsWith('.test.tsx')).length
+    expect(n).toBeGreaterThan(100)
+    expect(readme).toContain(`**${n} test files**`)
   })
 
   it('web framework major (package.json "next")', () => {

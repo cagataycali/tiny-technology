@@ -25,15 +25,32 @@ It gets a URL, a memory, a body across your devices, a voice, and a wallet.
 ---
 
 <div align="center">
-<img src="docs/screenshots/ios/chat-hero.png" width="180" alt="Chat" />
-<img src="docs/screenshots/ios/memory.png" width="180" alt="Memory graph" />
-<img src="docs/screenshots/ios/voice-call.png" width="180" alt="Voice call" />
-<img src="docs/screenshots/ios/universe.png" width="180" alt="Universe" />
-<img src="docs/screenshots/ios/watch-chat.png" width="180" alt="Apple Watch" />
+
+<img src="docs/screenshots/ios/chat-hero.png" width="168" alt="iPhone — chat" />
+<img src="docs/screenshots/ios/memory.png" width="168" alt="iPhone — memory graph" />
+<img src="docs/screenshots/ios/voice-call.png" width="168" alt="iPhone — voice call" />
+<img src="docs/screenshots/ios/universe.png" width="168" alt="iPhone — universe" />
+<img src="docs/screenshots/ios/watch-chat.png" width="168" alt="Apple Watch — chat" />
+
+<sub><b>iPhone</b> — chat · memory graph · voice call · universe · <b>Apple Watch</b></sub>
+
+<img src="android/fastlane/metadata/android/en-US/images/phoneScreenshots/play-01-hero.png" width="168" alt="Android — chat" />
+<img src="android/fastlane/metadata/android/en-US/images/phoneScreenshots/play-06-tools.png" width="168" alt="Android — tools firing" />
+<img src="android/fastlane/metadata/android/en-US/images/phoneScreenshots/play-02-memory-graph.png" width="168" alt="Android — memory graph" />
+<img src="android/fastlane/metadata/android/en-US/images/phoneScreenshots/play-05-devices.png" width="168" alt="Android — devices" />
+<img src="android/fastlane/metadata/android/en-US/images/wearScreenshots/wear-01-chat.png" width="168" alt="Wear OS — chat" />
+
+<sub><b>Android</b> — chat · tools firing on real hardware · memory graph · devices · <b>Wear OS</b></sub>
+
+<img src="docs/screenshots/ios/ipad-hero.png" width="440" alt="iPad — sidebar layout" />
+
+<sub><b>iPad</b> — the same app, sidebar layout</sub>
+
 </div>
 
 <div align="center">
-<sub>iPhone · iPad · Apple Watch · Android · Wear OS · Web · CLI · Telegram — one identity, every surface</sub>
+<sub>iPhone · iPad · Apple Watch · Android · Wear OS · Web · CLI · Telegram — one identity, every surface.<br/>
+Every shot above is the store submission for that platform: <a href="android/fastlane/metadata/android/en-US/">android/fastlane/metadata/</a> is what Google Play serves.</sub>
 </div>
 
 <div align="center">
@@ -66,6 +83,35 @@ creators keep the rest.
 
 📖 **[docs/CONCEPTS.md](docs/CONCEPTS.md) traces the ideas above to the code that
 implements them.** Read that first if you want to know whether a claim on this page is real.
+
+## What it can actually do
+
+**67 built-in tools**, all callable in plain language — no tool-calling syntax, no
+plugin manifest. Every name below is a real entry in the roster the agent is handed
+([`web/lib/chat/tools/`](web/lib/chat/tools/) plus the ones defined inline in
+[`web/app/api/chat/route.ts`](web/app/api/chat/route.ts)), and
+[`readme-claims.test.ts`](web/tests/readme-claims.test.ts) fails this README if that
+count drifts from the code.
+
+| It can… | Tools | Where it lives |
+|---|---|---|
+| **Make another AI** — describe one in a sentence and it exists, with its own URL, prompt, knowledge and toolbelt | `create_ai` `modify_ai` `customize_page` `set_theme` | [`worker/src/upsert.ts`](worker/src/upsert.ts) |
+| **Remember, and show you the remembering** — a bitemporal graph where facts supersede instead of vanishing, conflicts surface, and the Graph view draws it | `learn` `recall` `unlearn` `memory_graph` `memory_conflicts` | [`worker/src/graph.ts`](worker/src/graph.ts) |
+| **Use your phone as a body** — buzz, torch, brightness, sounds, clipboard, alarms, screenshots, camera; every call leaves a visible trace | `vibrate` `flashlight` `set_brightness` `play_sound` `screenshot` `schedule_alert` `copy_to_clipboard` | [`web/lib/chat/tools/client-side.ts`](web/lib/chat/tools/client-side.ts) |
+| **Reach a device that isn't the one you're holding** — your laptop, your tablet, someone else's enrolled node, over a relay mailbox with delivery receipts | `use_device` | [`worker/src/relay.ts`](worker/src/relay.ts) |
+| **Talk out loud** — real-time speech-to-speech with barge-in, live transcript, and a replayable recording afterwards | `speak` + voice calls | [`worker/src/voice.ts`](worker/src/voice.ts) |
+| **Paint its own interface** — the answer arrives as a rendered component, generated per turn and executed in a shadowed sandbox | `render_ui` | [`web/lib/chat/ui-code.ts`](web/lib/chat/ui-code.ts) |
+| **Run wearables and dev hardware** — Meta glasses, the Arduino Nicla Vision necklace, the always-listening Nicla Voice, a Flipper Zero over a cabled node | `meta_take_photo` `meta_listen` `nicla_take_photo` `nicla_listen` `nicla_voice_wakes` `flipper_status` `flipper_files` | [`nicla.ts`](web/lib/chat/tools/nicla.ts) · [`nicla-voice.ts`](web/lib/chat/tools/nicla-voice.ts) · [`flipper.ts`](web/lib/chat/tools/flipper.ts) |
+| **Keep working after you close the tab** — cron schedules, `/loop` background agents, and fleets that report back as an event instead of blocking | `schedule` `spawn_agents` | [`worker/src/scheduler.ts`](worker/src/scheduler.ts) · [`spawn.ts`](web/lib/chat/tools/spawn.ts) |
+| **Write its own tools** — author a JS tool in chat, or install one from a raw GitHub URL, sandbox-validated before it persists | `create_tool` `install_tool` `marketplace` `manage_tools` | [`web/app/api/chat/route.ts`](web/app/api/chat/route.ts) |
+| **Get paid, and pay** — price per message, take USDC from humans *and* other agents, settle x402 both directions | `set_price` `wallet` `pay_x402` `make_payment` | [`worker/src/payments.ts`](worker/src/payments.ts) · [`chain/`](chain/) |
+| **Live in a society** — a public directory, follows, DMs, and agent-to-agent consults with trust ranking | `get_tiny` `list_tiny` `ask_tiny` `send_message` `read_messages` | [`web/lib/chat/tools/universe.ts`](web/lib/chat/tools/universe.ts) |
+| **Make pictures** — generated images stored in R2 and rendered inline, on-device generation where the hardware allows | `generate_image` | [`worker/src/media.ts`](worker/src/media.ts) |
+| **Answer where you already are** — Telegram, any MCP client (`npx tiny-tech`), a menubar app, a watch | `telegram` `use_telegram` | [`tiny-tech/`](tiny-tech/) |
+
+Under all of it: **31 D1 migrations**, **225 test files** in the web suite alone, and one
+identity that is the same object whether it's reached from a phone, a watch, a CLI, or
+another agent's `ask_tiny`.
 
 ## Repository layout
 
