@@ -346,6 +346,83 @@ export function eventDetail(detail: unknown): string {
   return s.slice(0, EVENT_DETAIL_CHARS - EVENT_DETAIL_TAIL - 1) + '…' + s.slice(-EVENT_DETAIL_TAIL)
 }
 
+/**
+ * 🔔 Which of the fetched events actually reach the prompt.
+ *
+ * The block is a FIXED 15 rows (`app/api/chat/route.ts`, `&limit=15`) taken
+ * strictly newest-first off a ring shared by every subsystem. So it is not a
+ * summary of what happened — it is whatever the loudest producer wrote most
+ * recently, and one busy producer evicts every other subsystem silently.
+ *
+ * Measured on production, not supposed: of the newest 15 rows for this account,
+ * **13 were `job_result`** and the ring's newest 50 held 39 of them. The single
+ * `nicla_transcript` — the user's own voice, which this file's own icon table
+ * calls "the ones most likely to be worth raising unprompted" — sat 22 rows
+ * below the cut and reached the agent not at all. No necklace was even streaming;
+ * a live card files one transcript every 45 seconds, so a card open 12 minutes
+ * would be 16 segments and could fill the window by itself, in either direction.
+ *
+ * ⚠️ THE OPPOSITE FIX WOULD BE WORSE. Ranking voice above jobs, or filtering to
+ * "interesting" kinds, means a failing scheduled job stops being mentioned
+ * because the necklace was talkative — trading one silent subsystem for another.
+ * What is wrong here is not the ordering, it is that a single kind can take every
+ * slot. So: keep newest-first ordering exactly as it was, but reserve the tail of
+ * the block for kinds that would otherwise be shut out — at most
+ * `PER_KIND_SOFT_CAP` rows of any one kind while another kind is still waiting.
+ * A quiet ring is unaffected (nothing is competing, so nothing is displaced), and
+ * a flooded one degrades into "the newest few of the flood, plus one of everything
+ * else" instead of "the flood".
+ *
+ * Chronology is restored at the end, because the block is timestamped and a
+ * reordered list reads as a false sequence of events.
+ */
+export const EVENT_BLOCK_ROWS = 15
+export const PER_KIND_SOFT_CAP = 4
+
+export function selectEvents<T extends { kind?: unknown; created?: unknown }>(
+  events: readonly T[], rows: number = EVENT_BLOCK_ROWS,
+): T[] {
+  if (events.length <= rows) return [...events]
+  // The fetch returns oldest-first among the newest N (worker events.ts:
+  // `ORDER BY id DESC LIMIT ?` then `.reverse()`), so newest-first is this list
+  // read backwards. Never sort by `created` to find it: it is a unix SECOND, and
+  // a necklace filing two segments in the same second would make the order
+  // arbitrary — exactly where a row silently vanishes.
+  const newestFirst = [...events].reverse()
+  const picked: T[] = []
+  const deferred: T[] = []
+  const seen = new Map<string, number>()
+  for (const e of newestFirst) {
+    const k = String(e.kind ?? '')
+    const n = seen.get(k) ?? 0
+    // Over its share: hold it back rather than dropping it. If no other kind
+    // turns up to claim the slot, the second pass below puts it right back, so a
+    // ring containing ONE kind still fills the whole block.
+    if (n >= PER_KIND_SOFT_CAP) { deferred.push(e); continue }
+    seen.set(k, n + 1)
+    picked.push(e)
+    if (picked.length === rows) break
+  }
+  for (const e of deferred) {
+    if (picked.length >= rows) break
+    picked.push(e)
+  }
+  // ⚠️ Back to the INPUT's order, which is oldest-first — the worker returns
+  // `ORDER BY id DESC` then `.reverse()`, and the block has always rendered that
+  // list as given. Selection walks newest-first (that is what "which rows survive
+  // the cap" means), so this restoration is not optional bookkeeping: without it
+  // the block silently reads newest-to-oldest, which still looks like a plausible
+  // timestamped log and is the wrong sequence of events. Caught only because a
+  // short ring returns early and long rings would have flipped alone.
+  //
+  // Ordered by ring POSITION, never by `created`: the ring is ordered by `id`
+  // while `created` is `unixepoch()` SECONDS (migration 0006), so two writes in
+  // one second — a necklace filing segments — leave the timestamps equal and the
+  // real order only in the position.
+  const order = new Map(events.map((e, i) => [e, i]))
+  return picked.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0))
+}
+
 export function buildSoulPrompt(inp: SoulPromptInputs): string {
   const {
     tinyName, tinyData, tinyStats, retrieveSummary, clientMetadata,
@@ -353,9 +430,13 @@ export function buildSoulPrompt(inp: SoulPromptInputs): string {
     tinySystemPrompt, tinySession, messageIndex,
   } = inp
 
-  const eventsBlock = Array.isArray(userEvents) && userEvents.length
+  // Selected HERE rather than at the fetch, so no caller can hand the block a
+  // wider list and quietly get the old behaviour back — the 15-row bound and the
+  // per-kind reservation are one decision, made in one place.
+  const shownEvents = Array.isArray(userEvents) ? selectEvents(userEvents) : []
+  const eventsBlock = shownEvents.length
     ? `# 🔔 Recent Events (background activity since the user last looked — mention anything relevant)
-${userEvents.map((e: any) => {
+${shownEvents.map((e: any) => {
   const t = new Date((e.created || 0) * 1000).toISOString().slice(11, 16)
   return `- [${t} UTC] ${EVENT_ICONS[e.kind] || 'ℹ'} ${e.kind}: ${eventDetail(e.detail)}`
 }).join('\n')}

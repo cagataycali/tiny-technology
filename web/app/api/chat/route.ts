@@ -196,8 +196,21 @@ export async function POST(req: Request) {
       : Promise.resolve({ learnings: [] }),
     // 🔔 Event bus tail (COMPARISON.md §2.6) — what happened across
     // subsystems (scheduled jobs, shares) since the user last looked
+    //
+    // ⚠️ Fetches the ring's CLAMP (50, worker events.ts) and lets
+    // `selectEvents` choose the 15 that get rendered. It used to fetch exactly
+    // the 15 it rendered, which made "newest 15" and "what the agent is told"
+    // the same thing — and measured on a live account, 13 of those 15 were
+    // `job_result` while the one voice transcript sat 22 rows below the cut.
+    // Selecting from a wider window is what lets a flooded ring still mention
+    // the other subsystems; see selectEvents for why the ordering is unchanged.
+    //
+    // ⚠️ This width is load-bearing, not a tuning knob: `selectEvents` returns
+    // its input untouched when it is already down to the block's size, so
+    // narrowing this back to 15 disables the whole selection silently. Pinned by
+    // "the fetch asks for more rows than the block renders" in prompt.test.ts.
     session
-      ? fetch(`https://plugin.tiny.technology/events?userId=${encodeURIComponent(session.sub)}&limit=15`, {
+      ? fetch(`https://plugin.tiny.technology/events?userId=${encodeURIComponent(session.sub)}&limit=50`, {
           headers: { 'X-Internal-Key': process.env.INTERNAL_API_KEY || '' },
         }).then(r => r.json()).then(d => d.events || []).catch(() => [])
       : Promise.resolve([]),

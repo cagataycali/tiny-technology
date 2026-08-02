@@ -1,7 +1,9 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
-import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, eventDetail, EVENT_DETAIL_CHARS, type SoulPromptInputs } from '../lib/chat/prompt'
+import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, eventDetail, EVENT_DETAIL_CHARS, selectEvents, EVENT_BLOCK_ROWS, PER_KIND_SOFT_CAP, type SoulPromptInputs } from '../lib/chat/prompt'
 import { EMITTED_KINDS } from '../lib/chat/event-icons'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const base: SoulPromptInputs = {
   tinyName: 'testy',
@@ -52,16 +54,26 @@ describe('buildSoulPrompt', () => {
    * about which events exist.
    */
   it('every kind the worker emits reaches the agent with its own icon, not ℹ', () => {
-    const p = buildSoulPrompt({
-      ...base,
-      userEvents: EMITTED_KINDS.map((kind) => ({ kind, detail: 'd', created: 1750000000 })),
-    })
-    for (const kind of EMITTED_KINDS) {
-      expect(p, `${kind} renders as ℹ — add an EVENT_ICONS entry`)
-        .not.toContain(`ℹ ${kind}:`)
-      // And it must actually appear: a kind dropped from the block entirely
-      // would also satisfy the assertion above.
-      expect(p, `${kind} is missing from the events block`).toContain(`${kind}: d`)
+    // ⚠️ Fed in BATCHES that fit the block, not all 22 at once. This pin is about
+    // the icon MAPPING, and the block renders at most EVENT_BLOCK_ROWS rows — a
+    // bound that has always been real (the fetch was `limit=15`) and is now
+    // enforced inside buildSoulPrompt by selectEvents. Passing 22 kinds and
+    // requiring all 22 to appear would assert the block is unbounded, which it
+    // never was, and the failure would read as "your icon is missing" when the row
+    // was simply past the cap.
+    for (let i = 0; i < EMITTED_KINDS.length; i += EVENT_BLOCK_ROWS) {
+      const batch = EMITTED_KINDS.slice(i, i + EVENT_BLOCK_ROWS)
+      const p = buildSoulPrompt({
+        ...base,
+        userEvents: batch.map((kind) => ({ kind, detail: 'd', created: 1750000000 })),
+      })
+      for (const kind of batch) {
+        expect(p, `${kind} renders as ℹ — add an EVENT_ICONS entry`)
+          .not.toContain(`ℹ ${kind}:`)
+        // And it must actually appear: a kind dropped from the block entirely
+        // would also satisfy the assertion above.
+        expect(p, `${kind} is missing from the events block`).toContain(`${kind}: d`)
+      }
     }
   })
 
@@ -554,5 +566,213 @@ describe('walletFundsPhrase', () => {
 
   it('never says Base on a self-hosted deployment', () => {
     expect(walletFundsPhrase('tiny')).not.toMatch(/Base/)
+  })
+})
+
+/**
+ * 🔔 ONE LOUD PRODUCER TOOK THE WHOLE BLOCK.
+ *
+ * The Recent Events block is a fixed 15 rows off a ring shared by every
+ * subsystem, taken strictly newest-first. So it never summarised what happened —
+ * it showed whatever wrote most recently, and one busy producer evicted everything
+ * else with no trace of having done so.
+ *
+ * ⚠️ MEASURED, not reasoned about: of the newest 15 rows on the live account, 13
+ * were `job_result`, and the ring's newest 50 held 39. The single
+ * `nicla_transcript` — the user's own voice, which prompt.ts's icon table calls
+ * "the ones most likely to be worth raising unprompted" — sat 22 rows below the
+ * cut and reached the agent not at all. That was WITHOUT a necklace streaming: a
+ * live card files one segment every 45s, so twelve minutes of it is 16 rows and
+ * fills the window from the other direction.
+ *
+ * The fixture below is that distribution, because a synthetic even mix cannot
+ * reproduce the failure — the bug only appears when one kind outnumbers the block.
+ */
+describe('selectEvents', () => {
+  const ev = (kind: string, created: number) => ({ kind, detail: `${kind} detail`, created })
+  /** Oldest-first, like the worker returns it (`ORDER BY id DESC` then reverse). */
+  const production = () => {
+    const rows: Array<{ kind: string; detail: string; created: number }> = []
+    let t = 1_750_000_000
+    rows.push(ev('batch_result', t++))
+    for (let i = 0; i < 4; i++) rows.push(ev('tiny_visit', t++))
+    rows.push(ev('nicla_transcript', t++))          // position 27 of 50 in production
+    for (let i = 0; i < 22; i++) rows.push(ev('job_result', t++))
+    return rows
+  }
+
+  it('the voice row the old window dropped now reaches the agent', () => {
+    const rows = production()
+    const oldWindow = rows.slice(-EVENT_BLOCK_ROWS)
+    expect(oldWindow.some(e => e.kind === 'nicla_transcript'))
+      .toBe(false)                                  // the defect, reproduced
+    const out = selectEvents(rows)
+    expect(out.some(e => e.kind === 'nicla_transcript'), 'the user\'s own voice is still shut out')
+      .toBe(true)
+  })
+
+  it('still renders exactly the block\'s worth of rows', () => {
+    expect(selectEvents(production())).toHaveLength(EVENT_BLOCK_ROWS)
+  })
+
+  it('the newest rows are still present — this is not a fairness lottery', () => {
+    // The loudest producer is usually also the most RELEVANT one, so the newest
+    // few of the flood must survive. A rule that dropped them to make room would
+    // trade a silent necklace for a silent scheduler.
+    const rows = production()
+    const newest = rows[rows.length - 1]
+    expect(selectEvents(rows)).toContain(newest)
+    expect(selectEvents(rows).filter(e => e.kind === 'job_result').length)
+      .toBeGreaterThanOrEqual(PER_KIND_SOFT_CAP)
+  })
+
+  it('every kind in the ring gets at least one row', () => {
+    const out = selectEvents(production())
+    for (const k of ['batch_result', 'tiny_visit', 'nicla_transcript', 'job_result']) {
+      expect(out.some(e => e.kind === k), `${k} was shut out of the block`).toBe(true)
+    }
+  })
+
+  it('a ring of one kind still fills the block', () => {
+    // The cap is a RESERVATION, not a quota: with nothing competing for the held
+    // slots, the deferred rows go back. Capping hard would shrink a busy user's
+    // event block from 15 rows to 4 — strictly less context than before the fix.
+    const rows = Array.from({ length: 40 }, (_, i) => ev('job_result', 1_750_000_000 + i))
+    const out = selectEvents(rows)
+    expect(out).toHaveLength(EVENT_BLOCK_ROWS)
+    expect(out.filter(e => e.kind === 'job_result')).toHaveLength(EVENT_BLOCK_ROWS)
+  })
+
+  it('a necklace streaming for twelve minutes does not silence the scheduler', () => {
+    // The other direction, and the one this project's own feature causes: 16
+    // segments at one per 45s, arriving after a job failed.
+    const rows = [ev('job_error', 1_750_000_000), ev('dm', 1_750_000_001)]
+    for (let i = 0; i < 16; i++) rows.push(ev('nicla_transcript', 1_750_000_100 + i * 45))
+    const out = selectEvents(rows)
+    expect(out.some(e => e.kind === 'job_error'), 'a failed job vanished behind the necklace')
+      .toBe(true)
+    expect(out.some(e => e.kind === 'dm')).toBe(true)
+  })
+
+  it('the rows keep the order the block has always rendered', () => {
+    // ⚠️ OLDEST-FIRST, and that is not a preference — it is what the worker hands
+    // over (`ORDER BY id DESC` then `.reverse()`) and what the block mapped
+    // unchanged before any of this existed. Selection has to WALK newest-first, so
+    // restoring the input order is a required step, not bookkeeping: my first
+    // version sorted the other way and would have silently flipped every long
+    // ring's chronology while short rings (which return early) looked fine.
+    const rows = production()
+    const out = selectEvents(rows)
+    const positions = out.map(e => rows.indexOf(e))
+    expect(positions, 'the block no longer reads oldest-first')
+      .toEqual([...positions].sort((a, b) => a - b))
+  })
+
+  it('the ring\'s own order wins over `created`, which can disagree with it', () => {
+    // ⚠️ THE FIRST VERSION OF THIS TEST DID NOT CATCH ITS MUTANT. It fed four rows
+    // sharing one second and asserted they all survived — which a `created`-based
+    // sort passes, because JS sort is stable and equal keys keep their order.
+    //
+    // The rows must actually DISAGREE for the pin to mean anything. They can: the
+    // ring is ordered by `id` (worker events.ts `ORDER BY id DESC`) while `created`
+    // is `unixepoch()` SECONDS from the schema default, so a row inserted later can
+    // carry an equal or lower timestamp — two writes inside one second, or a clock
+    // that stepped back. Ring position is the only ordering D1 actually promises.
+    const rows = [
+      ev('dm', 1_750_000_050),              // oldest by position, newest by clock
+      ev('job_result', 1_750_000_000),
+      ev('nicla_transcript', 1_750_000_000),
+    ]
+    // When the block can only hold two, it keeps the two the RING calls newest —
+    // not the two with the largest timestamps, which would keep `dm` (three
+    // positions older) and drop the transcript. Rendered oldest-first, as always.
+    expect(selectEvents(rows, 2).map(e => e.kind))
+      .toEqual(['job_result', 'nicla_transcript'])
+  })
+
+  it('a short ring is passed through untouched', () => {
+    const rows = [ev('dm', 1), ev('job_result', 2)]
+    expect(selectEvents(rows)).toEqual(rows)
+    expect(selectEvents([])).toEqual([])
+  })
+
+  it('the block the agent actually reads shows the voice row', () => {
+    // End to end through buildSoulPrompt, because a selector nothing calls is the
+    // shipped-inert shape this repo has hit before.
+    const p = buildSoulPrompt({ ...base, userEvents: production() })
+    expect(p).toContain('🎙️ nicla_transcript')
+    expect(p).toContain('✅ job_result')
+    // Counted by the row's own shape (`- [HH:MM UTC] …`), which nothing else in
+    // the prompt has. Slicing to the next heading and splitting on '- ' picked up
+    // the covenant's bullets and reported 18.
+    expect(p.match(/^- \[\d\d:\d\d UTC\]/gm) || []).toHaveLength(EVENT_BLOCK_ROWS)
+  })
+
+  /**
+   * ⚠️⚠️ THE OTHER HALF OF THIS FIX, AND THE ONLY HALF NO OTHER TEST CAN SEE.
+   *
+   * `selectEvents` returns its input untouched when `events.length <= rows` —
+   * correctly, since there is nothing to choose between. So the selector is only
+   * ever reached because the FETCH asks for more rows than the block renders. Put
+   * the request back to `limit=15` and every test in this file still passes, while
+   * the block goes back to being "whatever wrote most recently": the early return
+   * fires, nothing is selected, and the voice row is evicted exactly as before.
+   *
+   * Measured, not reasoned about — `&limit=50` → `&limit=15` survived the whole
+   * mutation battery for this increment. Two halves, one pin between them.
+   *
+   * The load-bearing assertion is the RELATION (`> EVENT_BLOCK_ROWS`), not the
+   * number: 50 is the worker's own clamp on `/events` and may move. What must
+   * never hold is fetched ≤ rendered.
+   */
+  it('the fetch asks for more rows than the block renders, or selection is dead code', () => {
+    const route = readFileSync(join(__dirname, '..', 'app/api/chat/route.ts'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/^\s*\/\/.*$/gm, '')
+    const call = route.match(/plugin\.tiny\.technology\/events\?[^`]*`/)
+    expect(call, 'the events fetch is gone or reshaped — re-point this pin').toBeTruthy()
+    const width = call![0].match(/&limit=(\d+)/)
+    expect(width, 'the events fetch no longer states a width, so the worker default decides it')
+      .toBeTruthy()
+    expect(Number(width![1]), 'fetching only what is rendered makes selectEvents a no-op')
+      .toBeGreaterThan(EVENT_BLOCK_ROWS)
+  })
+
+  it('a ring fetched no wider than the block cannot be selected — why the pin above exists', () => {
+    // The early return, stated as behaviour so the source pin above has a reason
+    // a reader can check. Fifteen rows of one kind plus nothing else: the flood
+    // survives whole and the selector never runs.
+    const flood = Array.from({ length: EVENT_BLOCK_ROWS }, (_, i) => ev('job_result', 1_750_000_000 + i))
+    flood[0] = ev('nicla_transcript', 1_749_999_999)
+    const narrow = flood.slice(-EVENT_BLOCK_ROWS)
+    expect(selectEvents(narrow)).toEqual(narrow)
+  })
+
+  /**
+   * ⚠️ THE CAP IS A NUMBER CHOSEN AGAINST THE BLOCK'S SIZE, so it has to be
+   * asserted against it. `n >= CAP` → `n > CAP` — one character, letting a fifth
+   * row of each kind through — survives every other fixture here, because the
+   * give-back always tops the block up to 15 either way.
+   *
+   * It only bites when enough kinds are competing that the FIRST pass fills the
+   * block on its own: four flooding kinds at a cap of 4 spend 4+4+4+3, so the
+   * oldest kind still gets a row; at a cap of 5 the first three take all fifteen
+   * and the fourth is shut out completely — the very failure this whole increment
+   * is about, reintroduced by the off-by-one in its own guard.
+   *
+   * So the property is: CAP × (competing kinds) must leave room for every kind.
+   */
+  it('the cap leaves room for every competing kind, not just for four of them', () => {
+    const kinds = ['job_result', 'tiny_visit', 'dm', 'nicla_transcript']
+    expect(PER_KIND_SOFT_CAP * (kinds.length - 1)).toBeLessThan(EVENT_BLOCK_ROWS)
+    const rows: Array<{ kind: string; detail: string; created: number }> = []
+    let t = 1_750_000_000
+    for (const k of kinds) for (let i = 0; i < 10; i++) rows.push(ev(k, t++))
+    const out = selectEvents(rows)
+    expect(out).toHaveLength(EVENT_BLOCK_ROWS)
+    for (const k of kinds) {
+      expect(out.some(e => e.kind === k), `${k} was shut out — the cap is too large for ${kinds.length} kinds`)
+        .toBe(true)
+    }
   })
 })
