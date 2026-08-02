@@ -14,6 +14,9 @@ import { parseOpenAPI } from '@/lib/utils'
 import { buildMcpClients, resultText, friendlyError } from '@/lib/chat/helpers'
 import { makeLearnTool, makeRecallTool, makeUnlearnTool, makeConflictsTool, makeGraphNeighborsTool } from '@/lib/chat/tools/memory'
 import { makeForgedTools, buildDynamicTools, makeUseTelegramTool, makeUseDeviceTool, makeWalletTool } from '@/lib/chat/tools/platform'
+import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
+import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
 import { parseDisabledTools, filterTools, dedupeToolsByName } from '@/lib/chat/tool-filter'
 
 export const runtime = 'edge'
@@ -21,6 +24,18 @@ export const maxDuration = 120
 
 const WORKER = 'https://plugin.tiny.technology'
 const internalHeaders = () => ({ 'X-Internal-Key': process.env.INTERNAL_API_KEY || '' })
+
+/**
+ * How long the agent gets before we cancel it. Must finish BEFORE the worker
+ * cron's 60s fetch abort (scheduler.ts) — otherwise the worker gives up first,
+ * records the job FAILED and pushes a "❌ failed" notification even though the
+ * agent succeeded, and the real result (returned ~70s) is discarded.
+ *
+ * Also passed to the device tools as their poll budget: a tool that waits
+ * longer than this can only ever produce "job timeout", never a usable answer
+ * or a real explanation.
+ */
+export const JOB_DEADLINE_S = 50
 
 export async function POST(req: Request) {
   // Internal callers only (the worker cron)
@@ -96,6 +111,29 @@ export async function POST(req: Request) {
       http,
       makeUseTelegramTool(userId || null),
       makeUseDeviceTool(userId || null),
+      // 💎 Scheduled jobs can use the necklace ("check the room hourly").
+      // All four, same as chat and voice: a job that can photograph a room and
+      // listen to it has no business being denied a 6-frame clip of it, and
+      // "record a video every morning" is exactly what scheduling is for.
+      makeNiclaTakePhotoTool(userId || null, JOB_DEADLINE_S),
+      makeNiclaTakeVideoTool(userId || null, JOB_DEADLINE_S),
+      makeNiclaListenTool(userId || null, JOB_DEADLINE_S),
+      makeNiclaStatusTool(userId || null, JOB_DEADLINE_S),
+      // 🎙️ The voice necklace: read-only, so no budget to clamp — both tools
+      // hit the registry and the event ring, never the board. A job like "tell
+      // me each morning if the necklace heard anything overnight" is the point.
+      makeNiclaVoiceStatusTool(userId || null),
+      makeNiclaVoiceWakesTool(userId || null),
+      // 🎤 The recorder commands the paired PHONE via its relay mailbox, so
+      // unlike the board's read tools it CAN be scheduled ("record a voice note
+      // when I say the wake word each morning") — and it polls, so it takes the
+      // job deadline like the Vision tools. The transcript reads are cheap.
+      makeNiclaVoiceRecordTool(userId || null, JOB_DEADLINE_S),
+      makeNiclaVoiceTranscriptsTool(userId || null),
+      makeNiclaVoiceTranscriptTool(userId || null),
+      makeFlipperStatusTool(userId || null),
+      makeFlipperListenTool(userId || null, JOB_DEADLINE_S),
+      makeFlipperFilesTool(userId || null, JOB_DEADLINE_S),
       // READ-ONLY wallet — lets scheduled jobs answer money questions
       // ("alert me when my balance drops under $1") without being able to
       // move a cent; every spend path stays behind an explicit user step.
@@ -114,6 +152,27 @@ export async function POST(req: Request) {
       'use_telegram to proactively message the owner\'s authorized Telegram chats (if they connected a bot — a "no bot" error means they haven\'t)',
       'learn/recall/unlearn for the owner\'s persistent memory graph (learn supersedes outdated facts + links related ones; recall hops=1 walks connections; memory_conflicts finds contradictions)',
       'wallet to READ the owner\'s balance + recent transactions (read-only — no tool here can spend)',
+      // An unmentioned tool is an unused tool: the model won't reach for the
+      // necklace on "check the room hourly" unless it's told it has one.
+      'nicla_take_photo / nicla_take_video / nicla_listen / nicla_status for the owner\'s tiny necklace (a camera + mic worn on their chest — check nicla_status first; an offline necklace is an expected, reportable outcome, not a job failure)',
+      // The two necklaces are NOT interchangeable, and a job that reaches for a
+      // camera tool on the mic-only board wastes its whole 50s deadline failing.
+      'nicla_voice_status / nicla_voice_wakes for the owner\'s tiny VOICE necklace — a different board: mic only, no camera, no WiFi. The board cannot be commanded, only read: its on-device wake-word matches are forwarded by the paired phone. An empty wake log while no phone is relaying it means nothing was reportable, NOT that the owner was silent',
+      // The recorder is the PHONE's mic, and a job runs with nobody watching —
+      // the model must know it needs the app open, or "record and summarize"
+      // jobs burn their deadline waiting on a backgrounded phone.
+      'nicla_voice_record to record N seconds through the owner\'s PHONE mic (the paired tiny app transcribes on-device) — needs the app open on the phone; "not listening" is a reportable outcome. nicla_voice_transcripts / nicla_voice_transcript read the stored transcripts, including recordings that finished after a tool timed out',
+      // Passive speech needs its own line. The recorder above needs the app open
+      // NOW, so a job asked what was said this morning reads its options as
+      // "record (nobody's there) or read clips someone triggered" and reports it
+      // has no way — while the answer is already in the same store, requiring
+      // nothing of the moment.
+      'For what was actually SAID near the owner earlier, read nicla_voice_transcripts and look for label "necklace-live": the Nicla VISION necklace streams its mic to the paired phone whenever its live card is open, and the phone transcribes on-device and files each segment there. Nothing has to be recording now for these to exist, and an empty result means the live card was not open, NOT that nobody spoke',
+      // A Flipper capture needs a HUMAN at the device (present the card, press the
+      // remote), so it is nearly always the wrong thing for an unattended job —
+      // but flipper_status/flipper_files are fine, and a job told nothing about
+      // any of them would instead report "I have no way to check your Flipper".
+      'flipper_status / flipper_files for the owner\'s Flipper Zero (reachable only while plugged into a machine running the tiny CLI — "unreachable" is a reportable outcome, not a failure). flipper_listen also exists but BLOCKS for its window and needs a person at the device to present a card or press a remote, so do not use it in unattended work unless the job explicitly asks for a capture at a moment someone will be there',
       forgedTools.length ? `their forged tools (${forgedTools.map((t: any) => t.name).join(', ')})` : '',
       dynamicTools.length ? `this tiny's API skills (${dynamicTools.map((t: any) => t.name).slice(0, 10).join(', ')})` : '',
       mcpClients.length ? 'the tiny\'s connected MCP servers' : '',
@@ -135,14 +194,11 @@ You have ${capabilityNote}. If the job asks you to notify or message the owner, 
 Keep the final answer under 250 words; it is stored as the job result and surfaced to the user later.`,
     })
 
-    // Must finish BEFORE the worker cron's 60s fetch abort (scheduler.ts) —
-    // otherwise the worker gives up first, records the job as FAILED and
-    // pushes a "❌ failed" notification even when the agent actually
-    // succeeded, and the real result (returned ~70s) is discarded. 50s leaves
-    // margin for network + response overhead under the worker's 60s patience.
+    // See JOB_DEADLINE_S — leaves margin for network + response overhead under
+    // the worker cron's 60s patience.
     const result = await Promise.race([
       agent.invoke(prompt),
-      new Promise((_, rej) => setTimeout(() => { try { agent.cancel() } catch { }; rej(new Error('job timeout')) }, 50_000)),
+      new Promise((_, rej) => setTimeout(() => { try { agent.cancel() } catch { }; rej(new Error('job timeout')) }, JOB_DEADLINE_S * 1000)),
     ])
 
     return new Response(JSON.stringify({ ok: true, result: resultText(result).slice(0, 2000) }), {

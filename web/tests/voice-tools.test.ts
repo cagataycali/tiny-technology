@@ -22,6 +22,20 @@ describe('voice tool roster', () => {
     })
   }
 
+  it('the glasses tools ride BOTH native surfaces; meta_listen rides neither', () => {
+    const ios = buildVoiceTools('tiny-ios').map((t) => t.name)
+    const android = buildVoiceTools('tiny-android').map((t) => t.name)
+    const web = buildVoiceTools('web').map((t) => t.name)
+    for (const name of ['meta_take_photo', 'meta_record_video', 'meta_glasses_status']) {
+      expect(ios).toContain(name)
+      expect(android).toContain(name)
+      expect(web).not.toContain(name)
+    }
+    // On a live call the model already hears through the glasses mic — a
+    // second tap on the same input would fight the call itself.
+    for (const names of [ios, android, web]) expect(names).not.toContain('meta_listen')
+  })
+
   it('keeps generate_image iOS-only and screenshot native-only', () => {
     const ios = buildVoiceTools('tiny-ios').map((t) => t.name)
     const android = buildVoiceTools('tiny-android').map((t) => t.name)

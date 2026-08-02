@@ -4,7 +4,7 @@ import { iconFor, EMITTED_KINDS, KIND_ICONS } from '../lib/chat/event-icons'
 
 /**
  * Pins iconFor() against the event kinds the worker actually emits
- * (chatgpt-plugin-tinyai/src/*.ts). The regression this guards: the icon map
+ * (worker/src/*.ts). The regression this guards: the icon map
  * keyed `visit` but the only visit kind is `tiny_visit`, and
  * "tiny_visit".startsWith("visit") is false — so the reserved 👀 icon was dead
  * and every page-visit row fell through to the generic ⚡ fallback.

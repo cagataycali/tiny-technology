@@ -20,6 +20,10 @@ import { ownsTiny } from '@/lib/chat/page-code-trust'
 // capability set (forged my_* tools, OpenAPI skills, use_telegram) —
 // runToolApi proxies to the Node sandbox (edge forbids new Function).
 import { runToolApi, makeForgedTools, buildDynamicTools, makeUseTelegramTool, makeUseDeviceTool, makeGenerateImageTool, makeScreenshotTool, makeMetaTakePhotoTool, makeMetaRecordVideoTool, makeMetaListenTool, makeMetaGlassesStatusTool, makeWalletTool } from '@/lib/chat/tools/platform'
+import { batchTicket, runBatchInBackground } from '@/lib/chat/tools/spawn'
+import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
+import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
 
 export const runtime = 'edge'
 export const maxDuration = 300
@@ -745,6 +749,7 @@ You are being consulted by another tiny AI (${tinyData.name}). Answer as yoursel
         system_prompt: z.string().optional().describe('Optional persona/instructions for this sub-agent'),
       })).min(1).max(SPAWN_BACKSTOP).describe('Independent tasks to run in parallel'),
       timeout_seconds: z.number().optional().describe('Per-batch timeout (default 60, max 240)'),
+      wait: z.boolean().optional().describe("default true: wait for the batch and return the merged results. false = fire-and-forget (logged-in users only): returns a batch ticket immediately, the batch keeps running in the background, and the user gets ONE notification when it finishes — results redeemable with use_device action:'result' for ~24h. Use false for big sweeps or an explicit 'in the background'."),
     }),
     callback: async (input) => {
       const timeoutMs = Math.min(Math.max((input.timeout_seconds ?? 60), 5), 240) * 1000
@@ -778,18 +783,40 @@ You are being consulted by another tiny AI (${tinyData.name}). Answer as yoursel
 
       // Concurrency pool: SPAWN_CONCURRENCY workers pull tasks off a shared
       // cursor — big batches queue instead of stampeding the model provider
-      const results: any[] = new Array(input.tasks.length)
-      let cursor = 0
-      const worker = async () => {
-        while (cursor < input.tasks.length) {
-          const i = cursor++
-          results[i] = await runTask(input.tasks[i], i)
+      const runBatch = async () => {
+        const results: any[] = new Array(input.tasks.length)
+        let cursor = 0
+        const worker = async () => {
+          while (cursor < input.tasks.length) {
+            const i = cursor++
+            results[i] = await runTask(input.tasks[i], i)
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(SPAWN_CONCURRENCY, input.tasks.length) }, worker))
+        return { results, elapsedMs: Date.now() - started }
+      }
+
+      // 🔥 Fire-and-forget (wait:false — spawn-agents-async design S2): the
+      // batch continues via after() once this response settles — same model
+      // object, same BYOK context — and its aggregate parks on the worker as
+      // a batch_* deposit: redeemed by use_device action:'result', announced
+      // by ONE push + ring event (lib/chat/tools/spawn.ts). Login required —
+      // the deposit, push, and event are all user-scoped.
+      if (input.wait === false && session?.sub) {
+        const ticket = batchTicket()
+        runBatchInBackground({ userId: session.sub, ticket, run: runBatch })
+        return {
+          ok: true, pending: true, batch_id: ticket, tasks: input.tasks.length,
+          note: `Batch launched in the background (${input.tasks.length} task${input.tasks.length === 1 ? '' : 's'}). ` +
+            `The user gets a notification when it finishes; results are redeemable with ` +
+            `use_device action:'result' envelope_id:'${ticket}' for ~24h. Tell the user it's off and running.`,
         }
       }
-      await Promise.all(Array.from({ length: Math.min(SPAWN_CONCURRENCY, input.tasks.length) }, worker))
+
+      const { results, elapsedMs } = await runBatch()
       return {
         ok: results.some(r => r.ok),
-        elapsed_ms: Date.now() - started,
+        elapsed_ms: elapsedMs,
         completed: results.filter(r => r.ok).length,
         failed: results.filter(r => !r.ok).length,
         results,
@@ -1337,6 +1364,31 @@ You are being consulted by another tiny AI (${tinyData.name}). Answer as yoursel
   // 🕶️ meta_glasses_status — instant hardware poll (link/ready/thermal).
   const metaGlassesStatusTool = makeMetaGlassesStatusTool(session?.sub)
 
+  // 💎 nicla_* — the tiny necklace (Nicla Vision). Server-round-trip via the
+  // worker relay (the necklace is a pull device) — no client executor, so
+  // these mount on EVERY surface: web, both native apps, and voice.
+  const niclaTakePhotoTool = makeNiclaTakePhotoTool(session?.sub)
+  const niclaTakeVideoTool = makeNiclaTakeVideoTool(session?.sub)
+  const niclaListenTool = makeNiclaListenTool(session?.sub)
+  const niclaStatusTool = makeNiclaStatusTool(session?.sub)
+
+  // 🎙️ nicla_voice_* — the OTHER necklace (Nicla Voice). Its own roster, not a
+  // widened nicla_* filter: no WiFi, no camera, no relay mailbox, so it can only
+  // be READ (wake events its paired phone forwarded), never commanded.
+  const niclaVoiceStatusTool = makeNiclaVoiceStatusTool(session?.sub)
+  const niclaVoiceWakesTool = makeNiclaVoiceWakesTool(session?.sub)
+  // 🎤 The recorder half: commands the paired PHONE (its mic + on-device
+  // transcription), never the board — the phone is a pull device with a real
+  // relay mailbox, so like nicla_* this works from every surface.
+  const niclaVoiceRecordTool = makeNiclaVoiceRecordTool(session?.sub)
+  const niclaVoiceTranscriptsTool = makeNiclaVoiceTranscriptsTool(session?.sub)
+  const niclaVoiceTranscriptTool = makeNiclaVoiceTranscriptTool(session?.sub)
+  // 🐬 The Flipper rides its host laptop's node, so these work from any surface
+  // — the same reach the necklace has, for hardware in another room.
+  const flipperStatusTool = makeFlipperStatusTool(session?.sub)
+  const flipperListenTool = makeFlipperListenTool(session?.sub)
+  const flipperFilesTool = makeFlipperFilesTool(session?.sub)
+
   // learn/recall/unlearn definitions live in lib/chat/tools/memory.ts
   const learnTool = makeLearnTool(session)
   const recallTool = makeRecallTool(session)
@@ -1772,6 +1824,13 @@ ${semanticOnly.length ? `Relevant to this message (semantic recall):\n${semantic
     // MediaProjection executors both verified complete); generate_image is
     // iOS-only (no Android on-device image gen yet).
     ...(isNativeApp ? [screenshotTool] : []),
+    // 💎 The necklace answers over the internet — every surface gets it.
+    niclaTakePhotoTool, niclaTakeVideoTool, niclaListenTool, niclaStatusTool,
+    // 🎙️ Read-only, and cheap: both hit the registry/event ring, not hardware.
+    niclaVoiceStatusTool, niclaVoiceWakesTool,
+    // 🎤 The recorder rides the phone's relay mailbox; transcripts are D1 reads.
+    niclaVoiceRecordTool, niclaVoiceTranscriptsTool, niclaVoiceTranscriptTool,
+    flipperStatusTool, flipperListenTool, flipperFilesTool,
     // 🗺️ Agent map controls — web only: the browser hosts the live map
     // bridge (📍 map-mode / the /map page); native map screens are modal
     // and have no bridge yet.

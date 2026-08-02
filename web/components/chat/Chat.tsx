@@ -43,6 +43,7 @@ import { EXTERNAL_MS, deadlineFor, fetchWithDeadline, isDeadlineError, isTaggedD
 import { decideDeepLink, stripDeepLinkParams } from "../../lib/chat/deep-link";
 import { decideOpenUrl, OPEN_URL_BLOCKED_NOTE, OPEN_URL_BLOCKED_TOAST, OPEN_URL_BLOCKED_ACTION } from "../../lib/chat/open-url";
 import { decideClipboardWrite, clipboardConfirmToast, clipboardNote, CLIPBOARD_DENIED_TOAST, CLIPBOARD_DENIED_NOTE } from "../../lib/chat/clipboard-write";
+import { decideUiCode } from "../../lib/chat/ui-code";
 import { useConfirm } from "./ConfirmDialog";
 import { trySlashCommand as runSlashCommand, PALETTE_COMMANDS } from "../../lib/chat/slash-commands";
 import { walletAction, priceMicroOf } from "../../lib/x402/wallet-client";
@@ -2107,12 +2108,23 @@ export default function Chat({
           return { ok: true };
         }
         case "render_ui": {
+          // The result of this case is what the voice agent NARRATES — an
+          // unconditional {ok:true, note:"rendered"} had it describe a UI
+          // that was actually a red "No component code provided" box (missing
+          // arg) or a "❌ Component Error" card (syntax error). Both are
+          // verifiable BEFORE the claim: decideUiCode requires a non-blank
+          // string and compiles it with the SAME builder DynamicUI renders
+          // from (construction parses without executing — see ui-code.ts).
+          // A refusal names the state so the model fixes the code instead of
+          // narrating a phantom; runtime throws stay the ErrorBoundary's job.
+          const u = decideUiCode(args?.componentCode);
+          if (!u.ok) return u;
           // Attach to the current voice assistant bubble — or create one if
           // the call renders UI outside a spoken turn (same shape as chat's
           // render_ui branch in processStrandsEvent).
           const ui: UIComponent = {
             id: `voice-ui-${Date.now()}`,
-            componentCode: args?.componentCode,
+            componentCode: u.code,
             props: args?.props,
             title: args?.title,
           };
@@ -2136,9 +2148,14 @@ export default function Chat({
         case "recall":
         case "unlearn":
         case "send_message":
-        case "read_messages": {
-          // Server tools (worker-backed memory + DMs) — same session-bound
-          // tool objects chat mounts, executed by /api/voice/tool.
+        case "read_messages":
+        case "nicla_take_photo":
+        case "nicla_take_video":
+        case "nicla_listen":
+        case "nicla_status": {
+          // Server tools (worker-backed memory + DMs + the 💎 necklace) —
+          // same session-bound tool objects chat mounts, executed by
+          // /api/voice/tool.
           // name: toolName — the bare `name` here is the TINY's slug (it
           // shadowed the tool name and 404'd every server tool on this
           // bridge); viaTiny stamps the sender surface for send_message.

@@ -248,7 +248,7 @@ export function walletFundsPhrase(network: EconomyNetwork): string {
  * Severity is the whole point of this column: the agent decides what to raise
  * with the user from these rows, and it cannot escalate what it reads as noise.
  */
-const EVENT_ICONS: Record<string, string> = {
+export const EVENT_ICONS: Record<string, string> = {
   job_result: '✅', job_error: '❌',
   // ⛔ not ❌: a FAILURE ran and threw, this one never ran at all and never will.
   // The agent's next sentence differs — "it failed, here's why" vs "it never
@@ -269,6 +269,16 @@ const EVENT_ICONS: Record<string, string> = {
   // should be able to tell "you were paid" from "your payout landed" from "your
   // payout bounced and came back" — three very different things to say next.
   pay_earned: '💵', pay_received: '💰', pay_withdrawn: '🏦', pay_refunded: '↩️',
+  // 🤖/💻 Backgrounded work that finished after its stream closed — a
+  // spawn_agents wait:false fleet and a daemon's use_tasks completion. Both
+  // carry an envelope_id the agent has to go and READ with use_device
+  // action:'result', so of every row in this block these two are the ones with
+  // an actual next step in them, and both arrived tagged ℹ. The HUD tables get
+  // these for free from their `batch`/`device` PREFIX keys (event-icons.ts);
+  // this table is exact-match by design, so a prefix that covers one kind
+  // covers nothing else, and the roster grew twice without it.
+  batch_result: '🤖',
+  device_task_result: '💻',
 }
 
 export function buildSoulPrompt(inp: SoulPromptInputs): string {

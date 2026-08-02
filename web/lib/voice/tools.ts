@@ -24,6 +24,9 @@ import {
 } from '@/lib/chat/tools/client-side'
 import { makeLearnTool, makeRecallTool, makeUnlearnTool } from '@/lib/chat/tools/memory'
 import { makeSendMessageTool, makeReadMessagesTool } from '@/lib/chat/tools/messages'
+import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
+import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
 
 export type RealtimeTool = {
   type: 'function'
@@ -66,6 +69,26 @@ export function buildVoiceTools(sessionType: string): RealtimeTool[] {
     makeUnlearnTool(null),
     makeSendMessageTool(null),
     makeReadMessagesTool(null),
+    // 💎 The necklace (Nicla Vision) — server round-trip via the relay, so
+    // voice is a natural surface ("what's in front of me?" spoken aloud).
+    // Factories with null: only schemas are read; /api/voice/tool executes.
+    makeNiclaTakePhotoTool(null),
+    makeNiclaTakeVideoTool(null),
+    makeNiclaListenTool(null),
+    makeNiclaStatusTool(null),
+    // 🎙️ The voice necklace — the board is read-only (no WiFi, no camera, no
+    // relay), so the spoken question it answers is "did my necklace hear
+    // anything?". The recorder commands the paired PHONE's mic instead, and the
+    // transcript tools read what it stored. Same null-factory rule: schemas
+    // only; /api/voice/tool executes.
+    makeNiclaVoiceStatusTool(null),
+    makeNiclaVoiceWakesTool(null),
+    makeNiclaVoiceRecordTool(null),
+    makeNiclaVoiceTranscriptsTool(null),
+    makeNiclaVoiceTranscriptTool(null),
+    makeFlipperStatusTool(null),
+    makeFlipperListenTool(null),
+    makeFlipperFilesTool(null),
   ].map(fromStrands)
   if (native) {
     // Round-trip media tools: the device executes (consent-gated capture /
@@ -88,14 +111,14 @@ export function buildVoiceTools(sessionType: string): RealtimeTool[] {
         additionalProperties: false,
       },
     })
-    // On-device generation is iOS-only (ImageCreator / Apple Intelligence);
-    // Android chat runs generate_image server-side, which the voice bridge
-    // doesn't reach yet — don't advertise a tool the device can't answer.
-    if (sessionType === 'tiny-ios') {
-      // 🕶️ Glasses photo — voice is the NATURAL surface for this tool
-      // ("what am I looking at?" is a spoken question). The device answers
-      // fast and honestly when no glasses are linked/worn, so advertising it
-      // unconditionally on iOS never strands the model.
+    // 🕶️ Glasses photo — voice is the NATURAL surface for this tool
+    // ("what am I looking at?" is a spoken question). BOTH native surfaces
+    // execute these locally in their voice tool bridges (iOS ChatModel
+    // voiceMetaTakePhoto; Android MainActivity runVoiceTool) — the device
+    // answers fast and honestly when no glasses are linked/worn, so
+    // advertising them unconditionally on a native surface never strands
+    // the model.
+    {
       roster.push({
         type: 'function',
         name: 'meta_take_photo',
@@ -133,6 +156,11 @@ export function buildVoiceTools(sessionType: string): RealtimeTool[] {
           "Check the user's Meta AI glasses right now: linked, connected/ready for capture, device names, thermal, whether a recording is running. Instant.",
         parameters: { type: 'object', properties: {}, additionalProperties: false },
       })
+    }
+    // On-device generation is iOS-only (ImageCreator / Apple Intelligence);
+    // Android chat runs generate_image server-side, which the voice bridge
+    // doesn't reach yet — don't advertise a tool the device can't answer.
+    if (sessionType === 'tiny-ios') {
       roster.push({
         type: 'function',
         name: 'generate_image',

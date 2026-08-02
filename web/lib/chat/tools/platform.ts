@@ -13,8 +13,10 @@ import { z } from 'zod'
 import { validatePublicUrl, usd } from '@/lib/utils'
 import { sanitizeToolName } from '@/lib/chat/tool-filter'
 
-const WORKER = 'https://plugin.tiny.technology'
-const ikey = () => ({
+// Exported: lib/chat/tools/spawn.ts rides the same internal-key channel for
+// its batch deposits/announcements — one WORKER constant, one header shape.
+export const WORKER = 'https://plugin.tiny.technology'
+export const ikey = () => ({
   'Content-Type': 'application/json',
   'X-Internal-Key': process.env.INTERNAL_API_KEY || '',
 })
@@ -148,12 +150,17 @@ export const buildDynamicTools = (fns: any[]) => {
  * (shell/files/mesh), replies; we poll for the reply up to ~45s (nested
  * under the route's agent timeout — AGENTS.md §14).
  *
- * ASYNC CONTRACT (e2e report §3.1): a slow device is NOT a failure. The
- * worker mailbox keeps the device's reply for ~1h (relay.ts SWEEP_AGE_S)
- * whether or not anyone is still waiting — before this contract the 45s
- * timeout returned a dead-end error and the late reply rotted unread. Now
- * invoke times out into { pending: true, envelope_id } and action:'result'
- * re-polls that envelope — same turn, a later turn, or a later conversation.
+ * ASYNC CONTRACT (e2e report §3.1 + use_device async P1/P2): a slow device is
+ * NOT a failure. The worker mailbox keeps the device's reply for ~24h
+ * (relay.ts SWEEP_SETTLED_AGE_S, a repeatable read) whether or not anyone is
+ * still waiting — before this contract the 45s timeout returned a dead-end
+ * error and the late reply rotted unread. Now invoke times out into
+ * { pending: true, envelope_id } and action:'result' re-polls that envelope —
+ * same turn, a later turn, or a later conversation. A reply landing after the
+ * 45s budget also PUSHES (worker relay.ts buildDeviceResultPush): web push +
+ * banner envelopes to the user's fresh phones, so nobody has to remember to
+ * ask. wait:false skips the poll entirely — fire-and-forget for tasks the
+ * user explicitly wants running in the background.
  *
  * MEDIA CONTRACT (loop item d-d): a device turn that produced images (its
  * use_computer screenshot, an image it generated) uploads them to the media
@@ -211,12 +218,13 @@ export async function deviceReplyBlocks(
 
 export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
   name: 'use_device',
-  description: "Reach the user's enrolled devices — laptops/daemons from `npx tiny-tech`, and `endpoint` devices, which are machines running their own always-on authenticated API (a 3D printer, a robot). Endpoint devices are invoked exactly the same way, but their reachability is unknown until you call them (online:null, not offline), and they answer synchronously with no pending ticket. action:'list' shows devices with online/offline presence. action:'invoke' sends a prompt to a device — its LOCAL agent executes (real shell, real files, its zenoh mesh) and the answer comes back here; it waits up to ~45s, and a slower task returns pending:true with an envelope_id instead of failing (the device keeps working). action:'result' with that envelope_id fetches the finished result — available for ~1 hour, so you can check later in the conversation or tell the user it will be ready shortly. If the device made images during the turn (e.g. a Mac with the `computer` capability screenshotting its own screen), they come back here as images you can SEE plus hosted URLs — so ask a device to look at its screen when the question is about what's on it. Only the owner's devices are reachable; prefer online devices.",
+  description: "Reach the user's enrolled devices — laptops/daemons from `npx tiny-tech`, and `endpoint` devices, which are machines running their own always-on authenticated API (a 3D printer, a robot). Endpoint devices are invoked exactly the same way, but their reachability is unknown until you call them (online:null, not offline), and they answer synchronously with no pending ticket. action:'list' shows devices with online/offline presence. action:'invoke' sends a prompt to a device — its LOCAL agent executes (real shell, real files, its zenoh mesh) and the answer comes back here; it waits up to ~45s, and a slower task returns pending:true with an envelope_id instead of failing (the device keeps working, and the user gets a push notification when it finishes). For a task that is clearly long (builds, downloads, big analyses) or when the user says to run it in the background / fire-and-forget, pass wait:false — the envelope_id comes back immediately and the notification closes the loop. action:'result' with that envelope_id fetches the finished result — kept ~24 hours and re-readable, so you can check this conversation, a later one, or after the user taps the notification. If the device made images during the turn (e.g. a Mac with the `computer` capability screenshotting its own screen), they come back here as images you can SEE plus hosted URLs — so ask a device to look at its screen when the question is about what's on it. Only the owner's devices are reachable; prefer online devices.",
   inputSchema: z.object({
     action: z.enum(['list', 'invoke', 'result']),
     device_id: z.string().optional().describe('Target device id (from list). Required for invoke.'),
     prompt: z.string().optional().describe('What the device agent should do. Required for invoke.'),
-    envelope_id: z.string().optional().describe("Envelope id from a pending invoke. Required for action:'result'."),
+    envelope_id: z.string().optional().describe("Envelope id from a pending invoke (or a batch_* ticket from spawn_agents wait:false — background fleets park their results in the same mailbox). Required for action:'result'."),
+    wait: z.boolean().optional().describe("invoke only (default true): wait up to ~45s for the answer. false = fire-and-forget — return the pending ticket immediately; the user is notified when the device finishes. Use false for long tasks or an explicit 'in the background'. Ignored for endpoint devices (they answer synchronously)."),
   }),
   callback: async (input) => {
     if (!userId) return { ok: false, note: 'Login required — devices belong to the user account.' }
@@ -272,12 +280,13 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
       if (!input.envelope_id) return { ok: false, error: "envelope_id required for action:'result'" }
       const reply = await recvReply(input.envelope_id)
       if (reply) return await shape(reply, { envelope_id: input.envelope_id })
-      // At-most-once delivery: an envelope that was already read (or swept
-      // after ~1h) polls the same as still-running — say both, so the agent
-      // neither retries forever nor mislabels a delivered task as lost.
+      // A missing reply means still-running OR swept (>24h) — say both, so the
+      // agent neither retries forever nor mislabels a delivered task as lost.
+      // (The read itself is repeatable: the worker never consumes reply rows,
+      // so re-fetching within the window always works.)
       return {
         ok: true, pending: true, envelope_id: input.envelope_id,
-        note: 'No result yet — the task may still be running. Replies are delivered once and kept ~1h; if this result was already fetched earlier in the conversation, it will not appear again.',
+        note: 'No result yet — the task may still be running (the user gets a notification when it finishes). Replies are kept ~24h and can be re-read within that window; a result older than a day has been swept.',
       }
     }
 
@@ -334,6 +343,19 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
     }).then(r => r.json()).catch(e => ({ error: String(e) }))
     if (sent.error || !sent.id) return { ok: false, error: sent.error || 'send failed' }
 
+    // 1b. 🔥 Fire-and-forget (wait:false): hand back the claim ticket without
+    //     burning the turn's 45s. The worker pushes a notification when the
+    //     reply lands (relay.ts buildDeviceResultPush), so "run it in the
+    //     background on my Mac" closes its own loop; action:'result' redeems
+    //     anytime within the ~24h window. Only an explicit false skips the
+    //     wait — an omitted flag keeps the old contract for quick asks.
+    if (input.wait === false) {
+      return {
+        ok: true, pending: true, background: true, device_id: input.device_id, envelope_id: sent.id,
+        note: `Task delivered — running in the background. The user will get a notification when the device finishes; you can also fetch it with use_device action:'result' envelope_id:'${sent.id}' (kept ~24h). Tell the user it's off and running.`,
+      }
+    }
+
     // 2. poll for the reply (≤45s: 15 × 3s — inside the route's 300s budget,
     //    and inside job-run's 50s when a scheduled job uses this tool)
     for (let i = 0; i < 15; i++) {
@@ -342,10 +364,10 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
       if (reply) return await shape(reply, { device_id: input.device_id, envelope_id: sent.id })
     }
     // 3. NOT a failure — hand back the claim ticket. The device is still
-    //    working and its reply will sit in the worker mailbox for ~1h.
+    //    working, its reply keeps ~24h, and its arrival pushes a notification.
     return {
       ok: true, pending: true, device_id: input.device_id, envelope_id: sent.id,
-      note: `No reply within 45s — the device is likely still working (or offline: check use_device action:'list'). The task was delivered; fetch the outcome with use_device action:'result' envelope_id:'${sent.id}' later in this conversation, or tell the user the result will be ready shortly.`,
+      note: `No reply within 45s — the device is likely still working (or offline: check use_device action:'list'). The task was delivered and the user will get a notification when it finishes; fetch the outcome with use_device action:'result' envelope_id:'${sent.id}' anytime in the next ~24h, or tell the user the result will be ready shortly.`,
     }
   },
 })
@@ -630,10 +652,15 @@ export const makeMetaListenTool = (userId: string | null | undefined) => tool({
       try { p = JSON.parse(raw) } catch { return { ok: false, error: 'device posted an unreadable result' } }
       if (!p?.ok) return { ok: false, error: String(p?.error || 'listening failed on the device') }
       const transcript = String(p.transcript || '').trim()
+      // Which microphone actually heard this — "bluetooth" = the glasses (or
+      // a paired headset), "phone" = the phone's own mic. Android posts it
+      // (BtMic.kt); dropping it here made the agent claim glasses audio it
+      // never had.
+      const micRoute = typeof p.micRoute === 'string' ? p.micRoute : undefined
       if (!transcript) {
-        return { ok: true, transcript: '', note: String(p.note || 'Heard nothing — silence, or the glasses mic was not the active audio route.') }
+        return { ok: true, transcript: '', ...(micRoute ? { micRoute } : {}), note: String(p.note || 'Heard nothing — silence, or the glasses mic was not the active audio route.') }
       }
-      return { ok: true, transcript, note: 'On-device transcript of what the glasses heard — the audio itself never left the phone.' }
+      return { ok: true, transcript, ...(micRoute ? { micRoute } : {}), note: 'On-device transcript of what the glasses heard — the audio itself never left the phone.' }
     }
     return { ok: false, error: 'The glasses did not answer within 90s — they may be off, out of range, or the app went to background.' }
   },

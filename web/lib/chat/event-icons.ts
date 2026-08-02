@@ -43,6 +43,10 @@ export const KIND_ICONS: Record<string, string> = {
   device_missed: "🚫", pay_alarm: "🚨",
   pay_earned: "💵", pay_received: "💰", pay_withdrawn: "🏦", pay_refunded: "↩️",
   push: "🔔", share: "🔗", tool: "🔧", follow: "🤝", dm: "💬",
+  // 🤖 `batch` covers `batch_result` — a spawn_agents wait:false fleet that
+  // finished after its stream closed (lib/chat/tools/spawn.ts). Same story as
+  // 💻: the ring is where a background completion surfaces.
+  batch: "🤖",
 };
 
 /**
@@ -85,6 +89,14 @@ export const EMITTED_KINDS = [
   // invoke envelope no device ever polled, now past the relay's retention
   // window. use_device had already promised "The task was delivered".
   "device_missed",
+  // 🤖 APP-emitted (not worker emitEvent): lib/chat/tools/spawn.ts posts it
+  // through the worker's POST /events when a wait:false batch completes —
+  // the one roster entry whose grep target is this repo, not the worker.
+  "batch_result",
+  // 💻 relay.ts RelayTaskResultCall — a daemon's use_tasks completion (the
+  // offloaded half of "trigger and forget on the Mac"). The `device` prefix
+  // key already renders it 💻 on every surface.
+  "device_task_result",
 ] as const;
 
 /**

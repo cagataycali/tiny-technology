@@ -3,6 +3,7 @@
 import { useMemo } from "react";
 import * as Recharts from "recharts";
 import React from "react";
+import { buildUiComponentFunction } from "@/lib/chat/ui-code";
 
 type UIComponentProps = {
   id: string;
@@ -24,28 +25,16 @@ export default function DynamicUI({
     }
 
     try {
-      // Create a component function that returns the evaluated code.
-      // Make createElement available as h for convenience.
-      //
-      // 🔒 Realm shadowing (defense-in-depth, same posture as
-      // lib/user-tools' frozen scope): the trailing params shadow the page
-      // globals agent code must never reach — localStorage holds BYOK keys,
-      // fetch/XHR exfiltrate, document/window walk to both. A chart needs
-      // React + recharts and nothing else. Shares already strip
-      // uiComponents at every boundary; this closes the naive channel if
-      // any foreign componentCode ever slips through a future path.
-      const componentFunction = new Function(
-        'React',
-        'recharts',
-        'localStorage', 'sessionStorage', 'document', 'window',
-        'globalThis', 'fetch', 'XMLHttpRequest', 'navigator', 'cookieStore',
-        `
-        "use strict";
-        const { useState, useEffect, useMemo, useCallback, useRef, createElement: h } = React;
-        const createElement = React.createElement;
-        return ${componentCode};
-        `
-      );
+      // Build the component function from the shared compiler. The realm
+      // shadows (defense-in-depth, same posture as lib/user-tools' frozen
+      // scope — localStorage holds BYOK keys, fetch/XHR exfiltrate,
+      // document/window walk to both) live in lib/chat/ui-code.ts's
+      // UI_SHADOW_PARAMS, ONE implementation shared with the voice bridge's
+      // pre-append verification, so "compiles there" and "compiles here"
+      // cannot drift apart. Shares already strip uiComponents at every
+      // boundary; the shadows close the naive channel if any foreign
+      // componentCode ever slips through a future path.
+      const componentFunction = buildUiComponentFunction(componentCode);
 
       // Only the two real capabilities are passed; the shadows stay undefined.
       const Component = componentFunction(React, Recharts);

@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
-import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, type SoulPromptInputs } from '../lib/chat/prompt'
+import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, type SoulPromptInputs } from '../lib/chat/prompt'
 import { EMITTED_KINDS } from '../lib/chat/event-icons'
 
 const base: SoulPromptInputs = {
@@ -63,6 +63,23 @@ describe('buildSoulPrompt', () => {
       // would also satisfy the assertion above.
       expect(p, `${kind} is missing from the events block`).toContain(`${kind}: d`)
     }
+  })
+
+  /**
+   * The same roster, read from the other end — and the reason the check above
+   * went red on main for two kinds in a row instead of one.
+   *
+   * `EVENT_ICONS` is exact-match, so it gets nothing for free: `device` covering
+   * `device_result` AND `device_task_result` is a property of the HUD's prefix
+   * matcher, not of this table. That asymmetry is invisible when you add a kind —
+   * you glance at event-icons.ts, see `batch`/`device` already there, and the
+   * agent's own copy stays behind. So both directions are pinned: a kind with no
+   * entry (renders ℹ) and an entry for no kind (a glyph that can never render,
+   * which is the tiny_visit bug wearing the other hat — dead code that reads as
+   * coverage).
+   */
+  it('the agent icon table IS the roster — no kind unmapped, no glyph unreachable', () => {
+    expect([...Object.keys(EVENT_ICONS)].sort()).toEqual([...EMITTED_KINDS].sort())
   })
 
   it('pay_alarm reads as an emergency in the prompt, distinctly from every other kind', () => {
@@ -151,20 +168,20 @@ describe('soul prompt — embodiment (tiny-node)', () => {
  * The daemon declares what it can actually do (tiny-tech device.ts
  * buildCapabilities: the base mcp/files pair plus one label per tool
  * makeDeviceTools() registered) and the worker has always stored + returned it.
- * The agent's prompt never showed it — so "cagatay-mbp (cli, darwin-arm64, 🟢
+ * The agent's prompt never showed it — so "studio-mbp (cli, darwin-arm64, 🟢
  * ONLINE)" was all it had, and it had to GUESS whether that machine could drive
  * a screen, notify its human or reach a mailbox. Guessing wrong fails 45s later,
  * remotely, with nothing explaining why.
  */
 describe('buildDeviceBlock — capabilities reach the agent', () => {
   const mac = {
-    id: 'dev_1', name: 'cagatay-mbp', kind: 'cli', platform: 'darwin-arm64', online: 1,
+    id: 'dev_1', name: 'studio-mbp', kind: 'cli', platform: 'darwin-arm64', online: 1,
     capabilities: JSON.stringify(['mcp', 'files', 'apple', 'computer', 'desktop']),
   }
 
   it('renders presence, id, and what the device can actually do', () => {
     const b = buildDeviceBlock([mac])
-    expect(b).toContain('cagatay-mbp')
+    expect(b).toContain('studio-mbp')
     expect(b).toContain('🟢 ONLINE')
     expect(b).toContain('[id: dev_1]')
     expect(b).toContain('sees + drives the screen (use_computer)')

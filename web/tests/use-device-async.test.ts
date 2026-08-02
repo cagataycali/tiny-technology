@@ -88,7 +88,7 @@ describe('use_device async contract', () => {
     expect(out).toEqual({ ok: true, envelope_id: 'env_slow', result: 'build finished: 0 errors' })
   })
 
-  it("action:'result' on a still-running task stays pending (and says why it might never appear)", async () => {
+  it("action:'result' on a still-running task stays pending (notification promised, 24h window)", async () => {
     responder = (url) => {
       if (url.includes('/device/relay/recv')) return { reply: null }
       throw new Error(`unexpected ${url}`)
@@ -97,7 +97,54 @@ describe('use_device async contract', () => {
     expect(out.ok).toBe(true)
     expect(out.pending).toBe(true)
     expect(out.envelope_id).toBe('env_slow')
-    expect(out.note).toMatch(/kept ~1h/)
+    // The retention window matches the worker's SWEEP_SETTLED_AGE_S (24h) and
+    // the P1 push closes the loop — the old "delivered once, kept ~1h" wording
+    // was doubly wrong post-591293a (recv is a repeatable read).
+    expect(out.note).toMatch(/kept ~24h/)
+    expect(out.note).toContain('notification')
+    expect(out.note).not.toMatch(/~1h|delivered once/)
+  })
+
+  it('wait:false is fire-and-forget: the ticket returns immediately, zero polls, zero timers', async () => {
+    responder = (url) => {
+      if (url.includes('/device/relay/send')) return { id: 'env_bg' }
+      // kind resolution may probe /device/list; anything else is a bug
+      if (url.includes('/device/list')) return { devices: [] }
+      throw new Error(`unexpected ${url}`)
+    }
+    // NO settled(): the promise must resolve without any timer advancement —
+    // that IS the feature (the 45s poll never starts).
+    const out = await invoke({ action: 'invoke', device_id: 'dev_1', prompt: 'nightly build', wait: false })
+    expect(out.ok).toBe(true)
+    expect(out.pending).toBe(true)
+    expect(out.background).toBe(true)
+    expect(out.envelope_id).toBe('env_bg')
+    // The note must promise the notification AND teach the redeem move.
+    expect(out.note).toContain('notification')
+    expect(out.note).toContain("action:'result'")
+    expect(out.note).toContain('env_bg')
+    expect(calls.filter(c => c.url.includes('/device/relay/recv'))).toHaveLength(0)
+  })
+
+  it('wait:false still hard-errors when the send itself failed — no false pending', async () => {
+    responder = (url) => {
+      if (url.includes('/device/relay/send')) return { error: 'device not found' }
+      if (url.includes('/device/list')) return { devices: [] }
+      throw new Error(`unexpected ${url}`)
+    }
+    const out = await invoke({ action: 'invoke', device_id: 'nope', prompt: 'x', wait: false })
+    expect(out).toEqual({ ok: false, error: 'device not found' })
+  })
+
+  it('wait:false on an ENDPOINT device is ignored — robots answer synchronously, no ticket exists', async () => {
+    responder = (url) => {
+      if (url.includes('/device/list')) return { devices: [{ id: 'bot_1', kind: 'endpoint' }] }
+      if (url.includes('/device/endpoint/call')) return { result: { reply: 'printer says hi' } }
+      throw new Error(`unexpected ${url}`)
+    }
+    const out = await invoke({ action: 'invoke', device_id: 'bot_1', prompt: 'status?', wait: false })
+    expect(out).toEqual({ ok: true, device_id: 'bot_1', result: 'printer says hi' })
+    expect(calls.some(c => c.url.includes('/device/relay/send'))).toBe(false)
   })
 
   it("action:'result' without envelope_id is a usage error", async () => {

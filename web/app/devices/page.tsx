@@ -19,6 +19,7 @@ import { useConfirm } from "../../components/chat/ConfirmDialog";
 import { IconCpu, IconGlobe, IconDevice } from "../../components/chat/icons";
 import { relativeAgo } from "../../lib/relative-time";
 import { deadlineFor } from "../../lib/deadlines";
+import { revokeMessage } from "../../lib/devices/revoke-message";
 
 type Device = {
   id: string;
@@ -50,6 +51,25 @@ const KIND_ICON: Record<string, (p: { className?: string }) => React.ReactNode> 
 
 // A device with a malformed/absent `last_seen` reads "never" (fallback).
 const relativeSeen = (sec?: number) => relativeAgo(sec, "never");
+
+// 🔴 How long a camera frame may go unrefreshed and still be called "live".
+// Three ticks of the 2s snapshot poll: one dropped frame is ordinary on a robot's
+// own webcam and must not flicker the badge, three in a row is a stall.
+// iOS parity: `FrameLiveness.staleAfter` in ios/Tiny/Sources/EndpointPanel.swift.
+const STALE_AFTER_MS = 6_000;
+
+// 🕒 When a frame was taken. iOS parity (`ReadingAge.asOf`), and the same three
+// choices: SECONDS, because two frames a minute apart must not share a stamp; an
+// INSTANT rather than "4m ago", which would need a timer of its own to stay true;
+// and the DAY only when it isn't today — a tab left open overnight comes back
+// holding last night's picture of the chamber.
+const asOfClock = (ms: number, nowMs: number = Date.now()) => {
+  const at = new Date(ms);
+  const clock = at.toLocaleTimeString();
+  return at.toDateString() === new Date(nowMs).toDateString()
+    ? `as of ${clock}`
+    : `as of ${at.toLocaleDateString(undefined, { day: "numeric", month: "short" })}, ${clock}`;
+};
 
 // Presence has three states, and only one of them is a boolean question.
 // `null` = an endpoint device: no heartbeat exists to read, so neither "online"
@@ -137,7 +157,19 @@ function EndpointPanel({ device, accent }: { device: Device; accent: string }) {
   const [telemetry, setTelemetry] = useState<any | null>(null);
   const [note, setNote] = useState("");
   const [frameSrc, setFrameSrc] = useState("");
-  const [camState, setCamState] = useState<"idle" | "live" | "failed">("idle");
+  // "loaded", NOT "live": this state only says whether a frame has ever decoded,
+  // which is what decides between the two overlays. Calling it "live" is how the
+  // badge came to claim liveness — `onError` deliberately preserves this state so
+  // a dropped frame doesn't flash an empty box, and the badge read it as proof the
+  // view was current. Freshness is `frameLive` below, and it is a different fact.
+  const [camState, setCamState] = useState<"idle" | "loaded" | "failed">("idle");
+  // Whether the frame on screen is recent enough to call live. Republished by
+  // every tick rather than derived at render time, because a stopped camera
+  // produces no renders — the badge would freeze along with the picture.
+  const [frameLive, setFrameLive] = useState(false);
+  const [frameAt, setFrameAt] = useState(0);
+  // The tick reads the stamp without re-subscribing the effect to it.
+  const frameAtRef = useRef(0);
   const hasCamera = hasCap(device, "camera") || hasCap(device, "print");
 
   // Poll telemetry. `alive` guards the async gap: a device revoked (or the
@@ -195,6 +227,11 @@ function EndpointPanel({ device, accent }: { device: Device; accent: string }) {
       // `t` is what forces the refetch: without it the URL is identical and the
       // browser serves the same frame forever, no-store notwithstanding.
       setFrameSrc(`/api/devices/endpoint?deviceId=${encodeURIComponent(device.id)}&action=snapshot&t=${Date.now()}_${n++}`);
+      // Age the frame on the same schedule that refreshes it. This runs on the
+      // tick rather than in `onError`, because the failures that matter most are
+      // the ones the <img> never reports: a request that hangs past the deadline
+      // fires neither handler, and the badge would sit on "live" indefinitely.
+      setFrameLive(Date.now() - frameAtRef.current < STALE_AFTER_MS);
     };
     tick();
     const t = setInterval(tick, 2_000);
@@ -235,35 +272,60 @@ function EndpointPanel({ device, accent }: { device: Device; accent: string }) {
               // optimize/cache a URL whose whole purpose is to change every 2s.
               <img
                 src={frameSrc}
-                alt={`Live camera view from ${device.name}`}
+                // Screen readers get the badge's claim, not a better one: this
+                // said "Live camera view" over a frozen frame, which is the same
+                // falsehood with the volume up — there is no still picture for a
+                // screen-reader user to notice.
+                alt={
+                  frameLive
+                    ? `Live camera view from ${device.name}`
+                    : `Last camera frame from ${device.name}`
+                }
                 className="w-full h-full object-cover"
                 // The <img> is the only place that knows whether the bytes were
                 // really an image: a JSON error body fails to decode and fires
                 // onError, which is what flips the overlay to "unavailable".
-                onLoad={() => setCamState("live")}
-                onError={() => setCamState((s) => (s === "live" ? "live" : "failed"))}
+                onLoad={() => {
+                  const t = Date.now();
+                  frameAtRef.current = t;
+                  setFrameAt(t);
+                  setFrameLive(true);
+                  setCamState("loaded");
+                }}
+                onError={() => setCamState((s) => (s === "loaded" ? "loaded" : "failed"))}
               />
             )}
           </div>
-          {camState !== "live" && (
+          {camState !== "loaded" && (
             <div className="absolute inset-0 flex items-center justify-center text-xs text-gray-500">
               {camState === "failed" ? "Camera unavailable" : "Connecting to camera…"}
             </div>
           )}
-          {camState === "live" && (
+          {camState === "loaded" && (
             <span
               className="absolute top-2 left-2 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-medium"
-              style={{ background: "rgba(0,0,0,0.6)", color: running ? accent : "#d0d0d0" }}
+              // Tinted only while the job is running AND the view is live: an
+              // accent-lit "live" over last night's frame is the loudest form of
+              // the lie this fixes.
+              style={{ background: "rgba(0,0,0,0.6)", color: frameLive && running ? accent : "#d0d0d0" }}
             >
               <span
                 aria-hidden
                 className="inline-block w-1.5 h-1.5 rounded-full"
-                style={{ background: running ? accent : "#8a8a8a" }}
+                style={{ background: frameLive && running ? accent : "#8a8a8a" }}
               />
-              live
+              {frameLive ? "live" : "last frame"}
             </span>
           )}
         </div>
+      )}
+
+      {/* 🕒 A frame that stopped refreshing says WHEN it was taken — the same
+          sentence the app's other device readings use. Only once it is stale
+          (while live, the badge already answers it) and only with a stamp to
+          show, so an age never appears without the frame it dates. */}
+      {hasCamera && !frameLive && frameAt > 0 && (
+        <p className="text-[11px] text-gray-500">{asOfClock(frameAt)}</p>
       )}
 
       {rows.length > 0 && (
@@ -413,14 +475,23 @@ export default function DevicesPage() {
         body: JSON.stringify({ deviceId: d.id }),
         signal: AbortSignal.timeout(deadlineFor("/api/devices")),
       });
-      const data = await res.json();
-      if (!data.ok) {
-        setError(data.error || "Revoke failed.");
+      // `.catch(() => null)` because a non-JSON body is exactly what an edge blip
+      // or a mid-redeploy HTML error page sends, and letting that throw would
+      // report the outage as "Revoke failed — try again." with no code at all.
+      const data = await res.json().catch(() => null);
+      const failure = revokeMessage(res.status, data);
+      if (failure) {
+        setError(failure);
         return;
       }
+      // Only now: a row that vanished from the list while its token still worked
+      // would be the worst outcome available here.
       setDevices((prev) => prev.filter((x) => x.id !== d.id));
     } catch {
-      setError("Revoke failed — try again.");
+      // The fetch threw — an aborted deadline or a dropped connection. Status 0
+      // is the house code for "no response", so the reason comes from the same
+      // table as every other failure rather than a second sentence.
+      setError(revokeMessage(0, null));
     } finally {
       setRevoking(null);
     }
@@ -581,10 +652,10 @@ export default function DevicesPage() {
                 ref={nameRef}
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
-                placeholder="Device name (e.g. cagatay-macbook)"
+                placeholder="Device name (e.g. studio-macbook)"
                 maxLength={64}
                 // Identifier, not prose: iOS would autocapitalize/correct
-                // "cagatay-macbook" → "Cagatay-MacBook", mismatching the name
+                // "studio-macbook" → "Studio-MacBook", mismatching the name
                 // in ~/.tiny/device.json and shell muscle memory. Same attrs
                 // as the wallet address / claim-tx / onboarding key inputs.
                 autoComplete="off"

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * The enroll input takes an IDENTIFIER, not prose — iOS autocapitalize/
- * autocorrect would turn "cagatay-macbook" into "Cagatay-MacBook", and the
+ * autocorrect would turn "studio-macbook" into "Studio-MacBook", and the
  * enrolled name then mismatches ~/.tiny/device.json and shell muscle memory.
  * Same attribute set as the wallet address / claim-tx / onboarding key inputs.
  */
