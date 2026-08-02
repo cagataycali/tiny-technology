@@ -2357,6 +2357,138 @@ import Foundation
     }
 }
 
+@Suite struct MemoryForgetVerdictTests {
+
+    private let listed = ["100", "101", "102"]
+
+    // ── the list can see ──────────────────────────────────────────────────
+
+    @Test("a memory that is gone says nothing — even when the DELETE 404'd")
+    func goneIsGone() {
+        // The headline defect. 404 = "no memory with id 100": already closed
+        // elsewhere, or superseded by the agent. The list agrees it is gone.
+        let v = ForgetVerdict.message(
+            id: "100",
+            serverSaid: Api.httpMessage(404, "no memory with id 100"),
+            reloaded: .loaded,
+            listed: ["101", "102"])
+        #expect(v == nil, "a memory the list no longer holds must not carry a red caption")
+    }
+
+    @Test("a memory still listed after the reload is reported as still there")
+    func stillListedIsHonest() {
+        let v = ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loaded, listed: listed)
+        #expect(v == ForgetVerdict.stillThere)
+        // Even a 2xx does not get to claim success over a list that disagrees.
+        #expect(v != nil)
+    }
+
+    @Test("when it is still there, the server's own sentence is the better one")
+    func theServerExplainsWhenItCan() {
+        // inc 29 put copy written for a HUMAN in the 400 body precisely so a
+        // client could show it; iOS was reading only the status code.
+        let human = "That memory's id didn't come through, so nothing was deleted. Reload Memory and try the swipe again."
+        let v = ForgetVerdict.message(
+            id: "100", serverSaid: Api.httpMessage(400, human), reloaded: .loaded, listed: listed)
+        #expect(v?.contains("nothing was deleted") == true)
+        #expect(v != ForgetVerdict.stillThere, "the generic retry buried an actionable refusal")
+    }
+
+    @Test("with the list readable, the status code gets no vote")
+    func theListOutranksTheCode() {
+        // The whole increment, as one assertion: hold the observation fixed and
+        // vary the transport answer — the verdict must not move.
+        for said in [nil, Api.httpMessage(404, "no memory with id 999"),
+                     Api.httpMessage(500, "boom"), "The Internet connection appears to be offline."] {
+            #expect(ForgetVerdict.message(id: "999", serverSaid: said, reloaded: .loaded,
+                                          listed: listed) == nil,
+                    "absent from the list is absent, whatever the DELETE reported")
+        }
+    }
+
+    @Test("an id is matched exactly, so 10 is not 100")
+    func idsMatchWhole() {
+        // Guards against the classic slip of asking a joined string whether it
+        // "contains" the id: "10" is a substring of "100" and of "102".
+        #expect(ForgetVerdict.message(id: "10", serverSaid: nil, reloaded: .loaded,
+                                      listed: listed) == nil)
+        #expect(ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loaded,
+                                      listed: listed) == ForgetVerdict.stillThere)
+    }
+
+    // ── the list cannot see ───────────────────────────────────────────────
+
+    @Test("a failed reload after a SUCCESSFUL delete does not invent doubt")
+    func aConfirmedDeleteIsNotUnconfirmed() {
+        // The server said 2xx. The `.failed` branch already shows why the list is
+        // stale and offers Retry; a second, contradictory caption is noise.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: nil,
+                                      reloaded: .failed("memories unavailable"),
+                                      listed: listed) == nil)
+    }
+
+    @Test("a failed delete with no list to check is UNKNOWN, not a failure")
+    func noEvidenceMeansNoClaim() {
+        let v = ForgetVerdict.message(id: "100", serverSaid: "The request timed out.",
+                                      reloaded: .failed("memories unavailable"), listed: listed)
+        #expect(v != nil)
+        // It may not assert the memory survived — we did not look.
+        #expect(v?.contains("Still in your memories") == false)
+    }
+
+    @Test("a reason survives an unreadable list")
+    func theReasonIsNotLostWithTheList() {
+        let human = "That memory's id didn't come through, so nothing was deleted. Reload Memory."
+        let v = ForgetVerdict.message(id: "100", serverSaid: Api.httpMessage(400, human),
+                                      reloaded: .failed("memories unavailable"), listed: listed)
+        #expect(v?.contains("nothing was deleted") == true)
+    }
+
+    @Test("still loading is not evidence either")
+    func loadingIsNotAnObservation() {
+        // `.loading` is not a list. `listed` deliberately HOLDS the id here, so
+        // reading `.loading` as `.loaded` would answer "still there" — this is
+        // the assertion that a mid-flight state cannot answer the question the
+        // reload exists to answer.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loading,
+                                      listed: listed) == nil)
+        // A reason still gets through, exactly as with a failed reload.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: "The request timed out.",
+                                      reloaded: .loading, listed: listed) == "The request timed out.")
+        // …and a blank one falls back to the honest unknown.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: " ", reloaded: .loading,
+                                      listed: listed) == ForgetVerdict.unconfirmed)
+    }
+
+    @Test("a blank reason never renders as an empty label")
+    func blankIsNotAReason() {
+        // Same rule Api.serverError applies to a blank `error` field: nothing to
+        // say is not a sentence. An empty red caption is a bug with no words.
+        for blank in ["", "   ", "\n"] {
+            #expect(ForgetVerdict.message(id: "100", serverSaid: blank, reloaded: .loaded,
+                                          listed: listed) == ForgetVerdict.stillThere)
+            #expect(ForgetVerdict.message(id: "100", serverSaid: blank,
+                                          reloaded: .failed("x"),
+                                          listed: listed) == ForgetVerdict.unconfirmed)
+        }
+    }
+
+    @Test("no verdict ever reads as a confirmation")
+    func nothingClaimsSuccess() {
+        // A caption that sounds like the memory went away is the same lie the
+        // route's refusal copy is careful to avoid — silence is how success is
+        // reported here, because the row leaving the list already says it.
+        for copy in [ForgetVerdict.stillThere, ForgetVerdict.unconfirmed] {
+            #expect(!copy.lowercased().contains("forgotten"))
+            #expect(!copy.lowercased().contains("deleted"))
+            #expect(!copy.lowercased().contains("removed"))
+        }
+        // …and the one that DOES invite a retry only appears with evidence for it.
+        #expect(ForgetVerdict.stillThere.contains("try again"))
+        #expect(!ForgetVerdict.unconfirmed.contains("try again"))
+    }
+}
+
 /// The DM length cap — the client half of the fix in
 /// `tests/dm-length-parity.test.ts`.
 ///

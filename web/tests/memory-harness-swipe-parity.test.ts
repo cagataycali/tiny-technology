@@ -163,7 +163,12 @@ describe('cross-platform: the rule now holds on BOTH phones', () => {
     const v = memoryView()
     expect(panels()).toMatch(/"id": NSNumber\(value: 100 \+ i\)/)
     expect(panels()).toMatch(/"id": NSNumber\(value: 200 \+ i\)/)
-    // …and the delete goes to the real base URL, not a harness stub.
-    expect(v).toMatch(/Api\.base \+ "\/api\/learnings"/)
+    // …and the delete goes to the real route, not a harness stub. Spelled
+    // `Api.deleteJson("/api/learnings", …)` since inc 31 — the verb prepends
+    // `Api.base` itself, so this is the same live account either way. (The old
+    // pin named `Api.base + "/api/learnings"`, which made moving to the shared
+    // verb read as a regression. The claim is the ROUTE, not how the URL is
+    // concatenated.)
+    expect(v).toMatch(/Api\.deleteJson\("\/api\/learnings"/)
   })
 })

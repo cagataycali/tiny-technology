@@ -1832,6 +1832,60 @@ enum MemoryHarness {
     #endif
 }
 
+/// What a swipe-to-forget actually earned — decided AFTER the list is re-read.
+///
+/// ⚠️ `forget` already had the answer and threw it away. It reloads server truth
+/// on purpose (never optimistic-drop) and then overwrote the conclusion with a
+/// transport-derived guess: `forgetError = ok ? nil : "Couldn't forget that —
+/// try again."` So the list and the caption could contradict each other, and the
+/// commonest way in is not exotic:
+///
+///   the memory was ALREADY closed — from another device, or by an agent
+///   `supersede`. The worker answers **404** `no memory with id 42`, while the
+///   reload shows the row GONE (RECENT_SQL lists `valid_to IS NULL` only). Old
+///   behaviour: a red "Couldn't forget that — try again" under a list the memory
+///   has already left. The retry it asks for cannot even be performed — the row
+///   is not there to swipe — so the caption sat there until the user discovered
+///   pull-to-refresh.
+///
+/// The rule: **when the outcome is OBSERVABLE, observe it.** The reloaded list
+/// decides WHETHER the memory is gone; the response only gets to say WHY when it
+/// isn't. There are four answers because there are two axes, and collapsing
+/// either one is what produced the lie (the payment paths learned the same shape
+/// in c27/c28 — a lost ANSWER is not a lost REQUEST):
+///
+///  - list readable, row absent  → say nothing. Gone is gone, whatever the code.
+///  - list readable, row present → it IS still there: the server's own sentence
+///    when it gave one (a 400 carries refusal copy written for a human — see
+///    lib/chat/learnings-delete-scope), else an invitation to retry.
+///  - list unreadable, DELETE ok → the server confirmed; the `.failed` branch
+///    already explains the stale list and offers Retry. Don't second-guess it.
+///  - list unreadable, DELETE failed → genuinely unknown. Never claim either way.
+enum ForgetVerdict {
+    static let stillThere = "Still in your memories — try again."
+    static let unconfirmed = "Couldn't confirm — pull down to check."
+
+    /// - Parameters:
+    ///   - id: the memory the user swiped.
+    ///   - serverSaid: `localizedDescription` of the DELETE's failure, or nil
+    ///     when it succeeded. Consulted only when the list cannot rule it out,
+    ///     so a 404 about a memory that IS gone never becomes copy.
+    ///   - reloaded: `state` AFTER `load()`. `.loaded` means the list is truth.
+    ///   - listed: the ids the reloaded list holds.
+    static func message(
+        id: String, serverSaid: String?, reloaded: LoadState, listed: [String]
+    ) -> String? {
+        let trimmed = serverSaid?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // A blank reason is not a reason — it must not render as an empty label,
+        // the same rule Api.serverError applies to a blank `error` field.
+        let explained = (trimmed?.isEmpty == false) ? trimmed : nil
+        if case .loaded = reloaded {
+            return listed.contains(id) ? (explained ?? stillThere) : nil
+        }
+        return serverSaid == nil ? nil : (explained ?? unconfirmed)
+    }
+}
+
 struct MemoryView: View {
     let token: String?
     let tiny: String
@@ -2009,25 +2063,27 @@ struct MemoryView: View {
     }
 
     private func forget(_ id: String) async {
-        var req = URLRequest(url: URL(string: Api.base + "/api/learnings")!)
-        req.httpMethod = "DELETE"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["id": id])
+        // `Api.deleteJson`, not a hand-rolled URLSession. Its own doc says non-2xx
+        // "throws ApiError.http like every other verb, so callers can tell a 404
+        // (already gone) apart" — the exact distinction this function was
+        // discarding by reducing the whole answer to `code < 400`. Three things
+        // come free with the shared verb: the response BODY rides through the
+        // throw (review c16), so the human refusal copy a 400 carries reaches
+        // this screen; `Api.httpMessage` decides when the server's sentence beats
+        // our status table; and the body is encoded with `try`, not `try?`, so an
+        // unencodable body can never again be sent as NO body — which on this
+        // route used to mean "erase every memory" (inc 29, learnings-delete-scope).
+        var serverSaid: String?
+        do { _ = try await Api.deleteJson("/api/learnings", token: token, body: ["id": id]) }
+        catch { serverSaid = error.localizedDescription }
         // Reload server truth either way (never optimistic-drop — a failed delete
         // would otherwise vanish a memory that's still ALIVE on the server, a
         // false "forgotten" the user would trust; android hit exactly that in
-        // 0c1d885). But a swallowed failure meant the row silently reappeared
-        // with no explanation — surface it so the user knows to retry.
-        let ok: Bool
-        if let (_, resp) = try? await URLSession.shared.data(for: req),
-           let code = (resp as? HTTPURLResponse)?.statusCode {
-            ok = code < 400
-        } else {
-            ok = false
-        }
+        // 0c1d885) — and then LET THE RELOAD DECIDE, rather than overwriting what
+        // it proves with a guess derived from the status code. See ForgetVerdict.
         await load()
-        forgetError = ok ? nil : "Couldn't forget that — try again."
+        forgetError = ForgetVerdict.message(
+            id: id, serverSaid: serverSaid, reloaded: state, listed: server.map(\.id))
     }
 }
 

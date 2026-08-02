@@ -173,16 +173,33 @@ describe('what the PERSON is told', () => {
     expect(deleteRefusalForHumans('unreadable-body')).toMatch(/reload/i)
   })
 
-  it('reaches a screen: the panel toasts the route\'s `error` verbatim', () => {
+  it('reaches a screen: web and iOS show the route\'s `error`, android reads the status', () => {
     // Without this the copy would be unreachable decoration. The web panel
-    // prints it as-is; iOS and Android show their own fixed failure strings and
-    // only read the status code, which is why a 400 (not a masked 200) is the
-    // load-bearing half of the refusal for them.
+    // prints it as-is.
     expect(read('components/chat/MemoryPanel.tsx'))
       .toMatch(/toast\.error\(d\.error \|\| "Couldn't close — try again"\)/)
-    expect(read('ios/Tiny/Sources/Panels.swift')).toMatch(/ok = code < 400/)
-    expect(read('android/app/src/main/java/technology/tiny/app/ui/MemoryUniverse.kt'))
-      .toMatch(/optInt\("_status", 200\) < 400/)
+    // ⚠️ This assertion USED to read `ok = code < 400` with a comment claiming
+    // iOS "only reads the status code". That premise expired: the memory sheet's
+    // swipe now goes through `Api.deleteJson`, which throws `ApiError.http(code,
+    // serverError(in: data))`, so the human refusal copy above reaches the
+    // sheet's caption verbatim. Asserting the old SPELLING made an improvement
+    // look like a regression — assert the behaviour instead.
+    const panels = read('ios/Tiny/Sources/Panels.swift')
+    expect(panels).toMatch(/Api\.deleteJson\("\/api\/learnings"/)
+    expect(panels).toMatch(/serverSaid = error\.localizedDescription/)
+    // Android still shows a fixed string and reads only the status, which is why
+    // a 400 (not a masked 200) is the load-bearing half of the refusal there.
+    //
+    // ⚠️ Scoped to the memory DELETE. An unscoped scan for `optInt("_status", 200)
+    // < 400` is satisfied by the follow toggle ~320 lines below, which spells the
+    // identical check — measured twice: relaxing the memory site to `< 500`, and
+    // deleting its status check outright, both left this pin green while the claim
+    // it makes about Android became false. A shared idiom has to be scoped to the
+    // call site it is about (the same lesson as tests/unlearn-scope.test.ts:129).
+    const kt = read('android/app/src/main/java/technology/tiny/app/ui/MemoryUniverse.kt')
+    const at = kt.indexOf('app.api.deleteJson("/api/learnings"')
+    expect(at, "android's memory delete is gone — re-anchor").toBeGreaterThan(-1)
+    expect(kt.slice(at, at + 400)).toMatch(/optInt\("_status", 200\) < 400/)
   })
 })
 
@@ -292,7 +309,10 @@ describe('why an omitted id is annihilation, and who can send one', () => {
   })
 
   it('all three clients delete through this one route, so one fix covers them', () => {
-    expect(read('ios/Tiny/Sources/Panels.swift')).toMatch(/Api\.base \+ "\/api\/learnings"/)
+    // iOS spells it through the shared verb now (inc 31) rather than hand-rolling
+    // the URL — same route, so the refusal above still covers it. The assertion
+    // is on the PATH for that reason; `Api.base` was never the claim.
+    expect(read('ios/Tiny/Sources/Panels.swift')).toMatch(/deleteJson\("\/api\/learnings"/)
     expect(read('android/app/src/main/java/technology/tiny/app/ui/MemoryUniverse.kt'))
       .toMatch(/deleteJson\("\/api\/learnings"/)
     expect(read('components/chat/MemoryPanel.tsx')).toMatch(/fetch\("\/api\/learnings"/)
