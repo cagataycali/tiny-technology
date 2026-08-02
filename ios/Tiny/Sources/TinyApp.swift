@@ -56,6 +56,24 @@ struct TinyApp: App {
             Keychain.set("tiny_token", harnessToken)
         }
         #endif
+        // 🐬📶 A paired Flipper's BLE link has to survive a relaunch, because
+        // the point of the link is that the user is somewhere ELSE — asking
+        // from a web chat with the board in a pocket. Until this line the only
+        // dial was the panel's Reconnect button, so every relaunch (iOS
+        // reclaiming a suspended app, a swipe-away, a reboot) silently dropped
+        // a still-valid pairing and the web agent answered "no Flipper is
+        // reachable, go link one" — sending the user to redo a bond the board
+        // and iOS both still hold.
+        //
+        // init() rather than the .active arm below, for two reasons: a
+        // BGAppRefresh cold wake never activates a scene (the same reason
+        // BGTaskScheduler registers up top), and CoreBluetooth only hands a
+        // preserved peripheral to willRestoreState if the manager is created
+        // this early under the same restore identifier.
+        //
+        // No-op when no Flipper is paired, so a user without one is never
+        // asked for Bluetooth because of this line.
+        FlipperGateway.shared.start()
     }
 
     var body: some Scene {

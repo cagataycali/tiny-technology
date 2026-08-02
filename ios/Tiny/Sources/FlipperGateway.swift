@@ -710,7 +710,9 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     func start() {
         guard unit != nil else { return }
         wanted = true
-        // An explicit start is user intent, so it jumps the backoff queue.
+        // A start is either user intent (pair, Reconnect) or a fresh launch
+        // dialling a board it already owns, and both jump the backoff queue —
+        // neither should have to wait out a delay grown by an earlier session.
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectDelay = Self.reconnectBaseS

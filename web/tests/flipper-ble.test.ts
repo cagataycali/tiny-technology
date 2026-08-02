@@ -50,6 +50,7 @@ const gateway = read('ios/Tiny/Sources/FlipperGateway.swift')
 const session = read('ios/Tiny/Sources/Session.swift')
 const panel = read('ios/Tiny/Sources/FlipperBlePanel.swift')
 const iosPanels = read('ios/Tiny/Sources/Panels.swift')
+const tinyApp = read('ios/Tiny/Sources/TinyApp.swift')
 const androidPanels = read('android/app/src/main/java/technology/tiny/app/ui/Panels.kt')
 const backend = read('lib/chat/tools/flipper.ts')
 
@@ -1820,5 +1821,118 @@ describe('a pairing scan does not outlive the view that wanted it', () => {
     // The phase observers are the cover, not the replacement: a dismissed sheet
     // should stop the radio there and then rather than at the next backgrounding.
     expect(codeOnly(panel, /onDisappear/)).toMatch(/onDisappear \{ flipper\.stopScan\(\) \}/)
+  })
+})
+
+/**
+ * 🐬📶 A link the user made once is there the next time they ask.
+ *
+ * This feature's whole point is a question asked from somewhere else — a web chat,
+ * the board in a pocket, the phone face-down on a table. So the interesting process
+ * is one the user did not start: iOS relaunching a suspended app for a BGAppRefresh
+ * wake, a swipe-away, a reboot. Nothing on any of those paths dialled the board.
+ * `start()` was reachable from exactly two gestures — `pair()` and the panel's
+ * Reconnect button — so the link lasted as long as the process the user had tapped
+ * in, and no longer.
+ *
+ * After that the phone stopped declaring `flipper_ble`, honestly (it really had no
+ * link), and the agent answered "no Flipper Zero is reachable on this account …
+ * link it over Bluetooth to the tiny app on a phone" — about a bond iOS and the
+ * board both still held. Opening the app did not fix it either: the cure was three
+ * levels into a panel, beside copy that blamed the board's range for a dial the
+ * phone had never attempted.
+ *
+ * It also left `willRestoreState` unreachable. State restoration is a THREE-part
+ * contract: the restore identifier, the delegate method, and a manager re-created
+ * early in the launch CoreBluetooth is restoring INTO. Written without the third,
+ * the first two read as finished work and never run once.
+ */
+describe('a paired board is dialled by the launch, not by a tap', () => {
+  const initBody = () => swiftBody(tinyApp, '    init() {')
+  const startBody = () => codeOnly(swiftBody(gateway, 'func start()'), /wanted = true/)
+
+  it('the launch path dials a board this phone already owns', () => {
+    expect(codeOnly(initBody(), /FlipperGateway/), 'nothing on the launch path starts the gateway')
+      .toMatch(/FlipperGateway\.shared\.start\(\)/)
+  })
+
+  it('from init(), because the launch that matters most never activates a scene', () => {
+    // A BGAppRefresh cold wake runs `init()` and the task handler, and no view ever
+    // appears — which is why `Background.register()` lives there too. In the
+    // `.active` arm beside the necklace's start this would cover every launch EXCEPT
+    // the one where the user is in a browser waiting for the board to answer.
+    const call = tinyApp.indexOf('FlipperGateway.shared.start()')
+    const scene = tinyApp.indexOf('var body: some Scene')
+    expect(call, 'FlipperGateway.shared.start() is not called at all').toBeGreaterThan(-1)
+    expect(scene, 'TinyApp has no scene body any more — re-read this test').toBeGreaterThan(-1)
+    expect(call, 'the dial must run before the scene exists, not from a scenePhase arm')
+      .toBeLessThan(scene)
+  })
+
+  it('and not from inside #if DEBUG, where a shipped build would never reach it', () => {
+    // The end of `init()` is one line below a debug-only harness block. Inside it,
+    // every simulator run would restore the link and no user ever would.
+    const body = initBody()
+    const call = body.indexOf('FlipperGateway.shared.start()')
+    const dbg = body.indexOf('#if DEBUG')
+    expect(dbg, 'the DEBUG harness block moved — re-read this test').toBeGreaterThan(-1)
+    const end = body.indexOf('#endif', dbg)
+    expect(end, '#if DEBUG never closes').toBeGreaterThan(dbg)
+    expect(call > end || call < dbg, 'the launch dial is compiled out of Release').toBe(true)
+  })
+
+  it('the dial is what creates the manager iOS hands the restored board back to', () => {
+    // The third term of the restoration contract. Both other terms were already
+    // written; this is the one that makes them run.
+    expect(startBody(), 'start() no longer creates the central manager')
+      .toMatch(/CBCentralManager\(/)
+    expect(startBody(), 'the manager is created without a restore identifier')
+      .toMatch(/CBCentralManagerOptionRestoreIdentifierKey/)
+    expect(codeOnly(gateway, /willRestoreState/), 'nothing receives what the identifier preserves')
+      .toMatch(/func centralManager\(_ central: CBCentralManager, willRestoreState/)
+  })
+
+  it('a phone with no Flipper is still never asked for Bluetooth', () => {
+    // What makes a launch-time call safe, and it is a fact in a DIFFERENT file from
+    // the caller: constructing CBCentralManager is what raises the permission
+    // prompt, so the refusal has to come first. Reversed, every user of this app
+    // gets a Bluetooth prompt on launch because of a board they do not own.
+    const s = startBody()
+    expect(s, 'start() must refuse before it can ask for Bluetooth')
+      .toMatch(/guard unit != nil else \{ return \}/)
+    expect(s.indexOf('guard unit != nil'), 'the refusal must precede the manager')
+      .toBeLessThan(s.indexOf('CBCentralManager('))
+  })
+
+  it('and the dial does not wait out a delay an earlier session grew', () => {
+    // The comment above these lines is what this port widened: a start is now EITHER
+    // a tap or a relaunch, and the claim is that both jump the backoff queue. It is
+    // worth pinning because the relaunch case is the one that cannot be seen — a
+    // BGAppRefresh wake gets a bounded window, and a launch that inherited the
+    // doubled delay of the session iOS had killed would spend the whole of it
+    // sleeping, which reads from the web chat exactly like the bug this port fixes.
+    const s = startBody()
+    expect(s, 'a backoff timer from the last session is left sleeping behind the dial')
+      .toMatch(/reconnectTask\?\.cancel\(\)/)
+    expect(s, 'the cancelled task is still held by the field that names it')
+      .toMatch(/reconnectTask = nil/)
+    expect(s, 'the start inherits the penalty an earlier session grew')
+      .toMatch(/reconnectDelay = Self\.reconnectBaseS/)
+    expect(s.indexOf('reconnectDelay = Self.reconnectBaseS'), 'the reset has to land before the dial it applies to')
+      .toBeLessThan(s.indexOf('CBCentralManager('))
+    // And the doubling it is resetting really is a doubling, in the other file's
+    // other function — a base-delay reset means nothing if nothing ever grows.
+    expect(codeOnly(swiftBody(gateway, 'private func scheduleReconnect()'), /reconnectDelay/))
+      .toMatch(/reconnectDelay = min\(delay \* 2, Self\.reconnectMaxS\)/)
+  })
+
+  it('the panel keeps its own Reconnect, for the link that drops mid-session', () => {
+    // The launch dial is the cover, not the replacement: a drop while the app is
+    // open is handled by the backoff, and the button is how a user overrides a
+    // delay that has grown to 32s rather than waiting it out.
+    // Matched on the call, not the copy — the label is a product decision and this
+    // file has been red for a wording change before.
+    expect(codeOnly(panel, /Reconnect/))
+      .toMatch(/Button\("[^"]+"\) \{ flipper\.start\(\) \}/)
   })
 })
