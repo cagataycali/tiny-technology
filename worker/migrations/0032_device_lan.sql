@@ -1,0 +1,21 @@
+-- Where a device lives on the LAN, so a phone on the same WiFi can dial it
+-- DIRECTLY instead of discovering it through the cloud.
+--
+-- The problem this fixes, reported as "the nicla vision is no longer streaming
+-- to ios — it says connecting through the cloud but i'm at the same wifi":
+-- TinyLive's fast path needs a base URL, and the only two ways it could get one
+-- were a UserDefaults cache (empty on a fresh install, and dropped whenever a
+-- probe fails) and a `stream` relay invoke — a cloud round trip measured at
+-- 4-32s against a single-threaded board. So the app spent its whole opening
+-- either polling frames through the relay or waiting on discovery, while the
+-- board sat one hop away serving MJPEG at ~16 fps. The device row already
+-- reaches the worker every 30 seconds via the heartbeat; it just never carried
+-- the address.
+--
+-- A SEPARATE column from `url`, deliberately. `url` is an ENDPOINT device's
+-- dial-out origin: validateEndpointUrl refuses every IP literal and every
+-- private host precisely because the WORKER fetches it server-side, so storing
+-- 192.168.x.x there would turn the registry into an SSRF pivot into
+-- Cloudflare's network. lan_url is never fetched by the worker — it is only
+-- handed to the owner's own client, which is already on that network.
+ALTER TABLE devices ADD COLUMN lan_url TEXT NOT NULL DEFAULT '';

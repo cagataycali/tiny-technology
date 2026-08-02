@@ -34,14 +34,17 @@ beforeAll(async () => {
   const { DatabaseSync } = await import('node:sqlite')
   db = new DatabaseSync(':memory:')
   // Schema must track migrations: url/secret arrived with 0029 (endpoint
-  // devices), and DEVICE_LIST_SQL now selects `url` — a fixture frozen at the
-  // old shape fails on the real statement rather than on the behaviour.
+  // devices) and lan_url with 0032, and DEVICE_LIST_SQL selects both — a
+  // fixture frozen at the old shape fails on the real statement rather than on
+  // the behaviour.
   db.exec(`
     CREATE TABLE devices (
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
       platform TEXT, kind TEXT, capabilities TEXT, token_hash TEXT NOT NULL,
       last_seen INTEGER, created_at INTEGER, revoked INTEGER DEFAULT 0,
-      url TEXT, secret TEXT
+      url TEXT, secret TEXT,
+      -- 0032: the LAN base a same-WiFi client dials directly
+      lan_url TEXT NOT NULL DEFAULT ''
     );
   `)
 })
@@ -81,12 +84,12 @@ describe.skipIf(!present)('worker DEVICE_*_SQL (real statements, real sqlite)', 
     await enroll('d3', 'u2', 'tind_live', { now: 1000 })
     // wrong token → 0 rows changed
     const wrong = run(SQL.DEVICE_HEARTBEAT_SQL, {
-      1: 'd3', 2: 2000, 3: null, 4: await hashDeviceToken('tind_wrong'),
+      1: 'd3', 2: 2000, 3: null, 4: await hashDeviceToken('tind_wrong'), 5: null,
     })
     expect(wrong.changes).toBe(0)
     // right token → 1 row, last_seen advances
     const ok = run(SQL.DEVICE_HEARTBEAT_SQL, {
-      1: 'd3', 2: 2000, 3: null, 4: await hashDeviceToken('tind_live'),
+      1: 'd3', 2: 2000, 3: null, 4: await hashDeviceToken('tind_live'), 5: null,
     })
     expect(ok.changes).toBe(1)
     expect((first('SELECT last_seen FROM devices WHERE id=?1', { 1: 'd3' }) as any).last_seen).toBe(2000)
@@ -103,7 +106,7 @@ describe.skipIf(!present)('worker DEVICE_*_SQL (real statements, real sqlite)', 
 
   it('heartbeat with null capabilities keeps the existing value (COALESCE)', async () => {
     await enroll('d5', 'u2', 'tind_caps', { capabilities: ['shell', 'files'] })
-    run(SQL.DEVICE_HEARTBEAT_SQL, { 1: 'd5', 2: 4000, 3: null, 4: await hashDeviceToken('tind_caps') })
+    run(SQL.DEVICE_HEARTBEAT_SQL, { 1: 'd5', 2: 4000, 3: null, 4: await hashDeviceToken('tind_caps'), 5: null })
     expect((first('SELECT capabilities FROM devices WHERE id=?1', { 1: 'd5' }) as any).capabilities)
       .toBe(JSON.stringify(['shell', 'files']))
   })
@@ -128,6 +131,170 @@ describe.skipIf(!present)('worker DEVICE_*_SQL (real statements, real sqlite)', 
 
   it('presence window is a positive number of seconds', () => {
     expect(PRESENCE_WINDOW_S).toBeGreaterThan(0)
+  })
+
+  // ── lan_url (0032): the same-WiFi fast path ────────────────────────────────
+  //
+  // Reported as "the nicla vision is no longer streaming to ios — it says
+  // connecting through the cloud but i'm at the same wifi". The app could only
+  // learn the board's address from a UserDefaults cache (empty on a fresh
+  // install) or a `stream` relay invoke — a cloud round trip measured at 4-32s
+  // against the board's single-threaded loop. The heartbeat already arrived every
+  // 30s; it just never carried the address.
+
+  it('a heartbeat stores the LAN base, and the list hands it back', async () => {
+    await enroll('lan1', 'u9', 'tind_lan')
+    run(SQL.DEVICE_HEARTBEAT_SQL, {
+      1: 'lan1', 2: 5000, 3: null, 4: await hashDeviceToken('tind_lan'),
+      5: 'http://192.168.1.207:8080',
+    })
+    const row: any = all(SQL.DEVICE_LIST_SQL, { 1: 'u9' }).find((r: any) => r.id === 'lan1')
+    expect(row.lan_url, 'DEVICE_LIST_SQL must select lan_url or no client can see it')
+      .toBe('http://192.168.1.207:8080')
+  })
+
+  it('a heartbeat WITHOUT a LAN base does not erase the stored one (COALESCE)', async () => {
+    // The one that matters most: the loop beats ~2880x/day, so a single
+    // non-coalescing UPDATE means the address survives 30 seconds and then is
+    // blanked forever by the next tick — and the symptom is indistinguishable
+    // from the bug being fixed.
+    await enroll('lan2', 'u9', 'tind_keep')
+    run(SQL.DEVICE_HEARTBEAT_SQL, {
+      1: 'lan2', 2: 5000, 3: null, 4: await hashDeviceToken('tind_keep'), 5: 'http://10.0.0.4:8080',
+    })
+    run(SQL.DEVICE_HEARTBEAT_SQL, {
+      1: 'lan2', 2: 5030, 3: null, 4: await hashDeviceToken('tind_keep'), 5: null,
+    })
+    expect((first('SELECT lan_url FROM devices WHERE id=?1', { 1: 'lan2' }) as any).lan_url)
+      .toBe('http://10.0.0.4:8080')
+  })
+
+  it('a new address REPLACES the old one — DHCP moves the board', async () => {
+    await enroll('lan3', 'u9', 'tind_dhcp')
+    for (const base of ['http://192.168.1.207:8080', 'http://192.168.1.61:8080']) {
+      run(SQL.DEVICE_HEARTBEAT_SQL, {
+        1: 'lan3', 2: 6000, 3: null, 4: await hashDeviceToken('tind_dhcp'), 5: base,
+      })
+    }
+    expect((first('SELECT lan_url FROM devices WHERE id=?1', { 1: 'lan3' }) as any).lan_url)
+      .toBe('http://192.168.1.61:8080')
+  })
+
+  it('a wrong token cannot write an address — same gate as presence', async () => {
+    // Otherwise anyone who learned a device id could point the owner's phone at
+    // a host of their choosing, which is a far worse bug than slow discovery.
+    await enroll('lan4', 'u9', 'tind_real')
+    const res = run(SQL.DEVICE_HEARTBEAT_SQL, {
+      1: 'lan4', 2: 7000, 3: null, 4: await hashDeviceToken('tind_forged'),
+      5: 'http://192.168.1.99:8080',
+    })
+    expect(res.changes).toBe(0)
+    expect((first('SELECT lan_url FROM devices WHERE id=?1', { 1: 'lan4' }) as any).lan_url).toBe('')
+  })
+})
+
+/**
+ * 🏠 validateLanUrl — the EXACT INVERSE of validateEndpointUrl, and the inversion
+ * is the security property.
+ *
+ * `url` is fetched BY THE WORKER, so it must be public: a private address there
+ * is an SSRF pivot into Cloudflare's network (that rule is pinned in
+ * endpoint-device.test.ts). `lan_url` is fetched only by the OWNER'S OWN PHONE
+ * from inside the same house, so it must be private: a public address here means
+ * the registry hands every client on the account a URL that dials a stranger's
+ * server over plaintext http. Neither column may accept the other's values.
+ */
+describe.skipIf(!present)('validateLanUrl (private-only, the inverse guard)', () => {
+  let validateLanUrl: (raw: unknown) => any
+  let validateEndpointUrl: (raw: unknown) => any
+  beforeAll(async () => {
+    const mod = await import(workerFile('devices.ts') /* @vite-ignore */)
+    validateLanUrl = mod.validateLanUrl
+    validateEndpointUrl = mod.validateEndpointUrl
+  })
+
+  it('accepts every private IPv4 range a home router hands out', () => {
+    for (const base of ['http://192.168.1.207:8080', 'http://10.0.0.4:8080',
+                        'http://172.16.5.9:8080', 'http://172.31.255.254:8080',
+                        'http://169.254.10.1:8080']) {
+      expect(validateLanUrl(base), base).toEqual({ url: base })
+    }
+  })
+
+  it('refuses a PUBLIC address — the whole point of the column', () => {
+    for (const bad of ['http://1.2.3.4:8080', 'http://8.8.8.8', 'http://172.32.0.1:8080',
+                       'http://192.169.1.1:8080', 'http://11.0.0.1']) {
+      expect(validateLanUrl(bad), bad).toHaveProperty('error')
+    }
+  })
+
+  it('refuses loopback — a phone dialing 127.0.0.1 dials ITSELF', () => {
+    // The failure that looks like the feature working right up until it times
+    // out, and 127.x is "private" under a naive reading.
+    expect(validateLanUrl('http://127.0.0.1:8080')).toHaveProperty('error')
+    expect(validateLanUrl('http://localhost:8080')).toHaveProperty('error')
+  })
+
+  it('refuses hostnames — resolving a name IS the discovery step being skipped', () => {
+    for (const bad of ['http://tiny.local:8080', 'http://necklace:8080',
+                       'http://plugin.tiny.technology']) {
+      expect(validateLanUrl(bad), bad).toHaveProperty('error')
+    }
+  })
+
+  it('obfuscated IP encodings cannot smuggle a public address past the guard', () => {
+    // These are the classic SSRF-filter bypasses, and the reason they are safe
+    // here is worth pinning rather than assuming: the WHATWG URL parser
+    // CANONICALIZES them before the check runs, so hex/octal/dword all arrive as
+    // a dotted quad and are judged on what they actually mean.
+    for (const bad of ['http://0x7f.1',            // → 127.0.0.1, loopback
+                       'http://2130706433',        // → 127.0.0.1, loopback
+                       'http://0x08080808',        // → 8.8.8.8, public
+                       'http://192.168.1.999:8080', // unparseable
+                       'http://[::1]:8080']) {      // IPv6 loopback
+      expect(validateLanUrl(bad), bad).toHaveProperty('error')
+    }
+  })
+
+  it('a decoded private address is accepted AS ITS DECODED FORM, never the raw one', () => {
+    // The security property behind the test above: what gets STORED is the
+    // canonical origin, so a caller can never be handed a host string the guard
+    // did not evaluate. If this ever returned the literal input, the octal form
+    // would be a way to hand clients an address nothing had checked.
+    expect(validateLanUrl('http://0300.0250.0.1')).toEqual({ url: 'http://192.168.0.1' })
+    expect(validateLanUrl('http://3232235777')).toEqual({ url: 'http://192.168.1.1' })
+  })
+
+  it('refuses https and every non-http scheme', () => {
+    // Not pedantry: the board serves plain http on the LAN, so an https value
+    // here could only have come from somewhere else.
+    for (const bad of ['https://192.168.1.207:8080', 'ftp://192.168.1.5',
+                       'file:///etc/passwd', 'javascript:alert(1)']) {
+      expect(validateLanUrl(bad), bad).toHaveProperty('error')
+    }
+  })
+
+  it('normalizes to an origin, dropping any path/query', () => {
+    // Every caller builds `${lan_url}${path}`, so a stored path corrupts all of them.
+    expect(validateLanUrl('http://192.168.1.207:8080/stream?x=1#f'))
+      .toEqual({ url: 'http://192.168.1.207:8080' })
+  })
+
+  it('empty, whitespace and non-strings are errors, not empty successes', () => {
+    for (const bad of ['', '   ', null, undefined, 42, {}, []]) {
+      expect(validateLanUrl(bad as any), String(bad)).toHaveProperty('error')
+    }
+  })
+
+  it('the two validators reject each other\'s values — no column can take the other\'s', () => {
+    // The invariant stated as a test, so a later "unify these" refactor fails
+    // here instead of quietly opening an SSRF path or a plaintext-to-a-stranger path.
+    const lan = 'http://192.168.1.207:8080'
+    const pub = 'https://plugin.tiny.technology'
+    expect(validateLanUrl(lan)).toEqual({ url: lan })
+    expect(validateEndpointUrl(lan)).toHaveProperty('error')
+    expect(validateEndpointUrl(pub)).toEqual({ url: pub })
+    expect(validateLanUrl(pub)).toHaveProperty('error')
   })
 })
 
@@ -191,9 +358,9 @@ describe.skipIf(!present)('worker DEVICE_ROTATE_TOKEN_SQL (adopt without re-enro
     // Old credential is dead — a handover, not a share. Two clients holding
     // tokens for one BLE peripheral would fight over its single central slot.
     expect(run(SQL.DEVICE_HEARTBEAT_SQL,
-      { 1: 'rt1', 2: 2000, 3: null, 4: await hashDeviceToken('tind_old') }).changes).toBe(0)
+      { 1: 'rt1', 2: 2000, 3: null, 4: await hashDeviceToken('tind_old'), 5: null }).changes).toBe(0)
     expect(run(SQL.DEVICE_HEARTBEAT_SQL,
-      { 1: 'rt1', 2: 2000, 3: null, 4: await hashDeviceToken('tind_new') }).changes).toBe(1)
+      { 1: 'rt1', 2: 2000, 3: null, 4: await hashDeviceToken('tind_new'), 5: null }).changes).toBe(1)
   })
 
   it('keeps the row: same id, name, kind, capabilities and history', async () => {
@@ -220,7 +387,7 @@ describe.skipIf(!present)('worker DEVICE_ROTATE_TOKEN_SQL (adopt without re-enro
     expect(attacker.changes).toBe(0)
     // And the owner's token must be untouched by the attempt.
     expect(run(SQL.DEVICE_HEARTBEAT_SQL,
-      { 1: 'rt3', 2: 9000, 3: null, 4: await hashDeviceToken('tind_mine') }).changes).toBe(1)
+      { 1: 'rt3', 2: 9000, 3: null, 4: await hashDeviceToken('tind_mine'), 5: null }).changes).toBe(1)
   })
 
   it('refuses a REVOKED device — rotation must not resurrect a killed credential', async () => {
@@ -232,7 +399,7 @@ describe.skipIf(!present)('worker DEVICE_ROTATE_TOKEN_SQL (adopt without re-enro
     // "kill this device" would be undoable by the same session that killed it.
     expect(res.changes).toBe(0)
     expect(run(SQL.DEVICE_HEARTBEAT_SQL,
-      { 1: 'rt4', 2: 9000, 3: null, 4: await hashDeviceToken('tind_zombie') }).changes).toBe(0)
+      { 1: 'rt4', 2: 9000, 3: null, 4: await hashDeviceToken('tind_zombie'), 5: null }).changes).toBe(0)
   })
 
   it('refuses an ENDPOINT device — it has no inbound token by design', async () => {

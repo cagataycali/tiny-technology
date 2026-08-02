@@ -272,8 +272,25 @@ final class TinyLive: NSObject, ObservableObject {
         // and start remote frame polling immediately; if a LAN base turns up
         // AND answers, upgrade to the direct stream.
         stateText = "connecting through the cloud…"
-        guard let id = await findDeviceId(token: token) else {
+        guard let found = await findDevice(token: token) else {
             fail("No nicla-vision device in your fleet — is it enrolled?"); return
+        }
+        let id = found.id
+        // The board's OWN address, off its heartbeat — no discovery round trip.
+        //
+        // This is the fix for "says connecting through the cloud but i'm at the
+        // same wifi". The only two ways this app could previously learn a LAN
+        // base were the UserDefaults cache above (empty on a fresh install, and
+        // dropped whenever a probe fails) and discoverViaRelay below — a `stream`
+        // invoke through the relay, measured at 4-32s against the board's
+        // single-threaded loop. So the opening was always cloud polling, while
+        // the necklace served MJPEG at ~16 fps one hop away. The device row now
+        // carries lan_url, refreshed every 30s and only reported while the board
+        // is present, so the same-WiFi case needs no discovery at all.
+        if let lan = found.lanURL, await probe(base: lan) {
+            UserDefaults.standard.set(lan, forKey: Self.cachedURLKey)
+            mode = .lan
+            open(base: lan); return
         }
         remoteDeviceId = id
         mode = .remote
@@ -300,22 +317,44 @@ final class TinyLive: NSObject, ObservableObject {
     /// returns a LAN base, so the fast path is never even tried — the live view
     /// fails while a healthy necklace on the same WiFi is serving MJPEG.
     /// Order explicitly instead: online first, then freshest heartbeat.
-    private func findDeviceId(token: String?) async -> String? {
-        guard let devices: [String: Any] = try? await Api.get("/api/devices", token: token),
-              let list = devices["devices"] as? [[String: Any]]
-        else { return nil }
+    ///
+    /// Returns the LAN base too, when the row has one. The registry only reports
+    /// `lan_url` while the board is actually present, because a stale address is
+    /// worse than none: DHCP reassigns it, so dialing it would mean waiting out a
+    /// timeout against whatever machine holds it now before falling back — slower
+    /// than never having tried.
+    struct FoundDevice { let id: String; let lanURL: String? }
+
+    /// Split out from the fetch so the ordering and the lan_url extraction — the
+    /// two things that decide whether the fast path is taken — are testable
+    /// without a network. See TinyLiveLanBaseTests.
+    nonisolated static func pickVision(from list: [[String: Any]]) -> FoundDevice? {
         let visions = list.filter { ($0["platform"] as? String) == "nicla-vision" }
         let seen = { (d: [String: Any]) -> Double in
             (d["last_seen"] as? Double) ?? Double(d["last_seen"] as? Int ?? 0)
         }
-        let best = visions
-            .sorted { a, b in
+        guard let best = visions
+            .sorted(by: { a, b in
                 let (aOn, bOn) = (a["online"] as? Bool == true, b["online"] as? Bool == true)
                 if aOn != bOn { return aOn }
                 return seen(a) > seen(b)
-            }
-            .first
-        return best?["id"] as? String
+            })
+            .first, let id = best["id"] as? String
+        else { return nil }
+        // http:// and a host, or nothing. A malformed value must fall through to
+        // discovery rather than becoming a URL the probe spends 3 attempts on.
+        let lan = (best["lan_url"] as? String).flatMap { raw -> String? in
+            guard raw.hasPrefix("http://"), let u = URL(string: raw), u.host != nil else { return nil }
+            return raw
+        }
+        return FoundDevice(id: id, lanURL: lan)
+    }
+
+    private func findDevice(token: String?) async -> FoundDevice? {
+        guard let devices: [String: Any] = try? await Api.get("/api/devices", token: token),
+              let list = devices["devices"] as? [[String: Any]]
+        else { return nil }
+        return Self.pickVision(from: list)
     }
 
     // ---- remote mode: relay `frame` polling — works from anywhere ------------

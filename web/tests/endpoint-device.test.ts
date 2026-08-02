@@ -53,7 +53,10 @@ beforeAll(async () => {
       id TEXT PRIMARY KEY, user_id TEXT NOT NULL, name TEXT NOT NULL,
       platform TEXT, kind TEXT, capabilities TEXT, token_hash TEXT NOT NULL,
       last_seen INTEGER, created_at INTEGER, revoked INTEGER DEFAULT 0,
-      url TEXT, secret TEXT
+      url TEXT, secret TEXT,
+      -- 0032. DEVICE_LIST_SQL selects it, so this fixture must carry it or the
+      -- real statement fails here for a reason unrelated to endpoint devices.
+      lan_url TEXT NOT NULL DEFAULT ''
     )`)
 })
 

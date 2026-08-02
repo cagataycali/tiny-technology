@@ -71,6 +71,56 @@ export function validateEndpointUrl(raw: unknown): { url: string } | { error: st
   return { url: u.origin };
 }
 
+/**
+ * Validate a device's self-reported LAN base — the EXACT INVERSE of
+ * validateEndpointUrl above, and the inversion is the whole point.
+ *
+ * `url` is an origin the WORKER fetches, so it must be public: an IP literal
+ * there is an SSRF pivot into Cloudflare's network. `lan_url` is an origin only
+ * the OWNER'S OWN PHONE fetches, from inside the same house, so it must be
+ * private: a public address here would mean the registry is handing every client
+ * on the account a URL that dials a stranger's server, and http:// makes that
+ * unauthenticated and in the clear. Neither column may ever accept the other's
+ * values, which is why this is a separate function with its own tests rather
+ * than a flag on the existing one.
+ *
+ * http + private IPv4 literal only. A hostname is refused outright: this value
+ * exists so a phone can skip discovery, and a name it would have to resolve
+ * (mDNS, a router's DNS) is exactly the discovery step being skipped.
+ */
+export function validateLanUrl(raw: unknown): { url: string } | { error: string } {
+  if (typeof raw !== "string" || !raw.trim()) return { error: "lanUrl required" };
+  let u: URL;
+  try { u = new URL(raw.trim()); } catch { return { error: "invalid lanUrl" }; }
+  if (u.protocol !== "http:") return { error: "lanUrl must be http" };
+  const host = u.hostname.toLowerCase().replace(/\.$/, "");
+  // Dotted-quad only, each octet 0-255 — tested against `u.hostname`, which the
+  // WHATWG URL parser has ALREADY canonicalized. That is what makes the
+  // obfuscated forms harmless rather than a bypass: `0x08080808` arrives here as
+  // `8.8.8.8` and is refused as public, `0300.0250.0.1` arrives as `192.168.0.1`
+  // and is a genuinely private address. The value stored is `u.origin`, i.e. the
+  // same decoded form that was checked, so no caller can be handed a host the
+  // guard never saw. (Verified against Node's URL: hex, octal and dword all
+  // normalize; a >255 octet throws.)
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!m) return { error: "lanUrl must be a private IPv4 literal" };
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  if ([a, b, Number(m[3]), Number(m[4])].some((n) => n > 255)) {
+    return { error: "lanUrl must be a private IPv4 literal" };
+  }
+  // RFC 1918 + link-local. NOT loopback: 127.x on the worker's side means
+  // nothing, and a phone dialing 127.0.0.1 would be dialing ITSELF — the one
+  // failure that looks like the feature working until it times out.
+  const priv = a === 10
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168)
+    || (a === 169 && b === 254);
+  if (!priv) return { error: "lanUrl must be a private IPv4 literal" };
+  // Origin only, same reason as validateEndpointUrl: every caller builds
+  // `${lan_url}${path}`, so a stored path would corrupt each one.
+  return { url: u.origin };
+}
+
 /** SHA-256 hex — the only form a token ever takes at rest. */
 export async function hashDeviceToken(token: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
@@ -110,14 +160,20 @@ export const ENDPOINT_INSERT_SQL = `
 export const DEVICE_COUNT_SQL = `
   SELECT COUNT(*) AS n FROM devices WHERE user_id = ?1 AND revoked = 0`;
 
+// COALESCE on lan_url too: a heartbeat that omits it (an older firmware, or a
+// board whose WiFi has no address yet) must not ERASE the address a previous
+// heartbeat established. Every 30s is 2880 chances a day to blank it.
 export const DEVICE_HEARTBEAT_SQL = `
-  UPDATE devices SET last_seen = ?2, capabilities = COALESCE(?3, capabilities)
+  UPDATE devices SET last_seen = ?2, capabilities = COALESCE(?3, capabilities),
+                     lan_url = COALESCE(?5, lan_url)
   WHERE id = ?1 AND token_hash = ?4 AND revoked = 0`;
 
 // `url` is listable (the owner needs to see where a body lives); `secret` is
 // NOT in the column list — a bearer credential must never leave the worker.
+// `lan_url` is listable for the same reason as url: it's the owner's own
+// network, and it is what lets their phone skip cloud discovery entirely.
 export const DEVICE_LIST_SQL = `
-  SELECT id, name, platform, kind, capabilities, last_seen, created_at, url
+  SELECT id, name, platform, kind, capabilities, last_seen, created_at, url, lan_url
   FROM devices WHERE user_id = ?1 AND revoked = 0
   ORDER BY last_seen DESC`;
 
@@ -241,20 +297,32 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
       deviceId: new Str({ required: true }),
       token: new Str({ required: true }),
       capabilities: new Str({ required: false }),
+      lanUrl: new Str({ required: false, description: "http://<private-ip>:<port> the owner's own clients can dial directly" }),
     },
     responses: { "200": { description: "Alive", schema: { response: "Alive" } } },
   };
 
   async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
-    const { deviceId, token, capabilities } = data.body;
+    const { deviceId, token, capabilities, lanUrl } = data.body;
     if (!deviceId || !token) return json({ error: "deviceId and token required" }, 400);
+
+    // A bad lanUrl is DROPPED, never a 400: the heartbeat's job is presence, and
+    // failing it over a malformed optional field would take a healthy board
+    // offline in the fleet list — the exact symptom this whole change exists to
+    // fix. null → COALESCE keeps whatever was already stored.
+    let lan: string | null = null;
+    if (lanUrl != null && String(lanUrl).trim() !== "") {
+      const v = validateLanUrl(lanUrl);
+      if ("url" in v) lan = v.url;
+    }
 
     const res = await env.DB.prepare(DEVICE_HEARTBEAT_SQL).bind(
       String(deviceId),
       Math.floor(Date.now() / 1000),
       capabilities != null ? sanitizeCapabilities(capabilities) : null,
       await hashDeviceToken(String(token)),
+      lan,
     ).run();
 
     // A wrong token and a revoked device look identical from outside —
@@ -293,6 +361,14 @@ export class DevicesListCall extends OpenAPIRoute {
       // timestamp: report `null` (unknown from here) and let the caller probe.
       online: isEndpointKind(d.kind) ? null : (!!d.last_seen && now - d.last_seen < PRESENCE_WINDOW_S),
       ...(isEndpointKind(d.kind) ? { url: d.url } : {}),
+      // Only while the board is actually PRESENT. A stale address is worse than
+      // none: DHCP reassigns it, so a client would dial whatever machine now
+      // holds 192.168.1.207 and wait out a timeout before falling back to the
+      // cloud — slower than never having tried. Omitted, not empty-string, so a
+      // client's `if let` is the whole check.
+      ...(d.lan_url && !isEndpointKind(d.kind)
+          && !!d.last_seen && now - d.last_seen < PRESENCE_WINDOW_S
+        ? { lan_url: d.lan_url } : {}),
     }));
     return json({ ok: true, devices });
   }

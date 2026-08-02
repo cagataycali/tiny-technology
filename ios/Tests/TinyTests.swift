@@ -4863,3 +4863,89 @@ import Foundation
         #expect(NiclaRecorder.betterTranscript(live: "", secondPass: nil) == "")
     }
 }
+
+/// 🏠 The same-WiFi fast path — the board's address off its own heartbeat.
+///
+/// Reported as "the nicla vision is no longer streaming to ios — it says
+/// connecting through the cloud but i'm at the same wifi". connect() could only
+/// learn a LAN base two ways: a UserDefaults cache (empty on a fresh install,
+/// and dropped whenever a probe fails) and discoverViaRelay — a `stream` invoke
+/// through the CLOUD, measured at 4-32s against the board's single-threaded
+/// loop. So the opening was always cloud polling while the necklace served MJPEG
+/// at ~16 fps one hop away. The device row now carries lan_url.
+///
+/// pickVision is where both decisions live: WHICH board (an orphaned row from a
+/// re-enrollment is permanently offline and can never answer) and WHETHER its
+/// address is usable.
+@Suite struct TinyLiveLanBaseTests {
+    let lan = "http://192.168.1.207:8080"
+
+    func row(_ id: String, online: Bool = true, seen: Double = 1000,
+             lan: String? = nil, platform: String = "nicla-vision") -> [String: Any] {
+        var d: [String: Any] = ["id": id, "platform": platform,
+                                "online": online, "last_seen": seen]
+        if let lan { d["lan_url"] = lan }
+        return d
+    }
+
+    @Test("a present board's lan_url comes back with its id")
+    func lanBaseIsRead() {
+        let got = TinyLive.pickVision(from: [row("v1", lan: lan)])
+        #expect(got?.id == "v1")
+        #expect(got?.lanURL == lan, "without this the app must discover through the cloud")
+    }
+
+    @Test("a row with no lan_url yields nil, not an empty string")
+    func missingLanBaseIsNil() {
+        // An older worker, or a board the registry considers stale. nil is what
+        // makes `if let lan` fall through to discovery.
+        #expect(TinyLive.pickVision(from: [row("v1")])?.lanURL == nil)
+    }
+
+    @Test("an ONLINE board wins over a fresher offline orphan")
+    func onlineBeatsFresh() {
+        // Re-enrolling a board orphans its old row forever: permanently offline,
+        // never answers, and relay discovery never returns a base for it — so
+        // aiming at one costs the whole session.
+        let rows = [row("orphan", online: false, seen: 9999, lan: "http://192.168.1.9:8080"),
+                    row("live", online: true, seen: 10, lan: lan)]
+        let got = TinyLive.pickVision(from: rows)
+        #expect(got?.id == "live")
+        #expect(got?.lanURL == lan, "the orphan's stale address was taken")
+    }
+
+    @Test("among online boards the freshest heartbeat wins")
+    func freshestOnlineWins() {
+        let rows = [row("old", seen: 100), row("new", seen: 500, lan: lan)]
+        #expect(TinyLive.pickVision(from: rows)?.id == "new")
+    }
+
+    @Test("a non-vision device is never picked, however fresh")
+    func onlyVisions() {
+        #expect(TinyLive.pickVision(from: [row("phone", seen: 9999, platform: "ios")]) == nil)
+        #expect(TinyLive.pickVision(from: []) == nil)
+    }
+
+    @Test("a malformed lan_url is dropped so the probe is never aimed at it")
+    func malformedLanBaseIsRefused() {
+        // Each of these would cost 3 probe attempts before discovery even starts,
+        // making the fast path SLOWER than not having it.
+        for bad in ["", "192.168.1.207:8080", "notaurl", "http://", "ftp://192.168.1.5"] {
+            let got = TinyLive.pickVision(from: [row("v1", lan: bad)])
+            #expect(got?.id == "v1", "the device itself must still be found")
+            #expect(got?.lanURL == nil, "malformed base accepted: \(bad)")
+        }
+    }
+
+    @Test("last_seen survives arriving as an Int rather than a Double")
+    func intTimestamps() {
+        // JSONSerialization hands back NSNumber, and `as? Double` on an integer
+        // JSON value returns nil — which would flatten every comparison to 0 and
+        // make the ordering arbitrary.
+        let rows: [[String: Any]] = [
+            ["id": "a", "platform": "nicla-vision", "online": true, "last_seen": 100 as Int],
+            ["id": "b", "platform": "nicla-vision", "online": true, "last_seen": 900 as Int],
+        ]
+        #expect(TinyLive.pickVision(from: rows)?.id == "b")
+    }
+}

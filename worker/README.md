@@ -11,7 +11,7 @@ and the relay.
 |---|---|---|
 | Personas (prompt, knowledge, tools) | `tiny` | Workers KV |
 | Published posts / counters | `post`, `stats` | Workers KV |
-| Users, messages, wallet ledger, events, devices, voice sessions | `DB` | D1 (SQLite) — 31 migrations in [`migrations/`](migrations/) |
+| Users, messages, wallet ledger, events, devices, voice sessions | `DB` | D1 (SQLite) — 32 migrations in [`migrations/`](migrations/) |
 | Semantic search + per-tiny memory | `VECTOR_INDEX`, `MEMORY` | Vectorize (1536-dim, cosine) |
 | Generated images & call recordings | `MEDIA` | R2 |
 | Live voice calls (mic ⇄ realtime API relay) | `VOICE` | Durable Object `VoiceSession` |
