@@ -442,7 +442,11 @@ export function trySlashCommand(text: string, deps: SlashDeps): boolean {
           fetch('/api/learnings', {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({}),
+            // `scope:'all'` and not a bare `{}`: this is the one caller that
+            // MEANS erase-everything, so it should say so rather than lean on
+            // an absent id — the reading that used to make a blank id from a
+            // single-row swipe erase the lot (lib/chat/learnings-delete-scope).
+            body: JSON.stringify({ scope: 'all' }),
           })
             .then((r) => r.json())
             .then((d) => toast.show(d.ok ? '🧬 All learnings cleared' : (d.error || 'Failed')))

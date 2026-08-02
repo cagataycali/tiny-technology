@@ -2,10 +2,15 @@
  * /api/learnings — the logged-in user's server-side agent learnings.
  *   GET ?q=&limit=  → { learnings, relevant?, total } (q → semantic recall)
  *   POST { content } → store a learning (≤2000 chars)
- *   DELETE { id? }   → delete one (or all when id absent)
+ *   DELETE { id }    → close ONE memory (bitemporal — survives as history)
+ *          { scope:'all' } or a bare {} → erase EVERY memory + purge the
+ *          semantic index. Not recoverable, so a blank/unreadable id is refused
+ *          with a 400 rather than read as this — see lib/chat/learnings-delete-scope.
  */
 import { getSession } from "@/lib/auth";
 import { learningsLimit } from "@/lib/chat/memory-list";
+import { planLearningsDelete, deleteRefusalForHumans } from "@/lib/chat/learnings-delete-scope";
+import { unlearnBody } from "@/lib/chat/unlearn-scope";
 
 export const runtime = 'edge'
 
@@ -107,7 +112,22 @@ export async function DELETE(req: Request) {
   if (!session) {
     return new Response(JSON.stringify({ error: 'login required' }), { status: 401 });
   }
-  const { id } = await req.json().catch(() => ({}));
+  // Clear-all must be REQUESTED, never INFERRED. The old body spread
+  // (`...(id !== undefined && id !== '' ? { id } : {})`) did not refuse a blank
+  // id, it OMITTED it — and an omitted id is the wire form of "close every fact,
+  // drop every legacy row, purge every vector", which is the one memory
+  // operation that is not bitemporal and cannot be undone. So a swipe on a
+  // SINGLE row whose id decoded empty erased the user's whole memory, as did a
+  // body that failed to encode (iOS builds this one with `try?`) or to parse.
+  // Same rule the agent tool got in lib/chat/unlearn-scope; see
+  // lib/chat/learnings-delete-scope for why a bare `{}` is still clear-all.
+  const plan = planLearningsDelete(await req.text().catch(() => ''));
+  if (plan.kind === 'refuse') {
+    return new Response(JSON.stringify({ error: deleteRefusalForHumans(plan.reason) }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
   return relay(
     fetch(`${WORKER}/learnings`, {
       method: 'DELETE',
@@ -115,7 +135,7 @@ export async function DELETE(req: Request) {
         'Content-Type': 'application/json',
         'X-Internal-Key': process.env.INTERNAL_API_KEY || '',
       },
-      body: JSON.stringify({ userId: session.sub, ...(id !== undefined && id !== '' ? { id } : {}) }),
+      body: JSON.stringify(unlearnBody(session.sub, plan)),
       signal: AbortSignal.timeout(10_000),
     }),
     'delete failed — try again',

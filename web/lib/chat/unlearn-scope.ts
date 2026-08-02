@@ -34,13 +34,27 @@
  * can be undone.**
  *
  * Pure — no fetch, no session — so every rule here is a node test.
+ *
+ * The same rule now governs the HTTP boundary every UI crosses — see
+ * `lib/chat/learnings-delete-scope`, which reuses this planner and differs in
+ * exactly one documented way (a bare `{}` body).
  */
+
+/**
+ * Why a call was refused. The agent reads [UnlearnPlan]'s `error`; the HTTP
+ * boundary maps this cause to copy a PERSON can read, because `MemoryPanel`
+ * toasts the route's `error` string straight at the user.
+ *
+ * `unreadable-body` is the boundary's alone — [planUnlearn] takes parsed
+ * arguments and so can never return it.
+ */
+export type UnlearnRefusal = 'contradictory' | 'blank-id' | 'unscoped' | 'unreadable-body'
 
 /** What the worker should be asked to do. */
 export type UnlearnPlan =
   | { kind: 'one'; id: string }
   | { kind: 'all' }
-  | { kind: 'refuse'; error: string }
+  | { kind: 'refuse'; reason: UnlearnRefusal; error: string }
 
 /**
  * Resolve `unlearn`'s arguments into a plan.
@@ -62,6 +76,7 @@ export function planUnlearn(args: { id?: unknown; scope?: unknown }): UnlearnPla
     // `all` destroys everything; guessing `one` ignores an explicit request.
     return {
       kind: 'refuse',
+      reason: 'contradictory',
       error:
         "refused: got both an id and scope:'all' — nothing was closed. " +
         'Pass an id to close ONE memory, or scope:\'all\' alone to clear everything.',
@@ -76,6 +91,7 @@ export function planUnlearn(args: { id?: unknown; scope?: unknown }): UnlearnPla
   if (args.id !== undefined) {
     return {
       kind: 'refuse',
+      reason: 'blank-id',
       error:
         'refused: the id was empty, and an empty id used to mean "clear ALL memories" — nothing was closed. ' +
         'Pass a real id from your context or a recall result, or scope:\'all\' if the user asked to erase everything.',
@@ -86,6 +102,7 @@ export function planUnlearn(args: { id?: unknown; scope?: unknown }): UnlearnPla
   // memory operation that cannot be undone.
   return {
     kind: 'refuse',
+    reason: 'unscoped',
     error:
       'refused: unlearn needs either an id (close one memory, kept as history) or ' +
       "scope:'all' (erase EVERY memory and the semantic index — not recoverable). " +
@@ -96,6 +113,12 @@ export function planUnlearn(args: { id?: unknown; scope?: unknown }): UnlearnPla
 /** The worker request body for a plan that is going ahead. */
 export function unlearnBody(userId: string, plan: UnlearnPlan): Record<string, string> {
   if (plan.kind === 'one') return { userId, id: plan.id }
+  // A REFUSED plan must never be encoded. `{ userId }` alone is not a neutral
+  // body — it IS the clear-all request — so falling through here would turn a
+  // refusal into the exact annihilation it refused. Both callers bail on
+  // `refuse` first; throwing means a caller who forgets gets a 500 instead of a
+  // silently erased memory.
+  if (plan.kind === 'refuse') throw new Error('unlearnBody: a refused plan must not be sent')
   return { userId }
 }
 

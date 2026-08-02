@@ -159,12 +159,22 @@ describe('the tool is wired to the rule', () => {
 })
 
 describe('the destructive-memory census', () => {
-  it('the HTTP route already guarded the empty id — the tool was the outlier', () => {
-    // app/api/learnings' DELETE spells `id !== undefined && id !== ''`, so the
-    // human path had this rule and the agent path did not. That asymmetry IS
-    // the finding; pinned so the route can't silently lose it either.
+  it('the HTTP route refuses a blank id too — it only LOOKED like it already did', () => {
+    // ⚠️⚠️ This test used to assert the OPPOSITE and pass: "the HTTP route
+    // already guarded the empty id — the tool was the outlier", pinning
+    // `id !== undefined && id !== ''` as proof the human path was safe. That
+    // line is not a guard. It DROPS the blank id, and an omitted id is the wire
+    // form of clear-all, so the route escalated a single-row swipe into "erase
+    // every memory and purge the vector index". The census was wrong in the one
+    // direction that matters, and a green test kept it that way.
+    //
+    // The lesson, since this file's whole job is auditing sibling call sites: a
+    // pin on ANOTHER file must assert the safe BEHAVIOUR, not the presence of a
+    // line that reads reassuringly. Behaviour now lives in
+    // tests/learnings-delete-scope.test.ts.
     const route = read('app/api/learnings/route.ts')
-    expect(route).toMatch(/id !== undefined && id !== ''/)
+    expect(route).not.toMatch(/id !== undefined && id !== ''/)
+    expect(route).toMatch(/const plan = planLearningsDelete\(await req\.text\(\)/)
   })
 
   it('the human path still confirms before closing even ONE memory', () => {
