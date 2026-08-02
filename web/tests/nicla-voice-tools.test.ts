@@ -2,6 +2,7 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { workerFile, workerPresent as present } from './_worker'
 
 import {
   makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool,
@@ -175,6 +176,47 @@ describe('every agent roster mounts the voice necklace', () => {
     const desc = t.slice(0, t.indexOf('inputSchema'))
     expect(desc).toMatch(/necklace-live/)
     expect(desc).toMatch(/vision/i)
+    // A missing audio_url must not be described as missing AUDIO. The phone now
+    // keeps each live segment's recording locally and plays it on the row; it is
+    // simply not uploaded, so this tool cannot hand back a URL. The description
+    // used to explain the null as "that mic recorded no file on the phone" —
+    // true when written, and now the kind of stale reason that makes an agent
+    // tell someone their recording does not exist when it is on their phone.
+    expect(desc).not.toMatch(/recorded no file/)
+    expect(desc, 'a null audio_url must not read as "no recording exists"')
+      .toMatch(/playable|listen/i)
+  })
+
+  it('the description warns that a cut preview is a FRAGMENT, by the worker\'s own field names', () => {
+    // A ~200-char preview of a 1700-char memo is under 12% of what was said, and
+    // an agent can answer from it and sound certain. The list rows carry the two
+    // fields that make the loss visible (transcripts-sql pins their semantics
+    // against real sqlite) — but a field nothing in the description mentions is a
+    // field the model has no reason to read.
+    //
+    // Derived from the worker's list statement rather than quoted, so renaming a
+    // column cannot leave this description silently describing the old shape.
+    const desc = (() => {
+      const s = src('lib/chat/tools/nicla-voice.ts')
+      const t = s.slice(s.indexOf("name: 'nicla_voice_transcripts'"))
+      return t.slice(0, t.indexOf('inputSchema'))
+    })()
+    if (!present) return   // the SQL half of this pin needs the worker checkout
+    const sql = readFileSync(workerFile('transcripts.ts'), 'utf8')
+    const list = sql.slice(sql.indexOf('TRANSCRIPT_LIST_SQL'))
+    // Array.from, not a spread: this tsconfig targets es5 with no downlevelIteration.
+    const aliases = Array.from(
+      list.slice(0, list.indexOf('`;')).matchAll(/AS (\w+)/g), m => m[1])
+    expect(aliases, 'no aliases found in TRANSCRIPT_LIST_SQL — re-anchor this pin')
+      .toContain('truncated')
+    for (const field of aliases) {
+      expect(desc, `the list returns \`${field}\` and the description never mentions it`)
+        .toContain(field)
+    }
+    // And it must say what the flag MEANS, not merely name it.
+    expect(desc).toMatch(/FRAGMENT/)
+    expect(desc, 'a truncated row must send the agent to the full text')
+      .toMatch(/nicla_voice_transcript with its id/)
   })
 
   it('an unattended job is told the transcript store holds passive speech', () => {

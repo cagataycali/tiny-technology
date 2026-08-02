@@ -110,4 +110,54 @@ describe.skipIf(!present)('worker TRANSCRIPT_*_SQL (real statements, real sqlite
     expect(first(SQL.TRANSCRIPT_GET_SQL, { 1: 'tie-new', 2: 'u-tie' })).toBeTruthy()
     expect(first(SQL.TRANSCRIPT_GET_SQL, { 1: 'tie-old', 2: 'u-tie' })).toBeUndefined()
   })
+
+  // ── A cut preview says so, and a whole one doesn't ─────────────────────────
+  //
+  // The bug that earned these: nothing in a list row distinguished "the first
+  // 200 chars of a 2-minute memo" from "a complete short note". The iOS view
+  // rendered the fragment as the take, and the AGENT reading the same list had
+  // the identical blind spot with worse consequences — it can answer a question
+  // from 12% of what was said and sound certain.
+
+  it('a cut row reports truncated + the real length; a whole one does not', () => {
+    insert('t-long', 'u-cut', { text: 'x'.repeat(1700), created: 9001 })  // ≈ a 120s memo
+    insert('t-short', 'u-cut', { text: 'call mom', created: 9000 })
+    const rows: any = all(SQL.TRANSCRIPT_LIST_SQL, { 1: 'u-cut', 2: 10 })
+
+    expect(rows[0].id).toBe('t-long')
+    expect(rows[0].preview).toHaveLength(200)
+    expect(rows[0].truncated, 'a 1700-char take was not flagged as cut').toBeTruthy()
+    // `chars` is what makes the loss measurable rather than merely possible:
+    // 200 of 1700 is under 12%, and the row used to look complete.
+    expect(rows[0].chars).toBe(1700)
+
+    expect(rows[1].preview).toBe('call mom')
+    expect(rows[1].truncated, 'a complete short note was flagged as cut').toBeFalsy()
+    expect(rows[1].chars).toBe(8)
+  })
+
+  it('exactly 200 chars is NOT truncated — the boundary is off-by-one prone', () => {
+    // `>` not `>=`: a take that happens to be exactly the preview length is
+    // whole, and flagging it sends every client off to re-fetch text it already
+    // has. Inferring truncation from `preview.length === 200` — which is what a
+    // client must do without this column — gets this case wrong by definition.
+    insert('t-exact', 'u-edge', { text: 'y'.repeat(200), created: 9100 })
+    insert('t-over', 'u-edge', { text: 'y'.repeat(201), created: 9101 })
+    const rows: any = all(SQL.TRANSCRIPT_LIST_SQL, { 1: 'u-edge', 2: 10 })
+    const by = Object.fromEntries(rows.map((r: any) => [r.id, r]))
+    expect(by['t-exact'].truncated, '200 chars exactly was called truncated').toBeFalsy()
+    expect(by['t-over'].truncated, '201 chars was not called truncated').toBeTruthy()
+  })
+
+  it('the flag tracks the constant, not the number 200', () => {
+    // If TRANSCRIPT_PREVIEW_CHARS is ever retuned, the preview and the flag must
+    // move together — a preview cut at a new width with a threshold still at the
+    // old one is the same invisible-fragment bug wearing different numbers.
+    const cut = SQL.TRANSCRIPT_PREVIEW_CHARS
+    insert('t-c', 'u-const', { text: 'z'.repeat(cut + 1), created: 9200 })
+    const row: any = all(SQL.TRANSCRIPT_LIST_SQL, { 1: 'u-const', 2: 1 })[0]
+    expect(row.preview).toHaveLength(cut)
+    expect(row.truncated).toBeTruthy()
+    expect(row.chars).toBe(cut + 1)
+  })
 })

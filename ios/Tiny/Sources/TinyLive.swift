@@ -680,6 +680,13 @@ final class TinyLive: NSObject, ObservableObject {
         lastError = why
         stateText = why
         running = false
+        // Keep what was already said. This is not a rare path — the board caps
+        // every session at SESSION_MAX_S (300s, tiny_stream.py), so a listen that
+        // runs to the cap ALWAYS ends here rather than through stop(), and the
+        // segment in progress was silently discarded: up to 45s of speech and its
+        // audio, on every long session. The pre-connect fail()s above have no
+        // segment open, so finishSegment() returns immediately for them.
+        finishSegment()
     }
 
     // ---- decoders ----------------------------------------------------------------

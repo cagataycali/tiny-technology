@@ -58,6 +58,22 @@ function fnBody(src: string, sig: string): string {
   return src.slice(at, end)
 }
 
+/**
+ * Swift with `//` comments stripped, for pins that must match a CALL rather than
+ * a sentence about the call.
+ *
+ * Not pedantry: these sources explain every non-obvious line, so a body that no
+ * longer calls `finishSegment()` still contains the string "finishSegment()" in
+ * the paragraph saying why it used to. A mutation battery found this file's
+ * exit-path pin passing on precisely that mutant — the call deleted, the comment
+ * left — which is what a cleanup or a mis-resolved merge actually produces.
+ *
+ * The `[^:]` guard keeps `https://` out of it.
+ */
+function code(src: string): string {
+  return src.replace(/(^|[^:])\/\/.*$/gm, '$1')
+}
+
 describe('TinyLive — the necklace audio stream is transcribed on-device', () => {
   it('feeds the SAME decoded buffer to the recognizer as to the player', () => {
     expect(LIVE).toMatch(/^import Speech$/m)
@@ -247,13 +263,54 @@ describe('TinyLive — the necklace audio stream is transcribed on-device', () =
     expect(body).toMatch(/requestAuthorization/)
   })
 
-  it('stores the open segment when the card closes or audio is muted', () => {
-    for (const fn of ['func stop()', 'func toggleAudio()']) {
-      const at = LIVE.indexOf(fn)
-      expect(at).toBeGreaterThan(-1)
-      const body = LIVE.slice(at, at + 900)
-      expect(body).toMatch(/finishSegment\(\)/)
+  it('stores the open segment on EVERY path that ends a session', () => {
+    // fail() was missing from this list, and it is not an edge case: the board
+    // caps every session at SESSION_MAX_S (firmware/tiny_stream.py), so a listen
+    // that runs to the cap ends in didCompleteWithError → fail(), never through
+    // stop(). The last segment of every long session was discarded — up to 45s of
+    // speech plus its audio — while the three deliberate exits were all covered.
+    // Enumerated rather than spot-checked for the same reason a glyph roster is
+    // derived: a hand-kept list of exits is exactly what missed this one.
+    // Matched against CODE, not prose: all three of these bodies carry a comment
+    // explaining why they call finishSegment(), and the comment contains the
+    // call's own text. Deleting the line and leaving the paragraph that justifies
+    // it is the realistic regression here — a mutation battery caught this pin
+    // passing on exactly that, which is the shape a cleanup or a bad merge takes.
+    for (const fn of ['func stop()', 'func toggleAudio()', 'private func fail(']) {
+      expect(code(fnBody(LIVE, fn)), `${fn} no longer stores the open segment`)
+        .toMatch(/finishSegment\(\)/)
     }
+  })
+
+  it('the board really does cap the session, so fail() is a routine exit', () => {
+    // The claim above is only true while the firmware caps sessions. If that ever
+    // went away, fail() would be genuinely exceptional and the reasoning above
+    // would be stale — so check the fact it rests on, in the file that owns it.
+    //
+    // The firmware lives in a SEPARATE repo (strands-nicla), which is why no other
+    // test here reads it: a hard read would fail wherever only this repo is
+    // checked out, and a test that breaks on a missing sibling teaches people to
+    // ignore it. So the assertion runs when the file is there and says so when it
+    // isn't, rather than passing silently either way. Both candidate paths are
+    // tried because vitest's cwd here is `web/`, one level below the repo root.
+    let stream: string | null = null
+    for (const rel of ['../../strands-nicla/firmware/tiny_stream.py',
+                       '../strands-nicla/firmware/tiny_stream.py']) {
+      try {
+        stream = readFileSync(join(process.cwd(), rel), 'utf8')
+        break
+      } catch { /* try the next layout */ }
+    }
+    if (stream === null) {
+      console.warn('skipped: strands-nicla not checked out beside this repo')
+      return
+    }
+    const cap = Number(stream.match(/SESSION_MAX_S = (\d+)/)?.[1])
+    expect(cap, 'SESSION_MAX_S not found in tiny_stream.py').toBeGreaterThan(0)
+    const segment = Number(LIVE.match(/segmentSeconds: TimeInterval = (\d+)/)?.[1])
+    // A cap shorter than a segment would mean NO segment ever completes normally.
+    expect(segment).toBeGreaterThan(0)
+    expect(cap).toBeGreaterThan(segment)
   })
 
   it('drops silence instead of posting empty rows to the agent context', () => {
