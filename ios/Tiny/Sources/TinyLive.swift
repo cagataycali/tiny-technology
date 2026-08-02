@@ -46,6 +46,61 @@ enum RelayReply {
     }
 }
 
+/// One segment's audio on disk, so a necklace-live row can be played back.
+///
+/// Same shape as NiclaRecorder.TakeBox's file half and for the same reason: a
+/// write that throws POISONS the container, so the file handle is dropped on the
+/// first failure and the transcript half of the segment survives. `frames` is
+/// what tells finishSegment whether there is anything worth keeping — a file
+/// that exists with no audio in it is an unplayable row with a Play button.
+final class SegmentAudio {
+    private var file: AVAudioFile?
+    private(set) var frames = 0
+    let url: URL
+    let name: String
+
+    /// AAC at the stream's own 16kHz mono, matching the m4a a phone-mic take
+    /// writes — the transcripts list plays rows through one AVPlayer and one
+    /// upload path, so a second container format would need a second of each.
+    init?(dir: URL, format: AVAudioFormat) {
+        name = "live-\(UUID().uuidString).m4a"
+        url = dir.appendingPathComponent(name)
+        guard let f = try? AVAudioFile(
+            forWriting: url,
+            settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: format.channelCount,
+                AVEncoderBitRateKey: 32_000,
+            ],
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved)
+        else { return nil }
+        file = f
+    }
+
+    func write(_ buffer: AVAudioPCMBuffer) {
+        guard let f = file else { return }
+        do {
+            try f.write(from: buffer)
+            frames += Int(buffer.frameLength)
+        } catch {
+            file = nil
+        }
+    }
+
+    /// Close EXPLICITLY, and return whether the file is worth keeping.
+    ///
+    /// Not left to dealloc: the first e2e clip this app ever uploaded was 97KB of
+    /// AAC packets with no moov atom, because the bytes were read before deferred
+    /// finalization wrote the index — a file that was unplayable everywhere while
+    /// every log line said ok.
+    func finish() -> Bool {
+        file = nil
+        return frames > 0
+    }
+}
+
 /// Recognition text written by the recognizer's callback, read by the actor.
 ///
 /// The same reason NiclaRecorder has TakeBox: the recognitionTask closure is
@@ -148,6 +203,20 @@ final class TinyLive: NSObject, ObservableObject {
     private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
     private var speechTask: SFSpeechRecognitionTask?
     private var speechBox: LiveTextBox?
+    /// The current segment's audio, written to disk so the row can be PLAYED.
+    ///
+    /// "in ios app we will be able to listen all the speech + transcription
+    /// directly" — a necklace-live row had the transcription half and not the
+    /// listening half: it stored text with `audioFile: nil`, so the list showed
+    /// the words with no Play button and the audio was decoded, heard once, and
+    /// dropped. Nothing else in the app could reach it afterwards.
+    ///
+    /// This is a THIRD consumer of the buffer feedAudio already built, not a
+    /// second capture: the same DC-corrected, gain-normalized buffer that goes to
+    /// the speaker and the recognizer. Writing the raw stream instead would store
+    /// audio at the mic's native ~-48 dBFS, which is measurably inaudible — the
+    /// level that transcribes to nothing at all.
+    private var segmentAudio: SegmentAudio?
     private var segmentStartedAt: Date?
     private var lastTextPublish = Date.distantPast
     /// When the current TASK was created (not the segment) — what the restart
@@ -691,6 +760,15 @@ final class TinyLive: NSObject, ObservableObject {
         guard transcribeSpeech else { return }
         let now = Date()
 
+        // Third consumer: keep it, so the row can be played later. Opened here
+        // rather than in startSpeech() because startSpeech() runs again on every
+        // recognizer restart — several times per segment — and a file per restart
+        // would leave one playable fragment and a directory of orphans.
+        if segmentAudio == nil {
+            segmentAudio = SegmentAudio(dir: NiclaRecorder.storeDir(), format: audioFormat)
+        }
+        segmentAudio?.write(buf)
+
         // Keep the recent past so a restart can replay it (see `preroll`).
         preroll.append(buf)
         var held = preroll.reduce(0) { $0 + Int($1.frameLength) }
@@ -881,7 +959,7 @@ final class TinyLive: NSObject, ObservableObject {
         // request would throw away utterances banked by restartTask() when the
         // segment ends with a dead task, which is the common case: the last thing
         // a stream does is fall quiet.
-        guard speechRequest != nil || !bankedUtterances.isEmpty else { return }
+        guard speechRequest != nil || !bankedUtterances.isEmpty || segmentAudio != nil else { return }
         let text = segmentText()
         let seconds = segmentStartedAt.map { Int(Date().timeIntervalSince($0).rounded()) } ?? 0
         speechRequest?.endAudio()
@@ -893,12 +971,26 @@ final class TinyLive: NSObject, ObservableObject {
         segmentStartedAt = nil
         preroll = []
         liveText = ""
-        guard text.count >= Self.minSegmentChars else { return }
+        // Close the file before deciding anything: an AVAudioFile still open has
+        // no moov atom on disk, so a row pointing at it would have a Play button
+        // that fails. Take the audio ONLY if the transcript is also worth keeping
+        // — a discarded segment must not leak its file, and 45 seconds of an empty
+        // room is not something to store every 45 seconds forever.
+        let audio = segmentAudio
+        segmentAudio = nil
+        let keptAudio = audio?.finish() == true
+        guard text.count >= Self.minSegmentChars else {
+            if let u = audio?.url { try? FileManager.default.removeItem(at: u) }
+            return
+        }
         // Same rail as a phone-mic take: it lands in the transcripts list and in
         // the agent's context. Labelled by its source so the model can tell the
         // necklace's own microphone from a take the phone recorded.
+        // The label is the shared constant, not a literal: the eviction rule keys
+        // off it, so a typo here would silently make live audio permanent.
         NiclaRecorder.shared.storeHeard(
-            text: text, label: "necklace-live", seconds: max(1, seconds))
+            text: text, label: NiclaRecorder.liveLabel, seconds: max(1, seconds),
+            audioFile: keptAudio ? audio?.name : nil)
     }
 }
 

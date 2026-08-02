@@ -288,7 +288,10 @@ final class NiclaRecorder: ObservableObject {
     /// the next take on its first tick.
     private var stopRequested = false
 
-    private init() { transcripts = Self.loadIndex() }
+    private init() {
+        transcripts = Self.loadIndex()
+        Self.sweepOrphanAudio(rows: transcripts)
+    }
 
     /// End the current take now, keeping everything it captured.
     ///
@@ -644,16 +647,26 @@ final class NiclaRecorder: ObservableObject {
     ///
     /// TinyLive transcribes the Nicla Vision's `/audio` stream as it plays it:
     /// the words are the necklace's own microphone, not this phone's, so there
-    /// is no take, no local m4a and nothing to upload — but the transcript
-    /// belongs in exactly the same two places (the list the user reads, and the
-    /// context the agent reads). Text-only rows are why `audioFile`/`audioUrl`
-    /// are optional and why `playable()` checks both.
-    func storeHeard(text: String, label: String, seconds: Int) {
+    /// is no take — but the transcript belongs in exactly the same two places
+    /// (the list the user reads, and the context the agent reads).
+    ///
+    /// - Parameter audioFile: a file ALREADY written into storeDir(). Optional
+    ///   because a segment whose audio failed to write must still store its words:
+    ///   losing the recording is bad, losing the transcript with it is worse.
+    ///   Text-only rows are also why `audioFile`/`audioUrl` are optional and why
+    ///   `playable()` checks both.
+    func storeHeard(text: String, label: String, seconds: Int, audioFile: String? = nil) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !clean.isEmpty else { return }
+        guard !clean.isEmpty else {
+            // No words means no row, so nothing would ever reference the file.
+            if let f = audioFile {
+                try? FileManager.default.removeItem(at: Self.storeDir().appendingPathComponent(f))
+            }
+            return
+        }
         let entry = NiclaTranscript(
             id: UUID().uuidString, at: Date(), seconds: max(1, seconds),
-            label: label, text: clean, audioFile: nil, audioUrl: nil)
+            label: label, text: clean, audioFile: audioFile, audioUrl: nil)
         transcripts.insert(entry, at: 0)
         pruneAndSave()
         // Attributed to the PHONE, not to the Voice necklace. The device token
@@ -780,7 +793,11 @@ final class NiclaRecorder: ObservableObject {
 
     // ── Local persistence (Documents-JSON house pattern, Sessions.swift) ──
 
-    private static func storeDir() -> URL {
+    /// Not private: TinyLive writes necklace-live segment audio into the SAME
+    /// directory, because audioURL(for:) resolves a row's `audioFile` against it.
+    /// A second directory would give those rows a Play button that resolves to
+    /// nothing.
+    static func storeDir() -> URL {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("nicla-transcripts", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -796,6 +813,106 @@ final class NiclaRecorder: ObservableObject {
         guard let data = try? Data(contentsOf: url),
               let list = try? JSONDecoder().decode([NiclaTranscript].self, from: data) else { return [] }
         return list
+    }
+
+    /// Label TinyLive files its live segments under. Shared so the eviction rule
+    /// and the writer cannot drift — a typo here would silently make live audio
+    /// permanent, which is the exact failure the rule exists to prevent.
+    nonisolated static let liveLabel = "necklace-live"
+
+    /// Byte budget for AUTOMATIC audio: 6.2h of listening, MEASURED not computed.
+    ///
+    /// A 45s segment encoded exactly the way SegmentAudio encodes one (16kHz mono
+    /// AAC, 32kbps requested, speech-like duty cycle) came out at 197KB — 36kbps
+    /// on the wire, since the requested rate excludes container overhead. So 96MB
+    /// is 497 segments, not the ~4h that dividing by 32kbps predicts.
+    nonisolated static let liveAudioBudget = 96 * 1024 * 1024
+
+    /// Which rows should lose their audio file, oldest automatic audio first.
+    ///
+    /// pruneAndSave's rule was "never evict a row that owns a local audio file",
+    /// and it was right for what existed: takes are made by hand, a few a day, and
+    /// a refresh must not destroy the only offline copy. Live segments break the
+    /// assumption underneath it — the necklace files one every 45 seconds for as
+    /// long as its card is open, so "keep them all" is unbounded disk growth on
+    /// someone's phone.
+    ///
+    /// So the bound applies ONLY to automatic audio, and hand-made takes stay
+    /// exempt. The text of an evicted row is untouched: what the necklace heard is
+    /// small, durable, and the thing the agent reads — losing the recording is a
+    /// tradeoff, losing the words with it would not be.
+    ///
+    /// - Parameter rows: newest first, `(id, label, bytes)`.
+    /// - Returns: ids whose audio file should be deleted.
+    nonisolated static func audioEvictions(
+        rows: [(id: String, label: String, bytes: Int)], budget: Int
+    ) -> Set<String> {
+        var used = 0
+        var evict: Set<String> = []
+        // A row with no audio on disk (text-only, or a segment whose file failed to
+        // write) is never evicted, and needs no guard to say so: `used` is only ever
+        // advanced when it fits, so `used <= budget` holds and a 0-byte row's
+        // `used + 0 <= budget` is always true. A `r.bytes > 0` filter here read as
+        // load-bearing and could not be broken by any mutation.
+        for r in rows {
+            // A manual take is never counted and never evicted, so a phone full of
+            // live segments cannot push a memo off the disk.
+            guard r.label == liveLabel else { continue }
+            if used + r.bytes <= budget {
+                used += r.bytes
+            } else {
+                evict.insert(r.id)
+            }
+        }
+        return evict
+    }
+
+    /// Files in storeDir() that no row claims, so they can be deleted at launch.
+    ///
+    /// audioEvictions bounds the audio rows POINT at. A segment file is opened
+    /// before its row exists — TinyLive writes as it listens and only calls
+    /// storeHeard when the segment closes — so a crash, a force-quit, or a jetsam
+    /// kill mid-segment leaves a file nothing references. Those are invisible to
+    /// every rule here (pruneAndSave walks `transcripts`, and an orphan is in no
+    /// row's audioFile), which means the budget could be perfectly enforced while
+    /// the directory still grew without limit. This is the other door.
+    ///
+    /// index.json is not audio and is what the rows were loaded from; anything
+    /// else without a claim, and old enough that nothing can still be writing it,
+    /// goes.
+    ///
+    /// The age gate is not caution, it is required for correctness. `shared` is
+    /// lazily initialized, and the FIRST live segment is what triggers it — from
+    /// storeHeard, after the file was written and before the row exists. Without
+    /// the gate this sweep would delete the very segment that woke it, and could
+    /// delete one still open (AVAudioFile would keep writing to an unlinked inode
+    /// and the audio would vanish with every log still reading ok). A segment is
+    /// at most `segmentSeconds` and a take at most `maxSeconds`, so minutes of
+    /// slack costs one extra launch before an orphan is collected.
+    nonisolated static let minOrphanAge: TimeInterval = 600
+
+    nonisolated static func orphanAudio(
+        files: [(name: String, age: TimeInterval)], rows: [String]
+    ) -> [String] {
+        let claimed = Set(rows)
+        return files.filter {
+            $0.name != "index.json" && !claimed.contains($0.name) && $0.age >= minOrphanAge
+        }.map(\.name)
+    }
+
+    private static func sweepOrphanAudio(rows: [NiclaTranscript]) {
+        let dir = storeDir()
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        let now = Date()
+        let files = names.map { n -> (name: String, age: TimeInterval) in
+            var age: TimeInterval = 0
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: dir.appendingPathComponent(n).path),
+               let m = attrs[.modificationDate] as? Date { age = now.timeIntervalSince(m) }
+            return (n, age)
+        }
+        for f in orphanAudio(files: files, rows: rows.compactMap(\.audioFile)) {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent(f))
+        }
     }
 
     private func pruneAndSave() {
@@ -819,6 +936,23 @@ final class NiclaRecorder: ObservableObject {
         }
         for d in dropped {
             if let url = Self.audioURL(for: d) { try? FileManager.default.removeItem(at: url) }
+        }
+        // Bound the AUTOMATIC audio, keeping the words. See audioEvictions: rows
+        // are newest-first here, so this keeps the recent past playable and lets
+        // the older segments become text-only rather than filling the disk.
+        let sized = kept.map { t -> (id: String, label: String, bytes: Int) in
+            var bytes = 0
+            if let u = Self.audioURL(for: t),
+               let attrs = try? FileManager.default.attributesOfItem(atPath: u.path),
+               let n = attrs[.size] as? Int { bytes = n }
+            return (t.id, t.label, bytes)
+        }
+        let evict = Self.audioEvictions(rows: sized, budget: Self.liveAudioBudget)
+        if !evict.isEmpty {
+            for i in kept.indices where evict.contains(kept[i].id) {
+                if let u = Self.audioURL(for: kept[i]) { try? FileManager.default.removeItem(at: u) }
+                kept[i].audioFile = nil
+            }
         }
         transcripts = kept
         let url = Self.storeDir().appendingPathComponent("index.json")

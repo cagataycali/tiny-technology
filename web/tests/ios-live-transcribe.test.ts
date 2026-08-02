@@ -35,6 +35,29 @@ const LIVE = readFileSync(
 const REC = readFileSync(
   join(process.cwd(), 'ios/Tiny/Sources/NiclaRecorder.swift'), 'utf8')
 
+/**
+ * One method's body, bounded by its own closing brace.
+ *
+ * Replaces the `slice(at, at + 1400)` windows this suite used to use. A
+ * fixed-length window does not break when the code it pins changes — it breaks
+ * when the code merely GROWS, and it breaks by silently ending before the line
+ * it was written to find. Four pins here failed that way at once when
+ * finishSegment and storeHeard each gained a dozen lines above their targets,
+ * and a "fix" that bumps the number just re-arms the same trap.
+ *
+ * `\n    }\n` is the method-level closer in both of these files (four-space
+ * indent, nothing nested at that level), so it bounds the body without needing a
+ * brace matcher. Throws rather than returning '' — an empty body would pass
+ * every `.not.toMatch()` in this file forever.
+ */
+function fnBody(src: string, sig: string): string {
+  const at = src.indexOf(sig)
+  if (at < 0) throw new Error(`fnBody: "${sig}" not found — re-anchor this pin`)
+  const end = src.indexOf('\n    }\n', at)
+  if (end < 0) throw new Error(`fnBody: no method-level close after "${sig}"`)
+  return src.slice(at, end)
+}
+
 describe('TinyLive — the necklace audio stream is transcribed on-device', () => {
   it('feeds the SAME decoded buffer to the recognizer as to the player', () => {
     expect(LIVE).toMatch(/^import Speech$/m)
@@ -235,17 +258,26 @@ describe('TinyLive — the necklace audio stream is transcribed on-device', () =
 
   it('drops silence instead of posting empty rows to the agent context', () => {
     expect(LIVE).toMatch(/minSegmentChars = \d+/)
-    const fin = LIVE.slice(LIVE.indexOf('private func finishSegment()'))
-    expect(fin.slice(0, 1600)).toMatch(/text\.count >= Self\.minSegmentChars else \{ return \}/)
+    const fin = fnBody(LIVE, 'private func finishSegment()')
+    // Re-anchored: the guard is no longer a one-liner. A short segment now has to
+    // delete its own audio on the way out, so the `else` opens a block — but the
+    // THRESHOLD is the claim, and the early return is still what enforces it.
+    expect(fin).toMatch(/guard text\.count >= Self\.minSegmentChars else \{/)
+    expect(fin, 'a segment too short to store is leaking its audio file')
+      .toMatch(/text\.count >= Self\.minSegmentChars else \{\s*\n\s*if let u = audio\?\.url \{ try\? FileManager\.default\.removeItem\(at: u\) \}\s*\n\s*return\s*\n\s*\}/)
   })
 
   it('finishSegment stores banked words even when the live task is dead', () => {
     // The LAST thing a stream does is fall quiet, so the common case is a segment
     // ending with speechRequest already nil. Guarding on the request alone would
     // discard every utterance restartTask() banked — which is most of them.
-    const fin = LIVE.slice(LIVE.indexOf('private func finishSegment()'))
-    const body = fin.slice(0, 1600)
-    expect(body).toMatch(/guard speechRequest != nil \|\| !bankedUtterances\.isEmpty else \{ return \}/)
+    const body = fnBody(LIVE, 'private func finishSegment()')
+    // Re-anchored with a third arm: a segment can now have written an audio file
+    // and banked nothing (an empty room still records), and that file has to be
+    // closed and deleted rather than left open and orphaned. Returning early on
+    // `segmentAudio != nil` is what reaches the cleanup below.
+    expect(body).toMatch(
+      /guard speechRequest != nil \|\| !bankedUtterances\.isEmpty \|\| segmentAudio != nil else \{ return \}/)
     expect(body).toMatch(/let text = segmentText\(\)/)
     // And it must reset the segment's accumulators, or the next segment inherits
     // the last one's words and stores them a second time.
@@ -256,19 +288,34 @@ describe('TinyLive — the necklace audio stream is transcribed on-device', () =
   it('a finished segment goes down the same rail as a phone-mic take', () => {
     // The user reads it in the transcripts list; the agent reads it in context.
     // Anything less means the necklace's speech is heard and then forgotten.
-    const fin = LIVE.slice(LIVE.indexOf('private func finishSegment()'))
-    expect(fin.slice(0, 1400)).toMatch(/NiclaRecorder\.shared\.storeHeard\(/)
-    expect(fin.slice(0, 1400)).toMatch(/label: "necklace-live"/)
+    const fin = fnBody(LIVE, 'private func finishSegment()')
+    expect(fin).toMatch(/NiclaRecorder\.shared\.storeHeard\(/)
+    // Re-anchored, and STRONGER than the literal it replaces. The label is now a
+    // shared constant because the eviction rule keys off it: a typo in either
+    // place would exempt live audio from its own disk budget, silently, with
+    // every row still playing. So both halves of the indirection are pinned —
+    // the call site referring to the constant, and the constant's own value,
+    // which is the string the agent's tool descriptions promise.
+    expect(fin, 'the label went back to a literal — the budget can now drift from the writer')
+      .toMatch(/label: NiclaRecorder\.liveLabel/)
+    expect(REC).toMatch(/liveLabel = "necklace-live"/)
 
-    const store = REC.slice(REC.indexOf('func storeHeard('))
-    const body = store.slice(0, store.indexOf('\n    }\n'))
+    const body = fnBody(REC, 'func storeHeard(')
     expect(body).toMatch(/transcripts\.insert\(entry, at: 0\)/)   // the list
     expect(body).toMatch(/pruneAndSave\(\)/)                       // survives relaunch
     expect(body).toMatch(/postToServer\(entry/)                    // the agent
-    // Text-only: the necklace's mic recorded no local file on this phone.
-    expect(body).toMatch(/audioFile: nil, audioUrl: nil/)
-    // And it must refuse empty text on its own, not trust its one caller.
-    expect(body).toMatch(/guard !clean\.isEmpty else \{ return \}/)
+    // Re-anchored: a segment row now CAN own a local file (that is the whole
+    // point of the arc), so the old `audioFile: nil` literal is gone. The claim
+    // underneath it was "whatever the caller passes is what gets stored, and the
+    // row is honest about having no audio" — so what is pinned is the pass-through
+    // plus the default that keeps every other caller text-only.
+    expect(body).toMatch(/audioFile: audioFile, audioUrl: nil/)
+    expect(REC).toMatch(/func storeHeard\(text: String, label: String, seconds: Int, audioFile: String\? = nil\)/)
+    // And it must refuse empty text on its own, not trust its one caller —
+    // now also deleting the file it was handed, since no row will reference it.
+    expect(body).toMatch(/guard !clean\.isEmpty else \{/)
+    expect(body, 'empty words now leak the segment file they were handed')
+      .toMatch(/if let f = audioFile \{/)
   })
 
   it('a Vision-heard segment is signed by the PHONE, not the Voice necklace', () => {
@@ -277,10 +324,8 @@ describe('TinyLive — the necklace audio stream is transcribed on-device', () =
     // is the necklace hearing you; a Vision audio segment is a different board
     // entirely, and filing it under the Voice would put words in the mouth of
     // hardware that was not in the room.
-    const store = REC.slice(REC.indexOf('func storeHeard('))
-    expect(store.slice(0, 1200)).toMatch(/postToServer\(entry, asVoiceNecklace: false\)/)
-    const post = REC.slice(REC.indexOf('private func postToServer('))
-    const body = post.slice(0, 900)
+    expect(fnBody(REC, 'func storeHeard(')).toMatch(/postToServer\(entry, asVoiceNecklace: false\)/)
+    const body = fnBody(REC, 'private func postToServer(')
     expect(body).toMatch(/asVoiceNecklace: Bool = true/)
     // The false branch must NOT be able to fall back to the gateway credential.
     expect(body).toMatch(/\? \(NiclaVoiceGateway\.shared\.credentials \?\? phone\)\s*\n\s*: phone/)

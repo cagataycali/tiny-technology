@@ -5053,3 +5053,150 @@ import Foundation
         #expect(NiclaRecorder.maxSeconds == 120)
     }
 }
+
+/// 💾 Live segment audio is bounded; a hand-made take is not.
+///
+/// The necklace files a segment every ~45s for as long as its card is open, so the
+/// old rule ("never evict a row that owns a local audio file") meant unbounded disk
+/// growth on someone's phone. The bound applies to AUTOMATIC audio only, and it
+/// takes the file, never the words.
+@Suite struct NiclaAudioEvictionTests {
+    typealias Row = (id: String, label: String, bytes: Int)
+
+    func live(_ id: String, _ bytes: Int) -> Row { (id, NiclaRecorder.liveLabel, bytes) }
+    func manual(_ id: String, _ bytes: Int) -> Row { (id, "wake: hey tiny", bytes) }
+
+    @Test("under budget nothing is evicted")
+    func underBudget() {
+        let rows = [live("a", 10), live("b", 10), live("c", 10)]
+        #expect(NiclaRecorder.audioEvictions(rows: rows, budget: 100).isEmpty)
+    }
+
+    @Test("the newest segments stay playable, the older ones become text-only")
+    func newestFirstRetention() {
+        // Rows arrive newest-first (transcripts.insert(at: 0)), so filling the
+        // budget from the top is what keeps the recent past playable.
+        let rows = [live("new", 40), live("mid", 40), live("old", 40)]
+        let evict = NiclaRecorder.audioEvictions(rows: rows, budget: 100)
+        #expect(evict == ["old"], "eviction should start from the oldest audio, not the newest")
+    }
+
+    @Test("a manual take is never evicted")
+    func manualExempt() {
+        let rows = [live("seg1", 90), manual("memo", 90), live("seg2", 90)]
+        let evict = NiclaRecorder.audioEvictions(rows: rows, budget: 100)
+        #expect(evict.contains("memo") == false, "a hand-made recording lost its only offline copy")
+        #expect(evict == ["seg2"])
+    }
+
+    @Test("a manual take does not consume the live budget")
+    func manualNotCounted() {
+        // Otherwise one long memo could push every live segment out, even though
+        // the memo is not what the bound exists to contain.
+        let withMemo = NiclaRecorder.audioEvictions(
+            rows: [manual("memo", 1_000), live("seg", 50)], budget: 100)
+        #expect(withMemo.isEmpty, "the memo's bytes were charged to the live budget")
+    }
+
+    @Test("rows with no audio are never named, even past the budget")
+    func zeroByteRowsIgnored() {
+        // A text-only row (server-merged, or a segment whose file failed to write)
+        // has nothing to delete; naming it would clear an audioFile that is nil.
+        #expect(NiclaRecorder.audioEvictions(
+            rows: [live("text1", 0), live("kept", 100), live("text2", 0)],
+            budget: 100).isEmpty)
+        // And once the budget is spent, a 0-byte row must still not be named — the
+        // row that follows an eviction is the one a naive rule would sweep up.
+        #expect(NiclaRecorder.audioEvictions(
+            rows: [live("big", 200), live("text", 0)], budget: 100) == ["big"])
+    }
+
+    @Test("a single segment larger than the whole budget is evicted, not kept")
+    func oversizeSegment() {
+        // `used + bytes <= budget` must be the test. A `used <= budget` check would
+        // admit one unbounded file, which is the exact growth being bounded.
+        let evict = NiclaRecorder.audioEvictions(rows: [live("huge", 500)], budget: 100)
+        #expect(evict == ["huge"])
+    }
+
+    @Test("an empty list evicts nothing")
+    func emptyList() {
+        #expect(NiclaRecorder.audioEvictions(rows: [], budget: 0).isEmpty)
+    }
+
+    @Test("the writer's label is the rule's label")
+    func labelsCannotDrift() {
+        // TinyLive.finishSegment stores rows under NiclaRecorder.liveLabel. If that
+        // string and this rule ever disagreed, live audio would be exempt from its
+        // own budget and grow forever — silently, since everything still plays.
+        #expect(NiclaRecorder.liveLabel == "necklace-live")
+        let evict = NiclaRecorder.audioEvictions(
+            rows: [(id: "x", label: "necklace-live", bytes: 200)], budget: 100)
+        #expect(evict == ["x"])
+    }
+
+    @Test("the budget is large enough to be worth having")
+    func budgetIsHoursNotMinutes() {
+        // A 45s segment measures 197KB written exactly the way SegmentAudio writes
+        // one, so 96MB is 497 segments ≈ 6.2h. A budget small enough to evict
+        // within one session would make the Play button a lie.
+        let segmentBytes = 197 * 1024
+        let hours = Double(NiclaRecorder.liveAudioBudget / segmentBytes) * 45 / 3600
+        #expect(hours >= 4, "the budget holds only \(hours)h of listening")
+    }
+}
+
+/// 🧹 A file nothing points at is still a file on the disk.
+///
+/// audioEvictions bounds the audio ROWS point at. A segment file is opened before
+/// its row exists, so a crash mid-segment leaves a file invisible to every rule
+/// that walks `transcripts` — the budget could be perfectly enforced while the
+/// directory grew without limit.
+@Suite struct NiclaOrphanAudioTests {
+    typealias File = (name: String, age: TimeInterval)
+    let old: TimeInterval = NiclaRecorder.minOrphanAge + 1
+
+    @Test("an unclaimed old file is collected")
+    func orphanCollected() {
+        let files: [File] = [("live-a.m4a", old), ("live-b.m4a", old)]
+        #expect(NiclaRecorder.orphanAudio(files: files, rows: ["live-a.m4a"]) == ["live-b.m4a"])
+    }
+
+    @Test("a claimed file is never collected, however old")
+    func claimedKept() {
+        let files: [File] = [("take.m4a", 86_400 * 30)]
+        #expect(NiclaRecorder.orphanAudio(files: files, rows: ["take.m4a"]).isEmpty)
+    }
+
+    @Test("a file still being written is not collected")
+    func freshFileSpared() {
+        // The trap this gate exists for: `shared` is lazily initialized, and the
+        // FIRST live segment triggers it from storeHeard — file written, row not
+        // yet inserted. Without the age gate the sweep deletes the segment that
+        // woke it, or unlinks one AVAudioFile is still writing to.
+        let files: [File] = [("live-open.m4a", 3)]
+        #expect(NiclaRecorder.orphanAudio(files: files, rows: []).isEmpty,
+                "the sweep deleted audio that was still being written")
+    }
+
+    @Test("the age gate outlasts the longest thing that can be open")
+    func gateCoversSegmentAndTake() {
+        // A segment runs up to 45s and a take up to maxSeconds. If the gate were
+        // shorter than either, a launch during a long recording would delete it.
+        #expect(NiclaRecorder.minOrphanAge > Double(NiclaRecorder.maxSeconds))
+        #expect(NiclaRecorder.minOrphanAge >= 300)
+    }
+
+    @Test("the index is never collected")
+    func indexSpared() {
+        // It is not audio, and it is the file the rows were just loaded FROM —
+        // deleting it would erase every transcript on the next launch.
+        let files: [File] = [("index.json", old)]
+        #expect(NiclaRecorder.orphanAudio(files: files, rows: []).isEmpty)
+    }
+
+    @Test("an empty directory collects nothing")
+    func emptyDir() {
+        #expect(NiclaRecorder.orphanAudio(files: [], rows: ["live-a.m4a"]).isEmpty)
+    }
+}
