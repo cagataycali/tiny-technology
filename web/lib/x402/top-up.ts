@@ -173,6 +173,40 @@ export const faucetCta = (
 }
 
 /**
+ * 💧 What the faucet card says when the claim came back with NOTHING IT COULD READ.
+ *
+ * All three clients used to say **"couldn't reach the faucet"** here, under a ⚠️,
+ * and two of them added "try again". None of them can back any of that up:
+ *
+ *   - web  — `faucetClaim()` is `fetch().then(r => r.json())`, so the rejection is
+ *            a transport drop OR the `AbortSignal.timeout` firing (the request WAS
+ *            delivered) OR a body that wasn't JSON (the server DID answer — a
+ *            platform 502 page, a captive portal's login HTML).
+ *   - iOS  — `Wallet.post()` returns nil for a malformed `Api.base` (Settings typo,
+ *            nothing was ever sent), for transport/timeout, and for a non-JSON
+ *            body. `LoadFailure.message` already knows to keep those apart.
+ *   - Android — `executeJson` never throws on non-JSON, so its null is transport
+ *            OR the settle timeout. Still not "unreachable".
+ *
+ * ⚠️ And the timeout case is the one that costs money. `/api/wallet/faucet`
+ *    CREDITS THE LEDGER and only then waits on the TinyUSDC mint receipt (~20s),
+ *    so a client that gives up is looking at credit the user already has. Told
+ *    "couldn't reach the faucet — try again", they press again, get the 429, and
+ *    now believe the claim failed twice while holding the money. iOS's
+ *    `claimFaucet` documents that exact sequence — it raised its own deadline to
+ *    120s to make it rarer and left the sentence in place.
+ *
+ * So: name no cause, don't invite the retry that 429s, and point at the balance,
+ * which is the only thing that actually answers the question. Same shape the
+ * withdraw path on all three clients already uses for its own unknown outcome
+ * ("couldn't confirm — check Activity before retrying") — the faucet, one card up,
+ * never got it. The ⏳ is load-bearing: ⚠️ is the unfounded conclusion in glyph
+ * form, and the picture is read before the words.
+ */
+export const faucetNoAnswerNote =
+  "⏳ Couldn't confirm the claim — the drip may already be credited. Check your balance before claiming again."
+
+/**
  * The one-line explanation of the ceiling. Named separately from the CTA because
  * it's shown in ALL faucet states — a user who just claimed still needs to know
  * why their ceiling is what it is, and that following is what raises it.

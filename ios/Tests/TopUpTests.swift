@@ -388,8 +388,27 @@ struct TopUpResultTests {
         }
     }
 
-    @Test func noBodyAtAllIsATransportFailureNotARefusal() {
-        #expect(TopUp.parseFaucetResult(nil) == .failed("couldn't reach the faucet"))
+    /// ⚠️ This test used to be called `noBodyAtAllIsATransportFailureNotARefusal`
+    /// and assert `== .failed("couldn't reach the faucet")` — a name that states
+    /// the wrong conclusion (a nil body is ALSO a malformed base URL, a timeout on
+    /// a delivered POST, or a non-JSON answer) and then pins it to `.failed`, the
+    /// refusal case its own name says it isn't. The name was the bug report.
+    @Test func noReadableBodyIsAnUNKNOWNOutcome() {
+        #expect(TopUp.parseFaucetResult(nil) == .noAnswer)
+        // Not any flavour of refusal: `.failed` means the server said no.
+        if case .failed = TopUp.parseFaucetResult(nil) { Issue.record("nil must not read as a refusal") }
+    }
+
+    /// The line the card shows for it. The claim has to survive re-wording, so what
+    /// is pinned is what it must NOT do: name a cause, or send the user back to the
+    /// button — the retry 429s over credit that may already be theirs.
+    @Test func theNoAnswerLineNamesNoCauseAndSendsYouToTheBalance() {
+        let note = TopUp.noAnswerNote
+        #expect(note.hasPrefix("⏳"))               // ⚠️ would be the same claim in glyph form
+        #expect(!note.contains("reach"))
+        #expect(!note.contains("connection"))
+        #expect(!note.lowercased().contains("try again"))
+        #expect(note.lowercased().contains("balance"))
     }
 
     @Test func anErrorlessFailureStillSaysSomething() {

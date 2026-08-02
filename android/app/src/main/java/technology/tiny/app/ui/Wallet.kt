@@ -159,7 +159,22 @@ fun WalletSheet(app: TinyApp, onDismiss: () -> Unit) {
                                             is WalletCore.FaucetResult.AlreadyClaimed -> { onMsg("⚠️ ${r.error}", true); reloadKey++ }
                                             is WalletCore.FaucetResult.CeilingReached -> { onMsg("⚠️ ${r.error}", true); reloadKey++ }
                                             is WalletCore.FaucetResult.Failed -> { onMsg("⚠️ ${r.error}", true); reloadKey++ }
-                                            null -> onMsg("⚠️ couldn't reach the faucet — try again", true)
+                                            // No readable answer → UNKNOWN, not a
+                                            // refusal. `executeJson` only nulls on
+                                            // an IOException, and the settle
+                                            // timeout is one of those: the POST
+                                            // WAS delivered and the route credits
+                                            // before waiting on the mint. This
+                                            // said "couldn't reach the faucet —
+                                            // try again", which is a cause it
+                                            // never checked plus the one remedy
+                                            // that 429s over money the user
+                                            // already has. Same treatment
+                                            // onWithdraw's null gets below:
+                                            // neutral tone, no retry nudge, and a
+                                            // reload — which it also skipped, so
+                                            // the button kept offering the claim.
+                                            null -> { onMsg(WalletCore.FAUCET_NO_ANSWER, false); reloadKey++ }
                                         }
                                     }
                                 },

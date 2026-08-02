@@ -764,11 +764,27 @@ describe('client fetch deadline census', () => {
   walk('components')
   walk('lib/x402')
 
+  /** Lines with comments blanked but the LINE COUNT preserved, so the offender
+   *  message still points at the right line.
+   *
+   *  Load-bearing: these files explain the rule in prose, and prose quotes code.
+   *  `lib/x402/top-up.ts`'s header describes the web claim path as
+   *  ``fetch(…).then(r => r.json())`` — with comments included, the census read
+   *  its own documentation as an undeadlined fetch and reported a defect that
+   *  wasn't there (inc 24's lesson, in the other direction: that time a
+   *  prose-grep test PASSED on a comment; here one FAILED on one). */
+  const codeLines = (f: string): string[] =>
+    read(f)
+      // Keep the newlines a block comment spans, or every later line number shifts.
+      .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
+      .split('\n')
+      .map((l) => l.replace(/(^|\s)\/\/.*$/, '$1'))
+
   it('the money modules have no deadline-less fetch left', () => {
     const offenders: string[] = []
     for (const f of files) {
       if (!/PayReceipt|WalletSheet|wallet-client|top-up/.test(f)) continue
-      const lines = read(f).split('\n')
+      const lines = codeLines(f)
       lines.forEach((l, i) => {
         if (!/\bfetch\(/.test(l)) return
         const window = lines.slice(i, i + 14).join('\n')

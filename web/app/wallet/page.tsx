@@ -24,6 +24,7 @@ import {
   asNetwork,
   ceilingNote,
   faucetCta,
+  faucetNoAnswerNote,
   networkChoices,
   networkLabel,
   networkShort,
@@ -334,7 +335,19 @@ export default function WalletPage() {
         setFaucetMsg(`⚠️ ${d.error || "faucet unavailable"}`);
         loadDepositInfo();
       }
-    } catch { setFaucetMsg("⚠️ couldn't reach the faucet"); }
+    } catch {
+      // 💧 No readable answer — an UNKNOWN outcome, not a refusal, and not the
+      // "couldn't reach the faucet" this used to assert (see faucetNoAnswerNote:
+      // the throw is equally a delivered-then-timed-out request, whose credit is
+      // already in the ledger). Refresh BOTH like the ok path does — this branch
+      // used to refresh NEITHER, so the balance stayed stale AND the button kept
+      // reading "Claim $1" over credit the user already held, which is the state
+      // that turns one unanswered POST into a 429 and a user who thinks they were
+      // refused twice.
+      setFaucetMsg(faucetNoAnswerNote);
+      load();
+      loadDepositInfo();
+    }
     finally { setFaucetBusy(false); }
   };
 

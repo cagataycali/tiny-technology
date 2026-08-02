@@ -934,6 +934,15 @@ struct WalletView: View {
         case .alreadyClaimed(let e), .ceilingReached(let e), .failed(let e):
             faucetMsg = "⚠️ \(e)"
             await load()
+        // Nothing readable came back, so the app does not know whether the drip
+        // landed — and this route credits BEFORE it waits on the mint, so it may
+        // well have. Same treatment `withdraw()` gives its own nil below: neutral
+        // ⏳, no retry nudge, and a reload, because the refreshed balance answers
+        // the question the message can't. (This branch used to be `.failed`, which
+        // both asserted a refusal and blamed the network for it.)
+        case .noAnswer:
+            faucetMsg = TopUp.noAnswerNote
+            await load()
         }
     }
 

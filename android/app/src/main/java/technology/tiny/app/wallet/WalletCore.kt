@@ -388,6 +388,21 @@ object WalletCore {
     }
 
     /**
+     * 💧 The card's line when a claim came back with nothing readable — an UNKNOWN
+     * outcome, not a refusal, so [FaucetResult] deliberately has no case for it and
+     * the repository's `null` carries it instead.
+     *
+     * Mirrors `faucetNoAnswerNote` (lib/x402/top-up.ts), where the reasoning lives:
+     * the null is equally a delivered-then-timed-out POST, and `/api/wallet/faucet`
+     * credits the ledger BEFORE waiting on the mint receipt — so "couldn't reach the
+     * faucet — try again" was a cause nobody checked plus the one remedy that 429s
+     * over money the user already holds. Name no cause, point at the balance. ⏳ and
+     * not ⚠️ because the glyph is read first.
+     */
+    const val FAUCET_NO_ANSWER =
+        "⏳ Couldn't confirm the claim — the drip may already be credited. Check your balance before claiming again."
+
+    /**
      * The one-line explanation of the ceiling. Separate from [faucetCta] because
      * it's shown in ALL faucet states — a user who just claimed still needs to know
      * why their ceiling is what it is, and that being followed is what raises it.

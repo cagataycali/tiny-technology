@@ -349,16 +349,33 @@ enum TopUp {
         case alreadyClaimed(String)
         /// 400 — the reputation-scaled lifetime ceiling is spent; waiting won't help.
         case ceilingReached(String)
-        /// 424 (no faucet here) / 401 / 500 — everything else.
+        /// 424 (no faucet here) / 401 / 500 — everything else the server ANSWERED.
         case failed(String)
+        /// No readable answer, so the outcome is UNKNOWN — deliberately NOT a
+        /// fourth flavour of `failed`. `Wallet.post()` returns nil for a malformed
+        /// `Api.base` (nothing sent), for a transport drop or timeout, and for a
+        /// body that wasn't JSON (the server answered, just not in JSON), and this
+        /// used to land on `.failed("couldn't reach the faucet")` — a refusal, with
+        /// a cause, neither of which the app checked. The route credits the ledger
+        /// BEFORE waiting on the mint receipt, so the money may already be there.
+        case noAnswer
     }
+
+    /// The card's line for `.noAnswer`. Mirrors `faucetNoAnswerNote`
+    /// (lib/x402/top-up.ts), where the full reasoning lives: name no cause, don't
+    /// invite the retry that 429s over credit the user already holds, and point at
+    /// the balance — the only thing that actually answers the question. ⏳, not ⚠️:
+    /// the glyph is read first and "this went wrong" is the same unfounded claim in
+    /// picture form.
+    static let noAnswerNote =
+        "⏳ Couldn't confirm the claim — the drip may already be credited. Check your balance before claiming again."
 
     /// `status` is the HTTP code when the caller could capture it (Wallet's
     /// `post()` injects `_status`), used only as a fallback: the worker sets the
     /// flags explicitly, and a proxy that rewrote the body is the case the code is
     /// for.
     static func parseFaucetResult(_ body: [String: Any]?) -> FaucetResult {
-        guard let d = body else { return .failed("couldn't reach the faucet") }
+        guard let d = body else { return .noAnswer }
         if truthy(d["ok"]) {
             return .ok(creditedMicro: micro(d["credited_micro"]),
                        reserveBacked: truthy(d["reserve_backed"]),
