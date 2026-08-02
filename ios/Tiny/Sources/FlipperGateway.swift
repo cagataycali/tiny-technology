@@ -1272,20 +1272,42 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// Sequences are chained rather than fired concurrently. Two overlapping taps
     /// would interleave on the wire as PRESS(up), PRESS(ok), SHORT(up)… which the
     /// input service reads as a chord nobody pressed.
+    ///
+    /// ⚠️⚠️ **RELEASE is not the third step of a sequence, it is the guaranteed undo
+    /// of the first**, and that is why this is not a loop over three events. A loop
+    /// that gives up on the first failure abandons the RELEASE — so a tap whose
+    /// middle event times out or runs out of the board's receive buffer leaves the
+    /// input service holding that key **down**, with the user's thumb already off
+    /// it and nothing on screen saying so. On a board sitting in the Sub-GHz or IR
+    /// app, "OK held down" is not a stuck menu, it is a **transmitter still keyed**
+    /// — the exact harm that keeps input out of the relay in the first place. The
+    /// window is not theoretical either: the likeliest moment to tap is while the
+    /// screen mirror is running, which is precisely when a kilobyte per redraw has
+    /// the flow-control credits and the 8-second timeouts under pressure.
     @MainActor
     func send(_ key: FlipperKey, hold: Bool = false) async throws {
-        let types: [FlipperInputType] = hold
-            ? [.press, .long, .release]
-            : [.press, .short, .release]
         let previous = inputChain
         // Strong self: the class is a @unchecked Sendable singleton, and a weak
         // capture reads as a captured `var` to Swift 6's closure checker.
         let mine = Task { () -> Error? in
             _ = await previous?.value
-            for t in types {
-                do { try await self.input(key, t) } catch { return error }
+            var failure: Error?
+            do { try await self.input(key, .press) } catch { failure = error }
+            // Skipped when the press failed: a SHORT with no PRESS behind it is
+            // the "key went short without ever being pressed" state the board's
+            // own views get stuck in, which is what the sequence exists to avoid.
+            if failure == nil {
+                do { try await self.input(key, hold ? .long : .short) } catch { failure = error }
             }
-            return nil
+            // Sent even when the press failed, because a FAILED press is not a
+            // press that didn't land: `.timeout` means the reply never came back,
+            // and the frame may well have been delivered and acted on. A release
+            // for a key that is not down is ignored by the input service; a key
+            // left down is a radio nobody told to stop.
+            do { try await self.input(key, .release) } catch { failure = failure ?? error }
+            // The first error is the cause and the one worth reporting; a release
+            // that also failed is a symptom of the same broken link.
+            return failure
         }
         inputChain = mine
         if let failure = await mine.value { throw failure }

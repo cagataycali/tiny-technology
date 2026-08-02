@@ -708,11 +708,16 @@ describe('the screen stream and buttons are wired to the numbers the firmware an
     // Not SHORT alone: a view that tracks the key being down (a game, or the IR
     // app transmitting while OK is held) would see a key go short without ever
     // being pressed or released, and stay stuck in whatever that left.
-    const at = gateway.indexOf('func send(')
-    expect(at).toBeGreaterThan(0)
-    const body = gateway.slice(at, at + 900)
-    expect(body).toMatch(/\[\.press, \.long, \.release\]/)
-    expect(body).toMatch(/\[\.press, \.short, \.release\]/)
+    //
+    // Sliced by braces, not by `slice(at, at + 900)`: that window form has cost
+    // this file four false reds in its other shapes, and this cycle grew the
+    // function past 900 bytes.
+    const body = swiftBody(gateway, 'func send(')
+    expect(body).toMatch(/input\(key, \.press\)/)
+    expect(body).toMatch(/input\(key, hold \? \.long : \.short\)/)
+    expect(body).toMatch(/input\(key, \.release\)/)
+    expect(body.indexOf('.press')).toBeLessThan(body.indexOf('.long'))
+    expect(body.indexOf('.long')).toBeLessThan(body.indexOf('.release'))
     // Chained, not concurrent: two overlapping taps would interleave as
     // PRESS(up), PRESS(ok), SHORT(up)… which is a chord nobody pressed.
     expect(body).toContain('inputChain')
@@ -1406,5 +1411,116 @@ describe('a mirror comes back when the link does — but not into a pocket', () 
       swiftBody(gateway, 'enum ResumeCause {').matchAll(/return "([^"]+)"/g), m => m[1])
     expect(texts.length, 'the cause no longer resolves to per-case text').toBe(2)
     expect(texts[0]).not.toBe(texts[1])
+  })
+})
+
+/**
+ * c11 — a key that goes down comes back up, even when the tap fails halfway.
+ *
+ * `send(_:hold:)` was a loop over [PRESS, SHORT, RELEASE] that returned on the
+ * first failure. So a tap whose MIDDLE event failed abandoned the RELEASE, and the
+ * board's input service went on holding that key down — with the user's thumb
+ * already off it and nothing on screen saying so.
+ *
+ * What makes that worse than a stuck menu is where the buttons are pointed. Hazard
+ * 16 is the reason input never became a relay action: on a board sitting in the
+ * Sub-GHz or IR app, a held OK is a **transmitter still keyed**, not a UI glitch.
+ * And the window is the normal case rather than an edge: the likeliest moment for
+ * someone to tap is while the screen mirror is running, which is exactly when a
+ * kilobyte per redraw has the flow-control credits and the 8-second request
+ * timeouts under pressure — `.noRoom` after a 3-second wait, or a plain timeout.
+ *
+ * So RELEASE stops being the third element of a sequence and becomes the undo of
+ * the first, which is a different control-flow shape: it runs whether or not
+ * anything before it worked.
+ */
+describe('a tap always lets go of the key, even when it fails halfway', () => {
+  const send = () => swiftBody(gateway, 'func send(')
+  const middle = () => swiftBody(send(), 'if failure == nil {')
+
+  it('the release is not inside the success path that could skip it', () => {
+    // The defect, stated as the thing that must not be true. A release nested under
+    // "did the press work" is a release a failed tap never sends.
+    //
+    // EVERY such block, not just the first one `middle()` finds: putting the release
+    // back under a SECOND `if failure == nil` is this exact bug wearing the fix's
+    // clothes, and a check that stops at the first block reads it as correct. That
+    // is not hypothetical — the single-block form of this assertion was written
+    // first, and a mutant shaped like the paragraph above walked straight past it.
+    const body = send()
+    let from = 0
+    let blocks = 0
+    while (true) {
+      const at = body.indexOf('if failure == nil {', from)
+      if (at === -1) break
+      blocks++
+      expect(codeOnly(swiftBody(body.slice(at), 'if failure == nil {'), /input\(key/),
+        'a press-succeeded block holds the release — a failed tap never sends it')
+        .not.toMatch(/\.release/)
+      from = at + 1
+    }
+    expect(blocks, 'no press-succeeded block found at all').toBeGreaterThan(0)
+    expect(codeOnly(send(), /\.release/)).toMatch(/input\(key, \.release\)/)
+  })
+
+  it('the middle event IS skipped when the press failed', () => {
+    // The other half, and it is not symmetric: a SHORT with no PRESS behind it is
+    // the "key went short without ever being pressed" state the board's own views
+    // get stuck in, so this one must stay conditional.
+    expect(codeOnly(middle(), /input\(key/)).toMatch(/input\(key, hold \? \.long : \.short\)/)
+    expect(codeOnly(send(), /if failure == nil/)).toMatch(/if failure == nil \{/)
+  })
+
+  it('a failed press still gets a release — a timeout is not a non-delivery', () => {
+    // `.timeout` means the REPLY never came back. The frame may have been delivered
+    // and acted on, so the press that "failed" can be the one holding the key down.
+    // Ordering carries the proof: the release call sits after the guarded block.
+    const body = codeOnly(send(), /input\(key, \.release\)/)
+    const guardAt = body.indexOf('if failure == nil')
+    const releaseAt = body.indexOf('input(key, .release)')
+    const middleAt = body.indexOf('hold ? .long : .short')
+    expect(guardAt, 'no press-succeeded guard found').toBeGreaterThan(-1)
+    expect(middleAt).toBeGreaterThan(guardAt)
+    expect(releaseAt, 'the release runs before the guard, or not at all')
+      .toBeGreaterThan(middleAt)
+  })
+
+  it('nothing swallows the failure: a broken tap still throws', () => {
+    // The panel puts this in front of the user. Made silent, a tap that did nothing
+    // looks exactly like a tap the board ignored.
+    expect(codeOnly(send(), /throw/)).toMatch(/throw failure/)
+  })
+
+  it('a press that fails is recorded, not shrugged off', () => {
+    // `try?` here compiles and reads as tolerant, but it leaves `failure` nil: the
+    // middle event then fires behind a press that never landed, and the tap reports
+    // success to the panel. Both properties above are downstream of this one line,
+    // which is why it gets its own pin rather than being assumed.
+    const body = codeOnly(send(), /input\(key, \.press\)/)
+    expect(body).toMatch(/input\(key, \.press\) \} catch \{ failure = error \}/)
+    expect(body, 'a swallowed error leaves `failure` nil and the tap silent')
+      .not.toMatch(/try\?/)
+  })
+
+  it('the error reported is the CAUSE, not the release that failed after it', () => {
+    // A release failing too is a symptom of the same dead link, and reporting it
+    // instead would name the cleanup as the problem.
+    expect(codeOnly(send(), /failure = failure/)).toMatch(/failure = failure \?\? error/)
+  })
+
+  it('the three events still go out in one order, one tap at a time', () => {
+    // c2's property, re-pinned here because the rewrite touched the same lines:
+    // two overlapping taps interleaving on the wire is a chord nobody pressed.
+    const body = send()
+    expect(body).toMatch(/await previous\?\.value/)
+    expect(body).toMatch(/inputChain = mine/)
+  })
+
+  it('⚠️ and none of this gives the relay a way to press anything', () => {
+    // The fix makes a tap safer, not more reachable. A remote press is a transmit
+    // by another name, so the envelope handler still has no path to it.
+    const handler = codeOnly(swiftBody(session, 'static func handleFlipperEnvelope('))
+    expect(handler).not.toMatch(/\bsend\(/)
+    expect(handler).not.toMatch(/press|release|SendInput/i)
   })
 })
