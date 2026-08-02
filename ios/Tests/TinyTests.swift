@@ -4786,3 +4786,80 @@ import Foundation
         #expect(!t.isPreview && t.text.count == 1700)
     }
 }
+
+/// 🎙️ The second pass may only ever ADD words to a take.
+///
+/// A take's live transcript is stitched from however many SFSpeechRecognitionTasks
+/// the recorder had to roll (one task reports one utterance, then goes deaf), and
+/// every restart is a seam where audio arrived with nothing listening. On iOS 26,
+/// SpeechAnalyzer re-reads the finished m4a in a single pass with no session cap,
+/// so it usually recovers the dropped words — but "usually" is the problem. It
+/// returns nil when the model isn't installed, and it can return a short or empty
+/// result on a file it doesn't like. Overwriting a real transcript with that is a
+/// loss the user cannot see happen and cannot undo: the audio is uploaded, the
+/// row is saved, and the words they said are simply not in it.
+@Suite struct NiclaSecondPassTests {
+    let live = "the roof guy comes tuesday"
+
+    @Test("a longer second pass wins — that is the whole point of running it")
+    func longerReplacesTheLiveText() {
+        // The real shape: the live path caught one sentence of a 90s memo.
+        let full = "the roof guy comes tuesday and the invoice is on the counter"
+        #expect(NiclaRecorder.betterTranscript(live: live, secondPass: full) == full)
+    }
+
+    @Test("nil keeps the live text instead of blanking the transcript")
+    func nilIsNotAnAnswer() {
+        // nil is the COMMON case on a phone that never downloaded the model, so
+        // this is the difference between a working recorder and one that stores
+        // "(silence)" for every take.
+        #expect(NiclaRecorder.betterTranscript(live: live, secondPass: nil) == live)
+    }
+
+    @Test("an empty or whitespace-only second pass never wins")
+    func emptyIsNotAnAnswer() {
+        for junk in ["", "   ", "\n\t "] {
+            #expect(NiclaRecorder.betterTranscript(live: live, secondPass: junk) == live,
+                    "a blank second pass erased the take")
+            // Against an EMPTY live take, too. This is the case the length check
+            // cannot catch: three spaces are longer than "", so without the trim
+            // a silent take stores whitespace and the row renders as blank rather
+            // than as "(silence)". Mutating the trim away proved these two
+            // assertions are the only ones that notice.
+            #expect(NiclaRecorder.betterTranscript(live: "", secondPass: junk).isEmpty,
+                    "whitespace beat an empty take — the trim is not being applied")
+        }
+    }
+
+    @Test("a SHORTER second pass loses, even though it is the better engine")
+    func shorterLoses() {
+        // Tempting to trust the large model unconditionally — this is the case
+        // that says no. Fewer characters here means fewer words the user said.
+        #expect(NiclaRecorder.betterTranscript(live: live, secondPass: "the roof guy") == live)
+    }
+
+    @Test("equal length keeps the live text — a tie is not an improvement")
+    func tieKeepsLive() {
+        // Strictly greater, not >=: rewriting the row for no gain still costs a
+        // save and makes the breadcrumb log lie about a swap that added nothing.
+        #expect(NiclaRecorder.betterTranscript(live: live, secondPass: "THE ROOF GUY COMES TUESDAX") == live)
+    }
+
+    @Test("a second pass is trimmed before it is compared, and before it is stored")
+    func winnerIsTrimmed() {
+        // Analyzer results are joined with spaces, so a leading/trailing space is
+        // normal output — and it must not be what tips the length comparison.
+        let padded = "  \n" + live + "  "
+        #expect(padded.count > live.count, "the fixture must be longer only because of padding")
+        #expect(NiclaRecorder.betterTranscript(live: live, secondPass: padded) == live,
+                "whitespace alone counted as recovered words")
+    }
+
+    @Test("an empty live take accepts anything the second pass heard")
+    func silenceIsAlwaysBeaten() {
+        // The best outcome available: the live tasks caught nothing at all (a
+        // restart storm, a late permission grant), and the file still has speech.
+        #expect(NiclaRecorder.betterTranscript(live: "", secondPass: "hello") == "hello")
+        #expect(NiclaRecorder.betterTranscript(live: "", secondPass: nil) == "")
+    }
+}

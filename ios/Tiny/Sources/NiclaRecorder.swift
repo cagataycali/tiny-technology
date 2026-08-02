@@ -245,6 +245,16 @@ final class NiclaRecorder: ObservableObject {
     /// Newest first; capped — the durable copy is the server's transcript store.
     @Published private(set) var transcripts: [NiclaTranscript] = []
     @Published private(set) var lastError: String?
+    /// What the take has heard SO FAR, republished on the loop's 200ms tick.
+    ///
+    /// The live recording card showed a level meter and no words, and its own
+    /// comment claimed "partial recognition text is not shown anywhere else in
+    /// this view" — true, and there was nothing to show it: the recognizer's
+    /// partials went into TakeBox and no further. A meter proves the mic hears
+    /// SOMETHING; only words prove it hears YOU, which is the thing a person
+    /// recording a memo actually wants to know before trusting it with two
+    /// minutes of speech. Empty until the first partial arrives.
+    @Published private(set) var partial = ""
 
     private static let indexCap = 50
 
@@ -280,6 +290,29 @@ final class NiclaRecorder: ObservableObject {
         stopRequested = true
     }
 
+    /// Pick between the live stitched transcript and the file's second pass.
+    ///
+    /// LONGER WINS, and only longer. The comparison is deliberately crude because
+    /// of which failure it has to prevent: losing words the user really said. A
+    /// second pass that returns nil (no model installed, unsupported locale,
+    /// unreadable file), empty, or shorter than the live text is DISCARDED — the
+    /// live text was heard by a task that was actually listening, and replacing it
+    /// with less is a regression the user cannot detect or undo.
+    ///
+    /// Character count is a poor measure of transcription quality and a good
+    /// detector of "half the take is missing", which is the actual problem: the
+    /// live path stitches N SFSpeechRecognitionTasks and drops audio at every
+    /// seam, so when the one-pass read of the same file is dramatically longer,
+    /// the difference is words, not phrasing.
+    /// `nonisolated` because it is a pure choice between two strings: it touches
+    /// no recorder state, and hopping to the MainActor to compare two lengths
+    /// would put the rule out of reach of a test that has no microphone.
+    nonisolated static func betterTranscript(live: String, secondPass: String?) -> String {
+        guard let full = secondPass?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !full.isEmpty, full.count > live.count else { return live }
+        return full
+    }
+
     // ── The take ──────────────────────────────────────────────────────────
 
     /// One-shot: record `seconds` of phone mic audio while transcribing
@@ -312,6 +345,10 @@ final class NiclaRecorder: ObservableObject {
             claimed = false
             isRecording = false
             level = 0
+            // Cleared with the claim, so the next take never opens showing the
+            // previous one's words — and so a failed take leaves nothing behind
+            // that looks like a recording in progress.
+            partial = ""
         }
         guard await Self.speechAuthorized(),
               await AVAudioApplication.requestRecordPermission() else {
@@ -434,6 +471,14 @@ final class NiclaRecorder: ObservableObject {
                 taskStartedAt = Date()
             }
 
+            // Republish on the tick the loop already runs, rather than from the
+            // recognition callback: that callback is nonisolated and fires on
+            // whatever thread Speech chooses, and hopping to the MainActor per
+            // partial would post far more updates than a view can use. fullText,
+            // not `transcript` — after a restart the live task holds only the
+            // latest utterance, so the card would appear to forget the sentence
+            // the user just watched it type.
+            partial = box.fullText
             try? await Task.sleep(for: .milliseconds(200))
         }
         // What the take REALLY captured. Storing `clamped` here would label a
@@ -455,9 +500,32 @@ final class NiclaRecorder: ObservableObject {
         // fullText, not transcript: `transcript` is only the LIVE task's value,
         // which after a restart is the last utterance alone. A 90s memo that
         // restarted four times would store its closing sentence and drop the rest.
-        let heard = box.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let live = box.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
         let hasAudio = box.finish()
         if !hasAudio { try? FileManager.default.removeItem(at: fileURL) }
+
+        // ── Second pass: read the whole FILE with the large model ─────────────
+        //
+        // `live` is the stitched output of however many SFSpeechRecognitionTasks
+        // this take needed, and every restart boundary is a seam where audio
+        // arrived while no task was listening. The m4a beside it has all of the
+        // audio, and on iOS 26 SpeechAnalyzer transcribes a file in one pass with
+        // no session cap — the engine VoiceMode already uses live, applied here to
+        // the recording instead of the microphone (so no second engine on the
+        // shared input node).
+        //
+        // The choice itself lives in `betterTranscript` so it can be tested
+        // without a microphone — see NiclaSecondPassTests.
+        var secondPass: String?
+        if hasAudio, #available(iOS 26.0, *) {
+            secondPass = await VoiceAnalyzer.transcribeFile(at: fileURL)
+        }
+        let heard = Self.betterTranscript(live: live, secondPass: secondPass)
+        if heard != live {
+            // Left as a breadcrumb rather than a silent swap: when a transcript
+            // looks wrong, the first question is which engine produced it.
+            print("🎙️ second pass: \(live.count) → \(heard.count) chars (SpeechAnalyzer)")
+        }
 
         var entry = NiclaTranscript(
             id: id, at: Date(), seconds: actualSeconds, label: label,
@@ -801,9 +869,9 @@ struct NiclaTranscriptsView: View {
             Group {
                 if rec.isRecording {
                     // A live take is the most important thing on screen while it
-                    // runs: the meter is the only proof the mic is really hearing
-                    // you, and partial recognition text is not shown anywhere
-                    // else in this view.
+                    // runs. The meter proves the mic is moving; only WORDS prove
+                    // it is hearing you, which is why rec.partial is rendered
+                    // below it rather than kept inside the recognizer.
                     VStack(spacing: 10) {
                         Image(systemName: "waveform")
                             .font(.system(size: 34)).foregroundStyle(.red)
@@ -816,7 +884,33 @@ struct NiclaTranscriptsView: View {
                             }
                         }
                         .animation(.easeOut(duration: 0.15), value: rec.level)
-                        Text("Recording — tap Stop when you're done.")
+                        // Live words, tailing. A long take would otherwise push
+                        // the Stop button off-screen, and the newest words are
+                        // the ones that answer "is it hearing me RIGHT NOW" —
+                        // so the scroll pins to the bottom on every change.
+                        if !rec.partial.isEmpty {
+                            ScrollViewReader { sv in
+                                ScrollView {
+                                    Text(rec.partial)
+                                        .font(.callout)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .id("tail")
+                                }
+                                .frame(maxHeight: 160)
+                                .onChange(of: rec.partial) { _, _ in
+                                    withAnimation(.easeOut(duration: 0.15)) {
+                                        sv.scrollTo("tail", anchor: .bottom)
+                                    }
+                                }
+                            }
+                            .padding(.horizontal, 4)
+                        }
+                        // Two different states, said differently: silence during a
+                        // take is normal at the start and alarming after 10 seconds,
+                        // and this line is the only place the app can say which.
+                        Text(rec.partial.isEmpty
+                             ? "Recording — tap Stop when you're done."
+                             : "Transcribing on-device — tap Stop when you're done.")
                             .font(.footnote).foregroundStyle(.secondary)
                         Button {
                             rec.stopEarly()

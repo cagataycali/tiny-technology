@@ -64,6 +64,71 @@ final class VoiceAnalyzer {
         }
     }
 
+    // ── Transcribing a FINISHED recording ──────────────────────────────────
+
+    /// Transcribe an audio file end to end with the large on-device model.
+    ///
+    /// This is the recorder's second pass, and it exists because the live
+    /// SFSpeechRecognizer path can only ever be an approximation of a long take.
+    /// ONE SFSpeechRecognitionTask reports ONE utterance, so NiclaRecorder banks
+    /// each task's words and starts another — and every one of those boundaries
+    /// is a seam where audio arrives while no task is listening (the outgoing
+    /// task's `endAudio()`, the cancel, the new request, the new task all take
+    /// real time), plus a rate-limit floor that deliberately waits before
+    /// restarting so a quiet room can't cause 300 restarts in two minutes. The
+    /// stitched result is legible but lossy, and nothing about it says so.
+    ///
+    /// The take already writes the whole thing to an m4a. `analyzeSequence(from:)`
+    /// reads that file with no session cap and no restarts at all: one pass, one
+    /// transcript, every second of audio seen exactly once. It runs AFTER the
+    /// take, off the audio path — no second engine on the shared input node,
+    /// which is the bug this codebase keeps re-learning.
+    ///
+    /// Returns nil when the model isn't installed, the locale isn't supported, or
+    /// the file won't open. Callers must treat nil as "keep the live text": a
+    /// second pass that fails must never blank a transcript the user did record.
+    static func transcribeFile(at url: URL) async -> String? {
+        guard let locale = await bestSupportedLocale() else { return nil }
+        // installedLocales, NOT shouldUse(): shouldUse() has the side effect of
+        // kicking off a download, which is right when deciding a live session's
+        // engine and wrong here — a missing model means "skip the second pass",
+        // not "start a multi-hundred-MB download because a memo finished".
+        let installed = await SpeechTranscriber.installedLocales
+        guard installed.contains(where: { $0.identifier(.bcp47) == locale.identifier(.bcp47) }) else {
+            return nil
+        }
+        guard let file = try? AVAudioFile(forReading: url) else { return nil }
+
+        // No .volatileResults: nobody is watching this run, and volatile
+        // hypotheses would just be discarded on the way to the final text.
+        let transcriber = SpeechTranscriber(locale: locale,
+                                            transcriptionOptions: [],
+                                            reportingOptions: [],
+                                            attributeOptions: [])
+        do {
+            let analyzer = try await SpeechAnalyzer(inputAudioFile: file,
+                                                   modules: [transcriber],
+                                                   finishAfterFile: true)
+            // Order matters: begin collecting results BEFORE the analyzer is told
+            // to run to the end of the file, or a short clip can finish and close
+            // the stream before anything is reading it.
+            let collector = Task { () -> String in
+                var parts: [String] = []
+                for try await result in transcriber.results where result.isFinal {
+                    let piece = String(result.text.characters).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !piece.isEmpty { parts.append(piece) }
+                }
+                return parts.joined(separator: " ")
+            }
+            _ = try await analyzer.analyzeSequence(from: file)
+            try await analyzer.finalizeAndFinishThroughEndOfInput()
+            let text = try await collector.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        } catch {
+            return nil
+        }
+    }
+
     // ── Session ────────────────────────────────────────────────────────────
 
     /// Start mic → analyzer → results. Callbacks fire on the MainActor.
