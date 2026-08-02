@@ -788,7 +788,8 @@ final class TinySession: NSObject, ObservableObject {
     /// `flipper_status` resolve THIS phone and send it a prompt-shaped `invoke`,
     /// which the relay loop below proxies straight back through /api/chat —
     /// where the same tool resolves the same phone again. One status check, an
-    /// unbounded loop, no answer. See docs/flipper-ble-ios-design.md §4.1.
+    /// unbounded loop, no answer. `tests/flipper-ble.test.ts` pins the two labels
+    /// apart, and that this one is added only while the link is real.
     nonisolated static var beatCapabilities: [String] {
         FlipperGateway.shared.linked ? capabilities + ["flipper_ble"] : capabilities
     }
@@ -823,7 +824,12 @@ final class TinySession: NSObject, ObservableObject {
                 return ["result": await fg.statusLine()]
 
             case "files", "ls", "list":
-                let entries = try await fg.list(path)
+                // The relay budget, NOT the panel's 25s: nobody is watching a
+                // spinner here, and `flipper_files` stops looking after
+                // FILES_WAIT_S. A listing that lands after that is not a slow
+                // success — the caller has already told the user their Flipper
+                // may be out of range.
+                let entries = try await fg.list(path, timeout: FlipperGateway.relayFilesBudgetS)
                 if entries.isEmpty { return ["result": "📁 \(path): (empty)"] }
                 // Whole entries only, and a count when some are left out. A name
                 // cut in half is a file that does not exist, and the agent will
@@ -986,7 +992,21 @@ final class TinySession: NSObject, ObservableObject {
         guard let id = Keychain.get("tiny_device_id"),
               let devTok = Keychain.get("tiny_device_token") else { return }
         let token = Keychain.get("tiny_token")
-        _ = try? await Api.postRaw("/api/devices/heartbeat", body: ["deviceId": id, "token": devTok, "capabilities": capabilities])
+        // 🐬 `beatCapabilities`, NOT the static `capabilities` — this beat used to
+        // send the static list, which omits `flipper_ble`, and the worker's
+        // heartbeat REPLACES the stored list whenever one is present
+        // (`capabilities = COALESCE(?3, capabilities)`). So every background beat
+        // withdrew a board that was still linked, and nothing put it back: the
+        // foreground loop only re-asserts on a TRANSITION, and from its side
+        // nothing had transitioned. One BGAppRefresh unlinked the user's Flipper
+        // server-side until the link genuinely dropped or the app relaunched.
+        //
+        // This is also the ONLY announcer while backgrounded. The gateway never
+        // posts a heartbeat of its own, so a board that links while the app is in
+        // the background is invisible to the backend until this beat says so —
+        // which is exactly the situation the whole feature exists for: the user is
+        // in a web browser, not in the app.
+        _ = try? await Api.postRaw("/api/devices/heartbeat", body: ["deviceId": id, "token": devTok, "capabilities": beatCapabilities])
 
         // Keep the app-icon badge + widget unread honest while backgrounded.
         // The foreground poll (refreshUnread) owns the per-login DM *banner*,

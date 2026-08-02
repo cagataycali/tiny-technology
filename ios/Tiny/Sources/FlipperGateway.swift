@@ -455,6 +455,10 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     static let deviceInfoS: TimeInterval = 25
     static let powerInfoS: TimeInterval = 15
     static let storageInfoS: TimeInterval = 12
+    /// A folder listing. Generous on purpose: `/ext/subghz` on a used card is
+    /// hundreds of entries, and every one of them crosses BLE behind flow
+    /// control, so this is the slowest thing a person waits on in the panel.
+    static let listS: TimeInterval = 25
 
     /// Total time `statusLine()` may spend, which is NOT the sum of the three
     /// above (52s) — and that gap is the point.
@@ -467,6 +471,23 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// caller it has — the tool reported "no answer" while the phone was still
     /// dutifully asking, and the answer it eventually built was thrown away.
     static let relayStatusBudgetS: TimeInterval = 20
+
+    /// Same rule for a listing asked for over the relay, and it needs its own
+    /// constant because `listS` is calibrated for a DIFFERENT caller.
+    ///
+    /// In the panel a person is watching a spinner and 25s of patience is a
+    /// feature. Over the relay nobody is watching: the phone's own poll loop
+    /// sleeps 5s between looks (15s in Low Power Mode) before it even SEES the
+    /// envelope, and only then does the listing start. `FILES_WAIT_S` = 45s is
+    /// what the backend waits in total, so the listing has to be short enough
+    /// that `poll lag + this` still lands inside it — with room left for the
+    /// reply to be POSTed back and picked up.
+    ///
+    /// ⚠️ A listing that overruns is not a slow success, it is a **wrong
+    /// diagnosis**: the caller gives up, and the sentence the user reads blames
+    /// Bluetooth range for a board that answered fine 4 seconds later.
+    static let relayFilesBudgetS: TimeInterval = 20
+
     /// Not worth issuing a request with less than this left: the reply cannot
     /// land before the budget is gone, and a request nobody is waiting for still
     /// spends the board's battery.
@@ -958,11 +979,12 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// File) → File.{1 type, 2 name, 3 size, 5 md5sum}. Reading File's fields
     /// straight off ListResponse decodes into plausible garbage — every entry a
     /// file, every name empty, and nothing errors. That cost a spike run.
-    func list(_ path: String, includeMd5: Bool = false) async throws -> [FlipperEntry] {
+    func list(_ path: String, includeMd5: Bool = false,
+              timeout: TimeInterval = FlipperGateway.listS) async throws -> [FlipperEntry] {
         var body = PB.str(1, path)
         if includeMd5 { body += PB.bool(2, true) }
         let frames = try await request(PB.sub(Cmd.storageListReq, body),
-                                      timeout: 25, label: "a folder listing")
+                                      timeout: timeout, label: "a folder listing")
         try checkStatus(frames)
         var out: [FlipperEntry] = []
         for frame in frames {

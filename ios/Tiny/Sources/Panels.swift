@@ -1848,7 +1848,8 @@ func capabilityIcon(_ c: String) -> String? {
     // 🐬📶 The same board, reached over Bluetooth by the phone wearing this chip
     // instead of down a USB cable. A SEPARATE token on purpose: one shared
     // `flipper` would let the backend route an IR capture to a phone, and BLE
-    // has no receive RPC at all — docs/flipper-ble-ios-design.md §4.2.
+    // has no receive RPC at all, so "nothing received" and "never listened" are
+    // the same answer — the one failure a user cannot tell from success.
     case "flipper_ble": return "dot.radiowaves.right"
     // ── Endpoint robots (their own API declares these) ──
     case "print": return "printer.fill"
@@ -3997,7 +3998,7 @@ struct DevicesView: View {
             // 🐬📶 …and the OTHER route to the same board: the BLE link THIS
             // phone holds. It hangs off this phone's row rather than a host's,
             // because with no cable anywhere the phone IS the host — which is
-            // the whole point of it (docs/flipper-ble-ios-design.md).
+            // the whole point of it: unplug the cable and the board stays usable.
             if d.id == thisPhone {
                 FlipperBlePanel()
             }

@@ -104,6 +104,46 @@ export const MAX_LISTEN_S = 30
  */
 export const STATUS_WAIT_S = 45
 
+/**
+ * How long flipper_files waits for a listing.
+ *
+ * The same 45s as a status read, because it is the same round trip with the same
+ * two lags in it, and a listing is the slowest thing the BLE side does: hundreds
+ * of `/ext/subghz` entries all crossing behind flow control.
+ *
+ * ⚠️ This used to be `Math.min(45, listenBudget(0, budgetS))`, which was a **20s
+ * wait wearing a 45**. `listenBudget` is a LISTEN budget — `need = listenS + 20`
+ * — so with no listen it collapses to a flat 20 for every input on earth
+ * (`listenBudget(0, undefined)` and `listenBudget(0, 300)` are both 20), and the
+ * `Math.min(45, …)` could never win. Meanwhile the phone allowed its listing 25s
+ * (`FlipperGateway.listS`) and its relay loop sleeps up to 15s before it even sees
+ * the envelope, so the answer could not physically arrive before the caller quit —
+ * and the sentence the user then read blamed Bluetooth range for a working board.
+ */
+export const FILES_WAIT_S = 45
+
+/**
+ * Longest a phone can take to answer one relay action: its poll loop's sleep
+ * (5s, 15s in Low Power Mode) before it sees the envelope, plus the ceiling the
+ * gateway puts on the action itself (`relayStatusBudgetS`/`relayFilesBudgetS`,
+ * both 20s). A wait shorter than this cannot hear a BLE answer, so it must not
+ * claim to know WHY nothing came back.
+ */
+export const BLE_ROUND_TRIP_S = 35
+
+/**
+ * The wait a listing actually gets, clamped by a scheduled job's remaining time.
+ *
+ * Jobs die at JOB_DEADLINE_S, so a job with 25s left must not sit for 45. But the
+ * clamp is now visible to the caller: `flipperInvoke` compares the wait it was
+ * given against `BLE_ROUND_TRIP_S` and says which of the two things happened,
+ * instead of asserting a cause it cannot see from here.
+ */
+export function filesWait(budgetS?: number): number {
+  if (!budgetS) return FILES_WAIT_S
+  return Math.min(FILES_WAIT_S, Math.max(15, budgetS - 8))
+}
+
 /** Parse the worker's capabilities column: JSON array string, array, or null. */
 export function parseCaps(raw: unknown): string[] {
   try {
@@ -241,11 +281,18 @@ async function flipperInvoke(
       return { result: String(d.reply.payload), transport: host.transport, host: host.name }
     }
   }
+  // A timeout is TWO facts: nobody answered, and how long we actually waited.
+  // Only the first was ever reported, so a wait too short to hear a BLE round
+  // trip came back as a confident story about Bluetooth range — a hardware
+  // diagnosis for a board that answers fine, made by the one party that knew it
+  // had left early.
   return {
     transport: host.transport,
     host: host.name,
     error: host.transport === 'ble'
-      ? `No answer within ${waitS}s from "${host.name}". The phone is heartbeating but the Flipper may have moved out of Bluetooth range of it, or its Bluetooth may be switched off in the Flipper's own settings.`
+      ? (waitS < BLE_ROUND_TRIP_S
+        ? `Stopped waiting after ${waitS}s, which is not long enough to conclude anything: an answer over Bluetooth needs up to ${BLE_ROUND_TRIP_S}s, because "${host.name}" polls for work every 5s (15s in Low Power Mode) and only then starts asking the Flipper. This turn didn't have the time. Ask again from an interactive chat, where the full ${FILES_WAIT_S}s is available.`
+        : `No answer within ${waitS}s from "${host.name}". The phone is heartbeating and had time to reply, so the Flipper itself is the quiet one — it may have moved out of Bluetooth range of the phone, its Bluetooth may be switched off in its own settings, or an app open on its screen may be holding the hardware.`)
       : `No answer within ${waitS}s. A capture holds the device for its whole window, so the host may still be listening — ask again, or read the outcome with use_device.`,
   }
 }
@@ -371,7 +418,7 @@ export const makeFlipperFilesTool = (userId: string | null | undefined, budgetS?
     const r = await flipperInvoke(
       userId,
       `Run use_flipper with action "ls" and path "${folder}". Report the listing verbatim. Do not read, send, receive or delete any file, and do not run any other action.`,
-      Math.min(45, listenBudget(0, budgetS)),
+      filesWait(budgetS),
       // Storage.List is the one place BLE is genuinely nicer than the CLI: sizes
       // and md5s arrive as protobuf fields, so nothing has to be parsed out of a
       // text table.

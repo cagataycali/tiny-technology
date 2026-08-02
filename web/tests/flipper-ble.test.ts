@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   FLIPPER_CAP, FLIPPER_BLE_CAP, pickFlipperHost, parseCaps, type FlipperHost,
+  listenBudget, filesWait, FILES_WAIT_S, STATUS_WAIT_S, BLE_ROUND_TRIP_S,
 } from '../lib/chat/tools/flipper'
 import { DEVICE_LABELS, capabilitySummary } from '../lib/chat/prompt'
 
@@ -75,6 +76,23 @@ const swiftBody = (src: string, signature: string): string => {
     }
   }
   throw new Error(`${signature} body never closed`)
+}
+
+/**
+ * The same source with its comments removed, for the assertions that require an
+ * expression to be ABSENT.
+ *
+ * Prose is not behaviour. A comment that explains why a broken expression was
+ * removed has to quote it, and a `not.toMatch` reading the raw file then fails on
+ * the explanation of the very fix it is checking for — which teaches you to
+ * delete the explanation, the wrong lesson. Only block comments and whole-line
+ * `//` are cut: an inline `//` cannot be told apart from the one in `https://`.
+ */
+const codeOnly = (src: string): string => {
+  const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+  expect(stripped.length, 'codeOnly stripped everything — check the regexes')
+    .toBeGreaterThan(src.length / 3)
+  return stripped
 }
 
 const host = (over: Partial<FlipperHost> & Pick<FlipperHost, 'transport'>): FlipperHost => ({
@@ -213,8 +231,12 @@ describe('{type:"flipper"} is handled in BOTH iOS relay loops', () => {
   })
 
   it('the handler answers a capture ask with a refusal, never with silence', () => {
-    const at = session.indexOf('static func handleFlipperEnvelope')
-    const body = session.slice(at, at + 4500)
+    // Braces, not a byte count. This used to slice `at + 4500`, which is a window
+    // that SHRINKS as the function grows: adding five lines of comment above the
+    // listen case moved the refusal outside it and the test went red for a reason
+    // that had nothing to do with the guard. A fixed window that had happened to
+    // land at 4499 would instead have gone quietly green while covering nothing.
+    const body = swiftBody(session, 'static func handleFlipperEnvelope(')
     for (const a of ['ir_rx', 'subghz_rx', 'rfid_read', 'ikey_read']) {
       expect(body, `${a} must be refused explicitly`).toContain(a)
     }
@@ -794,5 +816,174 @@ describe('a status reading never claims to be newer than it is', () => {
     expect(refresh).toMatch(/left >= Self\.minRequestS \? min\(want, left\) : nil/)
     // No read may bypass the budget by keeping its default timeout.
     expect(refresh).not.toMatch(/await (deviceInfo|powerInfo|storageInfo)\(\)/)
+  })
+})
+
+describe('a listing answers inside the wait, and a timeout admits how long it waited', () => {
+  const filesCase = session.slice(
+    session.indexOf('case "files", "ls", "list":'),
+    session.indexOf('case "read":'))
+
+  it('the wait a listing gets is a real number, not one Math.min can never reach', () => {
+    // listenBudget is a LISTEN budget: need = listenS + 20, so with no listen it
+    // returns a flat 20 whatever the job budget is. `Math.min(45, listenBudget(0,
+    // …))` therefore always evaluated to 20 — a 45 that could not win, which is
+    // the worst kind of constant: one that documents an intention the code does
+    // not have.
+    expect(listenBudget(0)).toBe(20)
+    expect(listenBudget(0, 300)).toBe(20)
+    expect(Math.min(45, listenBudget(0, 300))).toBe(20)
+    // codeOnly, because flipper.ts's doc block has to quote the expression it
+    // removed in order to explain why it was wrong.
+    expect(codeOnly(backend), 'the dead Math.min must be gone')
+      .not.toMatch(/Math\.min\(45, listenBudget/)
+    // The listing now names its own wait, and gets all of it interactively.
+    expect(FILES_WAIT_S).toBe(45)
+    expect(filesWait()).toBe(FILES_WAIT_S)
+    expect(filesWait(300)).toBe(FILES_WAIT_S)
+    expect(backend).toMatch(/filesWait\(budgetS\)/)
+  })
+
+  it('the phone finishes a relay listing before the backend stops looking', () => {
+    const lag = 15                                    // Low Power Mode poll sleep
+    const budget = Number(gateway.match(/relayFilesBudgetS: TimeInterval = (\d+)/)![1])
+    // The whole point: poll lag + the listing must land inside the wait, with
+    // room for the reply to be posted and picked up. This is the inequality that
+    // was false before — 15 + 25 = 40 against a 20s wait.
+    expect(lag + budget).toBeLessThan(FILES_WAIT_S)
+    // And the relay budget must actually be tighter than the panel's ceiling,
+    // else it is the same number under a second name.
+    const panelCeiling = Number(gateway.match(/listS: TimeInterval = (\d+)/)![1])
+    expect(budget).toBeLessThan(panelCeiling)
+    expect(lag + panelCeiling).toBeGreaterThan(FILES_WAIT_S - 15)
+  })
+
+  it('the relay path passes the budget; the panel keeps its patient default', () => {
+    // The envelope handler must not call the bare list() — its default is the
+    // human-facing 25s, which is exactly the overrun this fixes.
+    expect(filesCase).toContain('timeout: FlipperGateway.relayFilesBudgetS')
+    expect(filesCase, 'a bare fg.list(path) would take the panel default')
+      .not.toMatch(/fg\.list\(path\)/)
+    // list() must still HAVE a patient default, so the SD browser is unchanged.
+    expect(gateway).toMatch(/timeout: TimeInterval = FlipperGateway\.listS\)/)
+    expect(gateway, 'the literal 25 must be named, not repeated')
+      .not.toMatch(/timeout: 25, label: "a folder listing"/)
+    expect(swiftBody(gateway, 'func list(')).toContain('timeout: timeout')
+  })
+
+  it('a BLE timeout too short to conclude anything says so instead of blaming range', () => {
+    // The whole defect in one assertion: a wait under a BLE round trip must not
+    // produce a hardware diagnosis. Before, every timeout claimed range or a
+    // Bluetooth switch — including the ones where the caller simply left first.
+    expect(BLE_ROUND_TRIP_S).toBe(35)
+    const short = backend.slice(backend.indexOf('waitS < BLE_ROUND_TRIP_S'))
+    expect(short.indexOf('out of Bluetooth range'), 'the short branch must come FIRST')
+      .toBeGreaterThan(short.indexOf('not long enough to conclude anything'))
+    // Both branches state the wait, because a timeout is two facts.
+    const timeoutTail = backend.slice(backend.lastIndexOf('A timeout is TWO facts'))
+    expect(timeoutTail.match(/\$\{waitS\}s/g)!.length).toBeGreaterThanOrEqual(3)
+    // The long branch may still name range — by then it IS the likely cause —
+    // but only after saying the phone had time.
+    expect(timeoutTail).toMatch(/had time to reply/)
+  })
+
+  it('the round-trip floor is derived from the two lags it is made of', () => {
+    const budget = Number(gateway.match(/relayFilesBudgetS: TimeInterval = (\d+)/)![1])
+    const statusBudget = Number(gateway.match(/relayStatusBudgetS: TimeInterval = (\d+)/)![1])
+    // 35 = 15s Low Power Mode poll sleep + the 20s the gateway allows one action.
+    // Both rails share the ceiling, so one floor covers both.
+    expect(budget).toBe(statusBudget)
+    expect(BLE_ROUND_TRIP_S).toBe(15 + budget)
+    // Every wait the BLE rail is given must clear it, or the floor is decoration.
+    expect(STATUS_WAIT_S).toBeGreaterThanOrEqual(BLE_ROUND_TRIP_S)
+    expect(FILES_WAIT_S).toBeGreaterThanOrEqual(BLE_ROUND_TRIP_S)
+    // A clamped job budget can still fall under it — that is the case the honest
+    // message exists for, so prove it is reachable rather than theoretical.
+    expect(filesWait(25)).toBeLessThan(BLE_ROUND_TRIP_S)
+  })
+})
+
+/**
+ * 🐬📶 The phone must not withdraw a board it is still holding.
+ *
+ * `backgroundBeat()` used to send the STATIC capability list, which omits
+ * `flipper_ble`. The worker REPLACES the stored list whenever a heartbeat carries
+ * one, so every BGAppRefresh unlinked a live board server-side — and the
+ * foreground loop re-asserts only on a transition, so from its side nothing had
+ * changed and nothing put it back. It stayed withdrawn until the link genuinely
+ * dropped or the app relaunched.
+ *
+ * The timing is the point: P5 is "unplug the cable, ask from web chat", and a user
+ * in a web browser has the app in the BACKGROUND. The beat that runs during the
+ * acceptance test was the one telling the backend there was no Flipper.
+ */
+describe('a background beat announces the board, it does not withdraw it', () => {
+  const bgBeat = swiftBody(session, 'nonisolated static func backgroundBeat(')
+  const fgLoop = swiftBody(session, 'func startDeviceLoops(')
+  const workerDevices = read('worker/src/devices.ts')
+
+  it('the background beat sends the LIVE capability list, not the static one', () => {
+    // codeOnly: the fix's own comment has to name `capabilities` to explain what
+    // was wrong, and a raw read would match the explanation instead of the code.
+    const code = codeOnly(bgBeat)
+    expect(code, 'the background beat must carry a capability list at all')
+      .toMatch(/"capabilities": beatCapabilities/)
+    expect(code, 'the static list omits flipper_ble, so sending it is a WITHDRAWAL')
+      .not.toMatch(/"capabilities": capabilities/)
+  })
+
+  it('the background beat asserts unconditionally — it has no state to gate on', () => {
+    // Each BGAppRefresh is a fresh call of a `static func`; there is no surviving
+    // `hadFlipper` to compare against, so a transition gate here could only be
+    // wrong. It is also the ONLY announcer while backgrounded, because the gateway
+    // never posts a heartbeat of its own — so a board that links behind a locked
+    // screen is invisible to the backend until this line runs.
+    const code = codeOnly(bgBeat)
+    expect(code).not.toMatch(/hadFlipper|assertCaps/)
+    expect(gateway, 'if the gateway ever announces its own link, revisit this')
+      .not.toMatch(/devices\/heartbeat/)
+  })
+
+  it('both beats carry the computed list; only enrollment may use the static one', () => {
+    const code = codeOnly(session)
+    // Foreground: transition-GATED, but the value it sends is still the live one.
+    expect(code).toMatch(/body\["capabilities"\] = Self\.beatCapabilities/)
+    // Background: same value, no gate.
+    expect(code).toMatch(/"capabilities": beatCapabilities/)
+    // The static list survives in exactly one place — first-launch enrollment,
+    // which posts to /api/devices and runs before any gateway exists, so there is
+    // no board to declare. Counting them is what makes this pin catch the NEXT
+    // beat somebody adds, not just the one that was wrong.
+    const staticSends = code.match(/"capabilities": (?:Self\.)?capabilities\b/g) ?? []
+    expect(staticSends.length, `static sends found: ${JSON.stringify(staticSends)}`).toBe(1)
+    expect(swiftBody(session, 'private func enrollDeviceIfNeeded('))
+      .toMatch(/"capabilities": Self\.capabilities/)
+  })
+
+  it('a heartbeat list REPLACES rather than merges — why this was destructive', () => {
+    // The premise the whole bug rests on. If this ever became a union, sending the
+    // wrong list would be harmless and this suite would be over-strict — so pin
+    // the real behaviour rather than assume it.
+    expect(workerDevices).toMatch(/capabilities = COALESCE\(\?3, capabilities\)/)
+    // COALESCE takes the first NON-NULL: omitting caps preserves the stored list,
+    // sending caps overwrites it. Null only when the beat truly omitted them.
+    expect(workerDevices)
+      .toMatch(/capabilities != null \? sanitizeCapabilities\(capabilities\) : null/)
+  })
+
+  it('the foreground loop could not have repaired it, which is why it stuck', () => {
+    // Kept as a pin because it is the reason the failure was permanent instead of
+    // a 30-second blip: the re-assert fires on the PHONE's view changing, and the
+    // phone's view had not changed — the server's had.
+    expect(fgLoop).toMatch(/if hasFlipper != hadFlipper \{ assertCaps = true/)
+    expect(fgLoop).toMatch(/var hadFlipper = FlipperGateway\.shared\.linked/)
+  })
+
+  it('flipper_ble lives only in the computed list, because it comes and goes', () => {
+    const statics = session.match(/nonisolated static let capabilities = \[([^\]]*)\]/)
+    expect(statics, 'the static capability list moved — this test is reading nothing')
+      .not.toBeNull()
+    expect(statics![1]).not.toContain('flipper_ble')
+    expect(session).toMatch(/linked \? capabilities \+ \["flipper_ble"\] : capabilities/)
   })
 })
