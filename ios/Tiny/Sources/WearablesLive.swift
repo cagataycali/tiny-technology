@@ -211,6 +211,13 @@ final class GlassesLive: ObservableObject {
         // locale's on-device model is missing this degrades to unavailable
         // rather than quietly uploading audio.
         req.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        // This HUD's text is not only shown on screen: `GlassesListener.listen`
+        // RIDES this transcriber whenever it is already running, and hands the
+        // delta straight to the agent as a tool result. So the same tool returned
+        // punctuated prose or one unbroken run-on depending on whether the user
+        // happened to have the live card open — the reason NiclaRecorder sets this
+        // for a wake take is the reason it belongs here too.
+        req.addsPunctuation = true
         request = req
 
         let engine = AVAudioEngine()
@@ -367,6 +374,11 @@ final class GlassesListener {
         }
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        // Matches `beginRecognition` deliberately: `listen(seconds:)` picks
+        // between that transcriber and this one on whether the live card
+        // happens to be open, and both answers land in the same agent tool
+        // result. Differing here would make the tool's output depend on UI state.
+        request.addsPunctuation = true
 
         let engine = AVAudioEngine()
         let input = engine.inputNode

@@ -197,6 +197,14 @@ final class VoiceMode: NSObject, ObservableObject {
         if recognizer?.supportsOnDeviceRecognition == true {
             req.requiresOnDeviceRecognition = true // web parity: audio stays on the phone
         }
+        // What the silence watcher hands to `onUtterance` is not a preview — every
+        // caller of `toggle(onUtterance:)` does `chat.send(text, token:)`, so this
+        // text is a message the agent reads (NiclaRecorder states the same reason
+        // for a wake take). This is also the FALLBACK rail for beginAnalyzerSession, and
+        // two rails feeding one `chat.send` should not format differently.
+        // Partials and punctuation coexist fine — TinyLive's live transcriber sets
+        // both on one request.
+        req.addsPunctuation = true
         request = req
 
         // Fresh engine per session — reusing one across stop/start cycles
