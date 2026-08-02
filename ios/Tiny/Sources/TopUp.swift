@@ -251,7 +251,7 @@ enum TopUp {
 
     /// The card's own title — the faucet route isn't "Get USDC", it's credit.
     static func title(_ route: Route) -> String {
-        route == .faucet ? "💧 Get credit (free daily top-up)" : "💳 Get USDC"
+        route == .faucet ? "Get credit (free daily top-up)" : "Get USDC"
     }
 
     /**

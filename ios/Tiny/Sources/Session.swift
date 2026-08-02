@@ -254,7 +254,7 @@ final class TinySession: NSObject, ObservableObject {
         await enrollDeviceIfNeeded()
         if Keychain.get("tiny_device_id") != nil {
             startDeviceLoops()
-            await Notify.post(title: "🔄 Device re-enrolled",
+            await Notify.post(title: "Device re-enrolled",
                               body: "This phone's fleet registration was revoked — it re-joined automatically.")
         }
     }
@@ -271,6 +271,11 @@ final class TinySession: NSObject, ObservableObject {
             // them) — enrollments that predate a capability self-heal
             var assertCaps = true
             var beat = 0
+            // The Flipper link comes and goes, so its capability has to be
+            // re-asserted on every transition — `assertCaps` alone fires once at
+            // launch, which would leave the phone claiming a board it dropped an
+            // hour ago (or hiding one it just picked up).
+            var hadFlipper = FlipperGateway.shared.linked
             // "unknown device" = our row was revoked (e.g. cleaned up on
             // /devices). Two consecutive → the token is truly dead, not a
             // blip: drop creds and re-enroll, else the phone is silently
@@ -278,7 +283,9 @@ final class TinySession: NSObject, ObservableObject {
             var unknownStreak = 0
             while !Task.isCancelled {
                 var body: [String: Any] = ["deviceId": id, "token": devTok]
-                if assertCaps { body["capabilities"] = Self.capabilities; assertCaps = false }
+                let hasFlipper = FlipperGateway.shared.linked
+                if hasFlipper != hadFlipper { assertCaps = true; hadFlipper = hasFlipper }
+                if assertCaps { body["capabilities"] = Self.beatCapabilities; assertCaps = false }
                 // The worker's "unknown device" reply rides a 401, which
                 // Api.request throws BEFORE the body is readable — the old
                 // `try? … ?? [:]` swallowed it and the self-heal never fired.
@@ -342,6 +349,34 @@ final class TinySession: NSObject, ObservableObject {
                     // app sat idle produced nothing on the phone.
                     if payload["type"] as? String == "notify" {
                         await Self.handleNotifyEnvelope(payload) { await self.refreshUnread() }
+                        continue
+                    }
+
+                    // 🎙️ {type:"record"} — the worker's nicla_voice_record tool.
+                    // Handled HERE and in backgroundBeat: the poll claims
+                    // envelopes (CAS delivered=0→1), so an unhandled type is
+                    // consumed and destroyed, not retried.
+                    if payload["type"] as? String == "record" {
+                        let secs = payload["seconds"] as? Int ?? 10
+                        let reason = (payload["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "web agent"
+                        relayActivity = "🎙️ recording \(secs)s for the web agent…"
+                        let res = await NiclaRecorder.shared.record(
+                            seconds: secs, label: reason, token: token)
+                        var reply: [String: Any]
+                        if res.ok {
+                            reply = ["result": res.transcript.isEmpty
+                                ? "🎙️ recorded \(res.seconds)s — heard nothing (silence)"
+                                : "🎙️ recorded \(res.seconds)s — “\(String(res.transcript.prefix(600)))”"]
+                            reply["transcriptId"] = res.transcriptId
+                            if let u = res.audioUrl { reply["audioUrl"] = u }
+                        } else {
+                            reply = ["result": "recording failed: \(res.error ?? "unknown")"]
+                        }
+                        _ = try? await Api.patchJson("/api/devices/relay", body: [
+                            "deviceId": id, "token": devTok, "inReplyTo": envId,
+                            "payload": reply,
+                        ])
+                        relayActivity = "✅ replied to web agent"
                         continue
                     }
 
@@ -427,13 +462,18 @@ final class TinySession: NSObject, ObservableObject {
                         }
                         // Answer with phone context via the chat loop —
                         // continuity included, so the relay answer knows what
-                        // the user has told their tiny on this phone
-                        answer = (try? await Api.chatOnce(
+                        // the user has told their tiny on this phone. The
+                        // device-actions audit (P4) rides the reply: truncate
+                        // the answer FIRST so the audit survives a chatty one
+                        // (6500 + ≤400 audit stays inside the 7000 reply cap).
+                        let audit = DeviceActionAudit.Box()
+                        let raw = (try? await Api.chatOnce(
                             token: token,
                             message: "[Executing on \(await UIDevice.current.name), iOS] \(prompt)\(context)",
                             extraSystem: Continuity.buildContext(Config.tinyName),
-                            onEvent: { await Self.runDeviceEvent($0) }
+                            onEvent: { if let line = await Self.runDeviceEvent($0, token: self.token) { await audit.add(line) } }
                         )) ?? "device error"
+                        answer = String(raw.prefix(6500)) + (await audit.render())
                     }
                     _ = try? await Api.patchJson("/api/devices/relay", body: [
                         "deviceId": id, "token": devTok, "inReplyTo": envId,
@@ -483,7 +523,7 @@ final class TinySession: NSObject, ObservableObject {
         }
         if unreadPrimed {
             for g in grew {
-                await Notify.post(title: "💬 @\(g.login)", body: String(g.body.prefix(120)),
+                await Notify.post(title: "@\(g.login)", body: String(g.body.prefix(120)),
                                   category: "DM", userInfo: ["login": g.login])
             }
         }
@@ -566,31 +606,218 @@ final class TinySession: NSObject, ObservableObject {
     /// Relay-side device-tool execution: the web agent's vibrate/flashlight/
     /// clipboard/speak calls act on THIS phone even though the answer is
     /// proxied through chatOnce (which otherwise only collects text).
-    nonisolated static func runDeviceEvent(_ ev: Api.ChatEvent) async {
-        await MainActor.run {
-            switch ev {
-            case .vibrate(let pattern, let times, let intensity):
-                Haptic.shared.play(pattern: pattern, times: times, intensity: intensity)
-            case .flashlight(let mode, let times, let seconds):
-                Torch.shared.run(mode: mode, times: times, seconds: seconds)
-            case .deviceAction(let name, let argsJson):
+    /// Returns one AUDIT line naming what actually happened (nil for
+    /// non-action events) — the relay reply appends these so the web-side
+    /// agent reports ground truth, not the proxied model's optimism
+    /// (use_device P4; Android FleetManager parity).
+    nonisolated static func runDeviceEvent(_ ev: Api.ChatEvent, token: String?) async -> String? {
+        switch ev {
+        case .vibrate(let pattern, let times, let intensity):
+            await MainActor.run { Haptic.shared.play(pattern: pattern, times: times, intensity: intensity) }
+            return DeviceActionAudit.toolLine("vibrate", ran: true)
+        case .flashlight(let mode, let times, let seconds):
+            await MainActor.run { Torch.shared.run(mode: mode, times: times, seconds: seconds) }
+            return DeviceActionAudit.toolLine("flashlight", ran: true)
+        case .deviceAction(let name, let argsJson):
+            return await MainActor.run { () -> String? in
                 DeviceTools.shared.handle(name: name, argsJson: argsJson)
-            case .speak(_, let text, let voice):
-                // Remote voice respects quiet hours; vibrate stays allowed
-                if !Config.isQuietNow { Speech.shared.speak(text, id: "relay-speak", voice: voice) }
-            default:
-                break
+                if name == "open_url" {
+                    // The audit re-derives the exact silent-failure layer
+                    // (scheme refused / backgrounded) the execution hit.
+                    return DeviceActionAudit.openURLLine(
+                        argsJson: argsJson,
+                        foreground: UIApplication.shared.applicationState == .active)
+                }
+                return DeviceActionAudit.toolLine(name, ran: DeviceTools.names.contains(name))
             }
+        case .speak(_, let text, let voice):
+            return await MainActor.run { () -> String? in
+                // Remote voice respects quiet hours; vibrate stays allowed
+                let quiet = Config.isQuietNow
+                if !quiet { Speech.shared.speak(text, id: "relay-speak", voice: voice) }
+                return DeviceActionAudit.speakLine(spoke: !quiet, quiet: quiet)
+            }
+        // 🔁 ROUND-TRIP tools (use_device P5): the proxied turn's server
+        // callback is blocked polling the tool-result mailbox — exactly like
+        // main chat — so run the SAME executors (each posts an outcome on
+        // EVERY path, success or honest failure) and "use my iPhone to …"
+        // from the web gets the real thing. Returned images are discarded:
+        // the server already received them via the mailbox and weaves them
+        // into the proxied turn's text.
+        case .generateImage(let id, let prompt, let style):
+            _ = await ImageGen.shared.run(toolUseId: id, prompt: prompt, style: style, token: token)
+            return DeviceActionAudit.toolLine("generate_image", ran: true)
+        case .screenshot(let id, _):
+            // The per-capture consent sheet lives in the chat UI; presenting
+            // it for an invisible remote turn is the P5 follow-up. Post the
+            // honest outcome NOW so the server's 90s poll never strands (G7).
+            await postToolFailure(id, token: token,
+                error: "Screen capture via use_device needs its on-phone consent flow — not available remotely yet. Ask on the phone itself.")
+            return DeviceActionAudit.droppedLine("screenshot")
+        case .metaTakePhoto(let id):
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            _ = await WearablesManager.shared.runPhotoTool(toolUseId: id, token: token)
+            return DeviceActionAudit.toolLine("meta_take_photo", ran: true)
+            #else
+            await postToolFailure(id, token: token, error: "Meta glasses aren't supported on this device.")
+            return DeviceActionAudit.droppedLine("meta_take_photo")
+            #endif
+        case .metaRecordVideo(let id):
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            await GlassesRecorder.shared.runTool(toolUseId: id, token: token)
+            return DeviceActionAudit.toolLine("meta_record_video", ran: true)
+            #else
+            await postToolFailure(id, token: token, error: "Meta glasses aren't supported on this device.")
+            return DeviceActionAudit.droppedLine("meta_record_video")
+            #endif
+        case .metaListen(let id, let seconds):
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            await GlassesListener.shared.runTool(toolUseId: id, seconds: seconds, token: token)
+            return DeviceActionAudit.toolLine("meta_listen", ran: true)
+            #else
+            await postToolFailure(id, token: token, error: "Meta glasses aren't supported on this device.")
+            return DeviceActionAudit.droppedLine("meta_listen")
+            #endif
+        case .metaGlassesStatus(let id):
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            // Serialize INSIDE the MainActor hop — [String: Any] isn't
+            // Sendable, so only the finished JSON string crosses isolation.
+            let json = await MainActor.run { () -> String in
+                let facts = WearablesManager.shared.statusFacts()
+                return (try? JSONSerialization.data(withJSONObject: facts))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? #"{"ok":true}"#
+            }
+            _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+                "toolUseId": id, "payload": json,
+            ]) as [String: Any]
+            return DeviceActionAudit.toolLine("meta_glasses_status", ran: true)
+            #else
+            _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+                "toolUseId": id,
+                "payload": #"{"ok":true,"linked":false,"note":"glasses unsupported on this device"}"#,
+            ]) as [String: Any]
+            return DeviceActionAudit.toolLine("meta_glasses_status", ran: true)
+            #endif
+        default:
+            return nil
         }
+    }
+
+    /// Fast honest outcome for a round-trip tool the relay path can't run —
+    /// the server callback polls the tool-result mailbox and, with nothing
+    /// posted, strands for its full 90s (design G7). Posting within one poll
+    /// tick turns that into an immediate, explainable error. Error strings
+    /// are static literals here — no JSON escaping hazards.
+    nonisolated private static func postToolFailure(_ toolUseId: String, token: String?, error: String) async {
+        _ = try? await Api.post("/api/chat/tool-result", token: token, body: [
+            "toolUseId": toolUseId,
+            "payload": "{\"ok\":false,\"error\":\"\(error)\"}",
+        ]) as [String: Any]
     }
 
     /// One background beat (BGAppRefresh window, ~30s): heartbeat + answer at
     /// most ONE pending invoke. nonisolated static — runs from the BG task
     /// with no UI state; creds come straight from the Keychain.
-    /// What this phone can do — enrolls with it, re-asserts it on heartbeats
-    // "location" = this node answers where/speed asks with a live CoreLocation
-    // fix (relay block below; gated at runtime on the actual grant)
-    nonisolated static let capabilities = ["chat", "bluetooth_scan", "location"]
+    /// What this phone can do — enrolls with it, re-asserts it on heartbeats.
+    /// The model reads this from use_device action:'list' and reasons from it
+    /// ("only advertises chat+bluetooth_scan+location, so it can't open apps"
+    /// — the canonical mis-inference, use_device P4/P5). Capability = the
+    /// software path exists; runtime preconditions (grants, glasses linked,
+    /// foreground) are reported honestly at invoke time by the audit.
+    ///   location  = live CoreLocation fix (grant-gated)  · record = Nicla recorder
+    ///   speak     = on-device TTS (quiet-hours gated)
+    ///   open_app  = open_url incl. mailto/message/maps/spotify (foreground-gated)
+    ///   image_gen = on-device Image Playground (needs Apple Intelligence)
+    ///   glasses   = meta_* bridges (honest "not linked" when absent)
+    /// screenshot is deliberately NOT advertised: its consent flow can't show
+    /// on a relay turn yet — the executor fast-fails instead (P5 follow-up).
+    nonisolated static let capabilities = ["chat", "bluetooth_scan", "location", "record", "speak", "open_app", "image_gen", "glasses"]
+
+    /// What to actually send on a beat: the static set, plus whatever is true
+    /// only right now.
+    ///
+    /// `flipper_ble` is deliberately NOT the label a cabled host declares
+    /// (`flipper`). They are different powers over the same board — the cable
+    /// speaks the Flipper's text CLI and can capture IR; this phone speaks
+    /// protobuf RPC over BLE and cannot. Sharing one label would also make
+    /// `flipper_status` resolve THIS phone and send it a prompt-shaped `invoke`,
+    /// which the relay loop below proxies straight back through /api/chat —
+    /// where the same tool resolves the same phone again. One status check, an
+    /// unbounded loop, no answer. See docs/flipper-ble-ios-design.md §4.1.
+    nonisolated static var beatCapabilities: [String] {
+        FlipperGateway.shared.linked ? capabilities + ["flipper_ble"] : capabilities
+    }
+
+    /// 🐬 {type:"flipper"} — the flipper_* tools reaching the board through this
+    /// phone's BLE link instead of a USB cable.
+    ///
+    /// STRUCTURED on purpose: `action` + `args`, never a prompt. See
+    /// `beatCapabilities` for what a prompt-shaped envelope would do to itself
+    /// here. Shared by the foreground poll and `backgroundBeat()` because the
+    /// relay poll CLAIMS envelopes (CAS delivered=0→1) — an envelope handled in
+    /// only one loop is destroyed in the other, not deferred.
+    nonisolated static func handleFlipperEnvelope(_ payload: [String: Any]) async -> [String: Any] {
+        let fg = FlipperGateway.shared
+        let action = (payload["action"] as? String ?? "status").lowercased()
+        let args = payload["args"] as? [String: Any] ?? [:]
+        let path = (args["path"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "/ext"
+
+        guard fg.linked else {
+            let paired = fg.unit != nil
+            return ["result": paired
+                ? "The Flipper is paired with this phone but not connected right now — it's out of range or its Bluetooth is off. Nothing can reach it until it's back."
+                : "No Flipper is linked to this phone over Bluetooth. Pair it in the tiny app: Devices → this phone → Find my Flipper."]
+        }
+
+        await MainActor.run { fg.activity = "🐬 \(action) for the web agent…" }
+        defer { Task { @MainActor in fg.activity = "" } }
+
+        do {
+            switch action {
+            case "status", "info":
+                return ["result": await fg.statusLine()]
+
+            case "files", "ls", "list":
+                let entries = try await fg.list(path)
+                if entries.isEmpty { return ["result": "📁 \(path): (empty)"] }
+                let lines = entries.map { e in
+                    e.isDir ? "  📁 \(e.name)/" : "  📄 \(e.name) — \(e.size) bytes"
+                }
+                return ["result": String(("📁 \(path) (over Bluetooth from this phone):\n"
+                    + lines.joined(separator: "\n")).prefix(6500))]
+
+            case "read":
+                let data = try await fg.read(path)
+                let text = String(data: data, encoding: .utf8)
+                if let t = text, !t.contains("\u{FFFD}") {
+                    return ["result": String("📄 \(path) (\(data.count) bytes)\n\(t)".prefix(6500))]
+                }
+                // Not valid UTF-8 → hex, same rule the cable path uses, so a
+                // .sub capture reads the same whichever transport fetched it.
+                let hex = data.prefix(1024).map { String(format: "%02x", $0) }.joined()
+                return ["result": String("📄 \(path) (\(data.count) bytes, binary)\n\(hex)".prefix(6500))]
+
+            case "md5":
+                return ["result": "\(path) — md5 \(try await fg.md5(path))"]
+
+            case "alert", "beep", "find":
+                try await fg.alert()
+                return ["result": "🔔 The Flipper beeped, blinked and buzzed — over Bluetooth from this phone."]
+
+            case "listen", "ir_rx", "subghz_rx", "rfid_read", "ikey_read":
+                // Defence in depth: the backend already refuses to route a
+                // capture here, and if that ever regresses this must still not
+                // answer "nothing received" — which is exactly what a working
+                // capture of a silent room looks like.
+                return ["result": "Capturing IR, Sub-GHz, RFID or iButton is not possible over Bluetooth — the Flipper's radios are only reachable from its USB serial CLI, which has no receive command over BLE. This needs the Flipper plugged into a machine running the tiny CLI. What this phone CAN do over Bluetooth: status, browse and read the SD card, checksums, and make it beep."]
+
+            default:
+                return ["result": "Unknown Flipper action “\(action)”. Over Bluetooth this phone can do: status, files, read, md5, alert."]
+            }
+        } catch {
+            return ["result": "Flipper error: \(error.localizedDescription)"]
+        }
+    }
 
     // ── Push mirror: {type:"notify"} relay envelopes ───────────────────────
     //
@@ -647,9 +874,15 @@ final class TinySession: NSObject, ObservableObject {
             // The worker already clamps title/body (buildNotifyEnvelope: 100 /
             // 400); clamp again because this is untrusted-shaped JSON off the
             // wire, and fall back to "tiny" so a body-only push still reads.
+            // A redeem turn in the url (?q= — device-result and batch pushes)
+            // rides the banner's userInfo, so a TAP lands on the fetched
+            // result: Notify delegate → RedeemStash → the ask route (web ?q= /
+            // Android c6de2bcc parity).
+            let q = Notify.redeemQuery(from: url)
             await Notify.post(
                 title: title.isEmpty ? "tiny" : String(title.prefix(100)),
-                body: String(body.prefix(400))
+                body: String(body.prefix(400)),
+                userInfo: q.map { ["redeemQ": String($0.prefix(2000))] } ?? [:]
             )
         }
     }
@@ -716,23 +949,49 @@ final class TinySession: NSObject, ObservableObject {
             guard !Task.isCancelled,
                   let envId = m["id"] as? String,
                   let payloadStr = m["payload"] as? String,
-                  let payload = try? JSONSerialization.jsonObject(with: Data(payloadStr.utf8)) as? [String: Any],
-                  payload["type"] as? String == "invoke",
+                  let payload = try? JSONSerialization.jsonObject(with: Data(payloadStr.utf8)) as? [String: Any]
+            else { continue }
+            // 🎙️ Same claim-on-poll rule as the foreground loop: a {type:
+            // "record"} envelope consumed here must be executed here, or the
+            // worker's recording ask silently dies with the claim.
+            if payload["type"] as? String == "record" {
+                let secs = payload["seconds"] as? Int ?? 10
+                let reason = (payload["reason"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "web agent"
+                let res = await NiclaRecorder.shared.record(seconds: secs, label: reason, token: token)
+                var reply: [String: Any] = ["result": res.ok
+                    ? (res.transcript.isEmpty ? "🎙️ recorded — heard nothing (silence)"
+                                              : "🎙️ recorded — “\(String(res.transcript.prefix(600)))”")
+                    : "recording failed: \(res.error ?? "unknown")"]
+                reply["transcriptId"] = res.transcriptId
+                if let u = res.audioUrl { reply["audioUrl"] = u }
+                _ = try? await Api.patchJson("/api/devices/relay", body: [
+                    "deviceId": id, "token": devTok, "inReplyTo": envId, "payload": reply,
+                ])
+                await Notify.post(title: "Recorded for your tiny",
+                                  body: String(res.transcript.prefix(120)))
+                continue
+            }
+            guard payload["type"] as? String == "invoke",
                   let prompt = payload["prompt"] as? String else { continue }
             let name = await MainActor.run { UIDevice.current.name }
-            let answer = (try? await Api.chatOnce(
+            // Same P4 audit as the foreground path — a background invoke is
+            // MORE likely to hit the silent layers (open_url can't launch
+            // apps at all back here), so honesty matters most on this rail.
+            let audit = DeviceActionAudit.Box()
+            let raw = (try? await Api.chatOnce(
                 token: token,
                 message: "[Executing on \(name), iOS, background] \(prompt)",
                 extraSystem: Continuity.buildContext(Config.tinyName),
-                onEvent: { await Self.runDeviceEvent($0) }
+                onEvent: { if let line = await Self.runDeviceEvent($0, token: token) { await audit.add(line) } }
             )) ?? "device error"
+            let answer = String(raw.prefix(6500)) + (await audit.render())
             _ = try? await Api.patchJson("/api/devices/relay", body: [
                 "deviceId": id, "token": devTok, "inReplyTo": envId,
                 "payload": ["result": String(answer.prefix(7000))],
             ])
             // The app was asleep when this happened — leave a trace
             await Notify.post(
-                title: "📡 Web agent reached your phone",
+                title: "Web agent reached your phone",
                 body: String(prompt.prefix(120))
             )
         }

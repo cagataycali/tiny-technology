@@ -90,10 +90,33 @@ struct TinyApp: App {
                 #if canImport(MWDATCore) && canImport(MWDATCamera)
                 WearablesManager.shared.refresh()
                 #endif
+                // 🎙️ A registered Nicla Voice can't reach the internet on its
+                // own (BLE-only nRF52832) — this phone IS its network. No-op
+                // when none is paired, so a user without one never even sees
+                // the Bluetooth prompt from here.
+                NiclaVoiceGateway.shared.start()
             case .background:
                 // The OS would suspend the 5s poll mid-request anyway; stop
                 // cleanly and hand persistence to BGAppRefresh
                 session.stopDeviceLoops()
+                // 🎙️ The necklace's link deliberately SURVIVES backgrounding.
+                //
+                // This used to call NiclaVoiceGateway.stop(), on the reasoning
+                // that claiming presence for a link the OS was about to suspend
+                // would advertise a necklace no tool call could reach. That was
+                // true when the app had no `bluetooth-central` background mode —
+                // but it also meant the necklace went offline the instant the
+                // phone was pocketed, which for a wearable is the normal case,
+                // not an edge one. Measured before this change: the phone's own
+                // heartbeat was 115s old (so the app was alive and polling in
+                // the background) while the Voice's was 139 MINUTES old.
+                //
+                // With `bluetooth-central` declared, CoreBluetooth keeps
+                // delivering notifications while backgrounded, so the honest
+                // move is to hold the link and let the heartbeat keep telling
+                // the truth. beat() is already gated on `connected`, so if iOS
+                // does drop the link, presence stops on its own — no stale
+                // claim, and wake events survive a pocketed phone.
                 Background.schedule()
             default:
                 break
@@ -119,6 +142,10 @@ struct RootView: View {
                 LoginView()
             }
         }
+        // Proximity pairing mounts HERE, not on ChatView's modifier chain:
+        // that chain's generic depth is at the Release demangler's limit —
+        // one more modifier there SIGSEGVs at launch (measured, cycle-22).
+        .modifier(ProximityPairing())
         // Root-level catch: registered from the first frame, so cold
         // launches (Control Center / widget taps) never drop the route.
         // ChatView consumes session.pendingRoute when it's ready.

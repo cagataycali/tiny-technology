@@ -10,6 +10,31 @@
 import UserNotifications
 import UIKit
 
+/// 💻/🤖 Trusted tap→redeem stash (Android c6de2bcc ask?q= parity, with an
+/// iOS twist: notification taps route via self-opened tinyapp:// URLs, and
+/// onOpenURL cannot tell our own open from a Safari link's — so the redeem
+/// text must NEVER ride the URL. The notification delegate — the only trusted
+/// origin — stashes it here; the ask route consumes it one-shot. A hostile web
+/// page's tinyapp://ask finds an empty stash and just focuses the composer,
+/// exactly today's behavior.
+enum RedeemStash {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var value: (text: String, at: Date)?
+
+    static func stash(_ text: String) {
+        lock.lock(); value = (text, Date()); lock.unlock()
+    }
+
+    /// One-shot take, fresh (≤60s) only — a stale stash (app killed between
+    /// tap and consume) must not auto-send on some later manual tinyapp://ask.
+    static func take() -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let v = value else { return nil }
+        value = nil
+        return Date().timeIntervalSince(v.at) <= 60 ? v.text : nil
+    }
+}
+
 /// Foreground presentation: without a delegate iOS silently swallows
 /// notifications while the app is open — new-DM banners should show anyway.
 final class NotifyDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable {
@@ -23,6 +48,17 @@ final class NotifyDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable
     /// A plain TAP on a DM banner routes into the Messages sheet (the
     /// existing tinyapp:// deep-link path does the navigation).
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        // 💻/🤖 A "finished" banner (relay notify carrying a redeem turn):
+        // stash the trusted text, then route through the PLAIN ask deep link —
+        // the URL carries no payload by design (see RedeemStash).
+        if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
+           let q = response.notification.request.content.userInfo["redeemQ"] as? String, !q.isEmpty {
+            RedeemStash.stash(q)
+            await MainActor.run {
+                if let url = URL(string: "tinyapp://ask") { UIApplication.shared.open(url) }
+            }
+            return
+        }
         if response.actionIdentifier == UNNotificationDefaultActionIdentifier,
            response.notification.request.content.categoryIdentifier == "DM" {
             await MainActor.run {
@@ -58,9 +94,41 @@ final class NotifyDelegate: NSObject, UNUserNotificationCenterDelegate, Sendable
     }
 }
 
+/// A `--…-harness` / `--…-test` launch is a build being photographed, not a
+/// person using the app: `simctl` has no way to answer a system modal, so any
+/// permission dialog that fires lands ON TOP of the screen being captured and
+/// stays there for the rest of the run. Two of these ask without a tap —
+/// bootstrap's notification ask on every `--session-harness` run, and
+/// AmbientMapHarness's `.onAppear` location ask — which means the runs that
+/// CANNOT answer a dialog are the only ones that raise it unprompted.
+///
+/// The store captures look clean only because those simulators answered these
+/// prompts on some earlier launch; erase a device, or add a new one, and every
+/// shot grows an alert again.
+///
+/// Matched by shape, not by a list: `--devices-sheet-harness` was a day old
+/// when this was written and nobody thought about the alert, so a fixed list
+/// would already have been one short.
+enum HarnessRun {
+    static func isFlag(_ argument: String) -> Bool {
+        argument.hasPrefix("--") && (argument.hasSuffix("-harness") || argument.hasSuffix("-test"))
+    }
+
+    /// DEBUG-only on purpose: a shipping build must never skip a permission ask
+    /// because of a string in argv. Same rule as TinyApp's token seeding.
+    static func suppressesSystemPrompts(arguments: [String]) -> Bool {
+        #if DEBUG
+        return arguments.contains(where: isFlag)
+        #else
+        return false
+        #endif
+    }
+}
+
 enum Notify {
     /// Ask once (no-op after the user decides). Called post-login and on
     /// bootstrap for already-enrolled devices that predate this build.
+    /// Registers categories always; asks only when a human could answer.
     static func requestPermission() async {
         let center = UNUserNotificationCenter.current()
         // Categories are cheap and must be (re)registered every launch —
@@ -73,6 +141,10 @@ enum Notify {
         ])
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .notDetermined else { return }
+        // Categories are registered above either way — it's the ASK that a
+        // capture run must not do, since nothing can dismiss it. See HarnessRun.
+        guard !HarnessRun.suppressesSystemPrompts(arguments: ProcessInfo.processInfo.arguments)
+        else { return }
         _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
 
@@ -89,6 +161,16 @@ enum Notify {
         if let category { content.categoryIdentifier = category }
         if !userInfo.isEmpty { content.userInfo = userInfo }
         try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
+    }
+
+    /// The auto-send text a push url carries (`/?q=<urlencoded turn>`) — the
+    /// worker's device-result and batch pushes are self-redeeming on the web;
+    /// this is the native half (Session.handleNotifyEnvelope → banner userInfo).
+    static func redeemQuery(from url: String) -> String? {
+        guard let q = URLComponents(string: url)?.queryItems?
+                .first(where: { $0.name == "q" })?.value,
+              !q.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return q
     }
 
     /// App-icon badge = total unread DMs

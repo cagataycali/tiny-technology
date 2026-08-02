@@ -83,7 +83,7 @@ struct SidebarView: View {
                 sidebarRow("gearshape", "Settings", .settings, key: "6")
             }
 
-            Section("🌌 Universe") {
+            Section("Universe") {
                 switch state {
                 case .loading:
                     HStack { ProgressView().scaleEffect(0.7); Text("Loading…").font(.caption).foregroundStyle(.secondary) }
@@ -140,7 +140,7 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationTitle("🌱 tiny")
+        .navigationTitle("tiny")
         .task { await load() }
         .refreshable { await load() }
     }

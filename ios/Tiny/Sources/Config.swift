@@ -42,6 +42,13 @@ enum Config {
         UserDefaults.standard.object(forKey: "cfg_auto_speak") as? Bool ?? true
     }
 
+    /// 🎙️ Nicla Voice wake → phone records + transcribes (NiclaRecorder).
+    /// Default ON: recording is the necklace's whole job — the toggle in
+    /// VoiceDevicePanel is the off switch, not an opt-in gate.
+    static var recordOnWake: Bool {
+        UserDefaults.standard.object(forKey: "cfg_record_on_wake") as? Bool ?? true
+    }
+
     /// 📍 Share live location with the tiny (web tiny-geo-context / Android
     /// cfg_location_context parity): each send folds a `### Location` block
     /// into the hidden context. Off by default; the Settings toggle runs the

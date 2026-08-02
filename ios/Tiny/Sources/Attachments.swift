@@ -113,9 +113,7 @@ enum AttachmentCodec {
     /// copy self-updates (and stays consistent with the file-size figure in the
     /// same sentence, which is also MiB) if MAX_DOCUMENT_BYTES moves.
     private static var docCapLabel: String {
-        let mb = Double(MAX_DOCUMENT_BYTES) / 1_048_576
-        // Drop a trailing ".0" so 3.0 → "3MB" (Android's label is "3MB")
-        return mb == mb.rounded() ? String(format: "%.0fMB", mb) : String(format: "%.1fMB", mb)
+        String(format: "%.1fMB", Double(MAX_DOCUMENT_BYTES) / 1_048_576)
     }
 
     /// Documents (PDF/CSV/…): raw bytes → Converse document block fields.

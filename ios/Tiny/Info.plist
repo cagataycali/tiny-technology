@@ -57,6 +57,8 @@
 	<string>tiny scans nearby Bluetooth devices when you (or your web agent, at your request) ask what's around the phone.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Take a photo to share it with your tiny in the chat.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>tiny connects directly to your necklace on your WiFi for live video and audio — that direct link is much faster than routing frames through the cloud, and the media never leaves your network.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>When you turn on location sharing, tiny reads your position and speed so it can answer with real context — and answers "where am I" asks from your web agent.</string>
 	<key>NSMicrophoneUsageDescription</key>
@@ -72,6 +74,7 @@
 		<string>fetch</string>
 		<string>audio</string>
 		<string>bluetooth-peripheral</string>
+		<string>bluetooth-central</string>
 		<string>external-accessory</string>
 	</array>
 	<key>UILaunchScreen</key>

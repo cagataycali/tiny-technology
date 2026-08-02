@@ -54,7 +54,9 @@ struct TopUpRouteTests {
         let r = TopUp.route(chain: "tiny", faucet: info(faucetJson()))
         #expect(r == .faucet)
         #expect(TopUp.usdcSources(r).isEmpty, "no exchange sells TinyUSDC — every link here would be a trap")
-        #expect(TopUp.title(r) == "💧 Get credit (free daily top-up)")
+        // No 💧: emoji left the app's titles in the de-emoji sweep (2277d5f6),
+        // which shipped without updating this assertion.
+        #expect(TopUp.title(r) == "Get credit (free daily top-up)")
         #expect(TopUp.blurb(r).contains("no card, no exchange, no wallet needed"))
     }
 

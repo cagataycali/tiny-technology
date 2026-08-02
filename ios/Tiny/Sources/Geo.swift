@@ -112,8 +112,14 @@ final class Geo: NSObject, CLLocationManagerDelegate, @unchecked Sendable {
         }
     }
 
-    /// Settings-toggle hook — the ONLY place the system prompt fires.
+    /// Fires the system prompt. Reached from the Settings toggle and from the
+    /// map's two "follow me" taps (MapScreen 494/531) — it used to claim
+    /// Settings was the ONLY place, which is how the alert sitting over the
+    /// map harness's own screenshots went unexplained for so long.
     func requestPermission() {
+        // AmbientMapHarness asks on .onAppear, and a simctl run can't answer.
+        guard !HarnessRun.suppressesSystemPrompts(arguments: ProcessInfo.processInfo.arguments)
+        else { return }
         if manager.authorizationStatus == .notDetermined {
             manager.requestWhenInUseAuthorization()
         }

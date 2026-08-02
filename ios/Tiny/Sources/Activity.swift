@@ -40,8 +40,12 @@ enum EventGlyph {
     static let icons: [(key: String, glyph: String)] = [
         ("job", "⏰"), ("job_missed", "⛔"), ("telegram", "✈️"), ("tiny_visit", "👀"), ("learn", "🧬"),
         ("device", "💻"), ("device_missed", "🚫"), ("pay_alarm", "🚨"),
+        ("nicla_wake", "🗣️"), ("nicla_transcript", "🎙️"), ("nicla_sentry", "👁️"),
         ("pay_earned", "💵"), ("pay_received", "💰"), ("pay_withdrawn", "🏦"), ("pay_refunded", "↩️"),
         ("push", "🔔"), ("share", "🔗"), ("tool", "🔧"), ("follow", "🤝"), ("dm", "💬"),
+        // 🤖 `batch` covers `batch_result` — a spawn_agents wait:false fleet
+        // that finished after its stream closed (web lib/chat/tools/spawn.ts).
+        ("batch", "🤖"),
     ]
 
     /// Every kind the worker can emit — mirrors EMITTED_KINDS in
@@ -52,6 +56,7 @@ enum EventGlyph {
         "tool-update", "telegram", "telegram_out", "telegram_button", "pay_alarm",
         "pay_earned", "pay_received", "pay_withdrawn", "pay_refunded",
         "job_missed", "device_missed",
+        "batch_result", // app-emitted via POST /events (spawn_agents wait:false)
     ]
 
     /// Prefix-match a kind to its glyph; a missing/unknown kind degrades to ⚡
@@ -146,10 +151,22 @@ struct ActivityView: View {
         // retry state, NOT a false "Nothing yet". Newest-first from the ring;
         // we render as-is (web reverses a growing list, but our fetch is
         // already id-DESC so newest is first).
-        guard let d: [String: Any] = try? await Api.get("/api/events", token: token),
-              (d["ok"] as? Bool) == true,
-              let raw = d["events"] as? [[String: Any]] else {
-            state = .failed("Login required or network error"); return
+        // ⚠️ `do/catch`, not `try?`: the thrown `ApiError` is the only thing that
+        // knows whether this was an expired session or a dead connection, and
+        // the two remedies are opposite ones (`LoadFailure`).
+        //
+        // The route pairs `ok:false` with a 502 and `error` with a 401, so a 2xx
+        // that fails these two checks is an intermediary or a mid-redeploy page
+        // — no server message is being discarded, and `badResponse` is the one
+        // line in the house table that says exactly that.
+        let raw: [[String: Any]]
+        do {
+            let d: [String: Any] = try await Api.get("/api/events", token: token)
+            guard (d["ok"] as? Bool) == true,
+                  let events = d["events"] as? [[String: Any]] else { throw ApiError.badResponse }
+            raw = events
+        } catch {
+            state = .failed(LoadFailure.message(error)); return
         }
         events = raw.compactMap { ev in
             guard let id = (ev["id"] as? NSNumber)?.intValue ?? (ev["id"] as? Int) else { return nil }

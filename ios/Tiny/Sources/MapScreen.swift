@@ -281,6 +281,79 @@ enum MapHarness {
     static func startsBeingSeen(arguments: [String]) -> Bool { false }
 }
 
+/// The "be seen" control — three states, where there used to be two.
+///
+/// Opting out has two halves: stop publishing (local, always works) and tell the
+/// server to drop the row it already holds (a request, which can fail). The old
+/// button flipped its label on the first half and threw the second half's result
+/// away, so a failed DELETE left the user reading "location stays on this phone"
+/// while their coarsened pin was still on a map every tiny user can see —
+/// for up to `staleWindowMinutes`, which is how long the worker keeps listing a
+/// row nobody is refreshing.
+///
+/// A false privacy assurance is worse than no assurance, so an unconfirmed
+/// opt-out gets its own state and says so.
+enum MapPresence {
+    /// Mirrors the worker's `MAP_PRESENCE_WINDOW_S` (locations.ts) — the cut its
+    /// pin query uses. Named here because the warning sentence has to state it.
+    static let staleWindowMinutes = 5
+
+    enum Control: Equatable {
+        case optIn          // not sharing, nothing pending
+        case optOut         // sharing
+        case retryOptOut    // stopped publishing, but the server never confirmed
+    }
+
+    /// Did the server actually say it dropped the row?
+    ///
+    /// Only an explicit `ok: true` counts. A `nil` body means the request threw
+    /// — offline, 401, worker outage; `try?` erases which — and a body without
+    /// `ok`, or with `ok: false`, is the server declining. All three used to be
+    /// indistinguishable from success because the result wasn't read at all, and
+    /// the difference between `!= true` and `== false` here is a pin that stays
+    /// on a public map.
+    static func optOutConfirmed(_ body: [String: Any]?) -> Bool {
+        (body?["ok"] as? Bool) == true
+    }
+
+    static func control(beSeen: Bool, optOutFailed: Bool) -> Control {
+        // `beSeen` wins: if the beat is running the user IS visible, whatever a
+        // previous failure said.
+        if beSeen { return .optOut }
+        return optOutFailed ? .retryOptOut : .optIn
+    }
+
+    static func label(for c: Control) -> String {
+        switch c {
+        case .optIn: return "be seen"
+        case .optOut: return "visible to tinys"
+        case .retryOptOut: return "still visible — retry"
+        }
+    }
+
+    static func caption(for c: Control) -> String {
+        switch c {
+        case .optOut:
+            return "this is what your tiny sees — and your pin is live for others (~11m coarse)"
+        case .optIn:
+            return "this is what your tiny sees — location stays on this phone"
+        case .retryOptOut:
+            return "stopped sending, but the server didn't confirm — your pin can stay on the map "
+                 + "up to \(staleWindowMinutes) min. tap to try again"
+        }
+    }
+
+    /// VoiceOver hears the state, not just the action.
+    static func accessibilityLabel(for c: Control) -> String {
+        switch c {
+        case .optIn: return "Show yourself on the map to everyone using tinys"
+        case .optOut: return "Stop being visible on the map"
+        case .retryOptOut:
+            return "Still visible on the map — the opt-out did not reach the server. Tap to retry."
+        }
+    }
+}
+
 struct TinyMapView: View {
     let token: String?
     @Environment(\.dismiss) private var dismiss
@@ -300,6 +373,14 @@ struct TinyMapView: View {
     @State private var remote: [RemotePin] = []
     // beat throttle (web MapView parity): ~60s cadence OR ~50m of movement
     @State private var lastBeat: (t: Double, lat: Double, lng: Double)?
+    /// The opt-out DELETE didn't land. Publishing has already stopped — the beat
+    /// loop exits on `beSeen` and nothing here can restart it — but the row the
+    /// server already holds outlives us, so the panel may not claim otherwise.
+    @State private var optOutFailed = false
+
+    private var presence: MapPresence.Control {
+        MapPresence.control(beSeen: beSeen, optOutFailed: optOutFailed)
+    }
 
     struct DroppedPin: Identifiable {
         let id = UUID()
@@ -443,25 +524,24 @@ struct TinyMapView: View {
                         // also starts tracking. Off = immediate opt-out.
                         if token != nil {
                             Button {
-                                if beSeen {
-                                    beSeen = false
-                                    lastBeat = nil
-                                    let tok = token
-                                    Task { _ = try? await Api.deleteJson("/api/location", token: tok, body: [:]) }
-                                } else {
+                                switch presence {
+                                case .optOut, .retryOptOut: stopBeingSeen()
+                                case .optIn:
                                     if !tracking {
                                         Geo.shared.requestPermission()
                                         tracking = true
                                     }
+                                    optOutFailed = false
                                     beSeen = true
                                 }
                             } label: {
-                                Text(beSeen ? "🌍 visible to tinys" : "🌍 be seen")
+                                Text(MapPresence.label(for: presence))
                                     .padding(.horizontal, 14).padding(.vertical, 8)
                                     .background(.black.opacity(0.8), in: Capsule())
-                                    .foregroundStyle(beSeen ? accent : .white)
+                                    .foregroundStyle(presence == .optOut ? accent
+                                                     : presence == .retryOptOut ? Color.orange : .white)
                             }
-                            .accessibilityLabel(beSeen ? "Stop being visible on the map" : "Show yourself on the map to everyone using tinys")
+                            .accessibilityLabel(MapPresence.accessibilityLabel(for: presence))
                         }
 
                         if !dropped.isEmpty {
@@ -506,11 +586,10 @@ struct TinyMapView: View {
                             .font(.system(.caption2, design: .monospaced))
                             .foregroundStyle(Color(white: 0.85))
                         }
-                        Text(beSeen
-                            ? "this is what your tiny sees — and your pin is live for others (~11m coarse)"
-                            : "this is what your tiny sees — location stays on this phone")
+                        Text(MapPresence.caption(for: presence))
                             .font(.caption2)
-                            .foregroundStyle(Color(white: 0.45))
+                            .foregroundStyle(presence == .retryOptOut
+                                             ? Color.orange : Color(white: 0.45))
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(14)
@@ -589,6 +668,28 @@ struct TinyMapView: View {
                 }
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
+        }
+    }
+
+    /// Opting out, both halves of it.
+    ///
+    /// Stopping the beat comes first and unconditionally — the loop exits on
+    /// `beSeen`, so from this line on the phone publishes nothing no matter what
+    /// the network does. Then the server is asked to drop the row it already
+    /// holds, and THAT result is what decides whether the panel may promise the
+    /// location is back on this phone alone. Before, the result was thrown away
+    /// and the promise got made either way.
+    ///
+    /// Deliberately never restores `beSeen` on failure: the user asked to stop,
+    /// and resuming the beat would keep them on the map indefinitely rather than
+    /// letting the row they can't delete go stale.
+    private func stopBeingSeen() {
+        beSeen = false
+        lastBeat = nil
+        let tok = token
+        Task {
+            let body = try? await Api.deleteJson("/api/location", token: tok, body: [:])
+            optOutFailed = !MapPresence.optOutConfirmed(body)
         }
     }
 }

@@ -213,14 +213,99 @@ import Foundation
     }
 }
 
+/// 🔴 The badge over the chamber camera.
+///
+/// The panel keeps its last good frame when a tick fails — that part is right,
+/// and deliberate. What was wrong is that the badge over it said `live` from the
+/// first successful decode and had no way to stop: `cameraFailed` is only ever
+/// set while `frame == nil`, so a camera that died at 3am left a still picture of
+/// a finished print wearing a live badge for as long as the sheet stayed open.
+///
+/// Three surfaces made that claim independently — the word, its accent tint, and
+/// the VoiceOver label — so all three now read one boolean, and this suite owns
+/// the boolean. `now` is always passed explicitly: a test that reads the wall
+/// clock is a test that fails at midnight.
+@Suite struct FrameLivenessTests {
+
+    /// A fixed noon, like ReadingAgeTests uses: no DST edge, no midnight.
+    private static let noon = Calendar.current
+        .startOfDay(for: Date(timeIntervalSince1970: 1_700_000_000))
+        .addingTimeInterval(12 * 3600)
+
+    @Test("nothing has arrived, so nothing is live")
+    func noFrameIsNotLive() {
+        // The first tick runs before any frame lands. Defaulting this to `true`
+        // would put a live badge over the "Connecting to camera…" placeholder.
+        #expect(!FrameLiveness.isLive(frameAt: nil, now: Self.noon))
+    }
+
+    @Test("a frame that just arrived is live")
+    func freshFrameIsLive() {
+        #expect(FrameLiveness.isLive(frameAt: Self.noon, now: Self.noon))
+    }
+
+    @Test("one dropped frame does not flicker the badge")
+    func oneMissedTickSurvives() {
+        // A robot's own webcam drops frames while it is busy. Flipping the word on
+        // a single miss would make a working camera strobe between two labels
+        // every two seconds, which reads as a broken app.
+        for missed in 1...2 {
+            let at = Self.noon.addingTimeInterval(-Double(missed) * 2)
+            #expect(FrameLiveness.isLive(frameAt: at, now: Self.noon),
+                    "\(missed) missed tick(s) is a hiccup, not a stall")
+        }
+    }
+
+    @Test("three missed ticks is a stall, and the badge says so")
+    func threeMissedTicksGoesStale() {
+        // The boundary itself, from both sides: 6s is the third tick's due time.
+        #expect(!FrameLiveness.isLive(frameAt: Self.noon.addingTimeInterval(-6), now: Self.noon))
+        #expect(FrameLiveness.isLive(frameAt: Self.noon.addingTimeInterval(-5.9), now: Self.noon))
+        #expect(!FrameLiveness.isLive(frameAt: Self.noon.addingTimeInterval(-600), now: Self.noon))
+    }
+
+    @Test("the window is three ticks of the camera poll, not an invented number")
+    func windowIsThreeTicks() {
+        // cameraLoop sleeps 2s between frames; three of those is the window.
+        // Web parity: STALE_AFTER_MS = 6_000 in app/devices/page.tsx.
+        #expect(FrameLiveness.staleAfter == 6)
+    }
+
+    @Test("the badge names WHICH frame this is, and never diagnoses")
+    func badgeNamesTheFrame() {
+        // `EndpointCamera.frame` answers nil for every failure alike and keeps no
+        // reason, so "camera offline" here would be invented. Which frame it is,
+        // is the one thing this panel actually knows.
+        #expect(FrameLiveness.badge(live: true) == "live")
+        #expect(FrameLiveness.badge(live: false) == "last frame")
+        #expect(FrameLiveness.badge(live: true) != FrameLiveness.badge(live: false))
+    }
+
+    @Test("VoiceOver hears the same claim the badge makes")
+    func spokenMatchesTheBadge() {
+        let live = FrameLiveness.spoken(deviceName: "3D printer", live: true)
+        let stale = FrameLiveness.spoken(deviceName: "3D printer", live: false)
+        #expect(live == "Live camera view from 3D printer")
+        #expect(stale == "Last camera frame from 3D printer")
+        // The whole point: the stale label must not claim a live view. A screen
+        // reader user has no frozen picture to notice, so this label WAS the bug.
+        #expect(!stale.lowercased().contains("live camera"))
+        // Both name the device, because a panel is its own block and "it" has no
+        // antecedent inside one — the same rule RelayReach.cameraNote follows.
+        #expect(live.contains("3D printer") && stale.contains("3D printer"))
+    }
+}
+
 @Suite struct EndpointDeviceRowTests {
     @Test("only an endpoint device gets a live panel")
     func onlyEndpointsPoll() {
         // Every other row must cost nothing extra — most people have no robots.
         let printer = DeviceRow(id: "d1", name: "3D printer", kind: "endpoint",
-                                online: false, lastSeen: nil, capabilities: ["print"])
+                                platform: "bambu", online: false, lastSeen: nil,
+                                capabilities: ["print"])
         let phone = DeviceRow(id: "d2", name: "iPhone", kind: "ios",
-                              online: true, lastSeen: Date(), capabilities: [])
+                              platform: "ios", online: true, lastSeen: Date(),
+                              capabilities: [])
         #expect(printer.isEndpoint)
         #expect(!phone.isEndpoint)
     }

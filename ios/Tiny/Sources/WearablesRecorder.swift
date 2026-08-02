@@ -51,8 +51,19 @@ private final class RecorderBox: @unchecked Sendable {
 
     func append(_ frame: VideoFrame) {
         guard let pixels = CMSampleBufferGetImageBuffer(frame.sampleBuffer) else { return }
-        let pts = CMSampleBufferGetPresentationTimeStamp(frame.sampleBuffer)
+        let raw = CMSampleBufferGetPresentationTimeStamp(frame.sampleBuffer)
         lock.lock()
+        // ⚠️ MONOTONIC pts is on US, not the source: Android measured a
+        // looping source rewinding its timestamps — the muxed clip came out
+        // with an overlapping timeline no player would open. AVAssetWriter
+        // fares no better on a rewind. Rewind → one nominal frame step past
+        // the last stamp (1/24s).
+        let pts: CMTime
+        if let last = lastPTS, CMTimeCompare(raw, last) <= 0 {
+            pts = CMTimeAdd(last, CMTime(value: 1, timescale: 24))
+        } else {
+            pts = raw
+        }
         if !started {
             started = true
             writer.startWriting()
@@ -142,6 +153,9 @@ final class GlassesRecorder: ObservableObject {
             self.box = box
 
             tokens.append(Self.listenFrames(stream, into: box))
+            // A recording is an active stream too — a capture-button tap
+            // mid-clip must reach the agent's context (GlassesEvents).
+            tokens.append(Self.listenState(stream))
             stream.start()
             isRecording = true
 
@@ -149,6 +163,14 @@ final class GlassesRecorder: ObservableObject {
             autoStopTask = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(Self.maxSeconds * 1_000_000_000))
                 guard let self, self.isRecording else { return }
+                // ⚠️ Clear our own handle BEFORE calling stop(): stop()'s
+                // first line cancels autoStopTask, and we ARE that task —
+                // self-cancellation makes the URLSession upload throw
+                // CancellationError and the auto-stopped clip surfaces as
+                // "clip upload failed: cancelled" instead of the clip.
+                // (Android had the same shape via scope.cancel(); both
+                // measured, both fixed.)
+                self.autoStopTask = nil
                 self.pending = await self.stop(token: token)
             }
             return ["ok": true, "recording": true]
@@ -222,6 +244,16 @@ final class GlassesRecorder: ObservableObject {
     private nonisolated static func listenFrames(_ stream: MWDATCamera.Stream, into box: RecorderBox) -> AnyListenerToken {
         stream.videoFramePublisher.listen { frame in
             box.append(frame)
+        }
+    }
+
+    /// Same birth rule for the state listener — it only feeds the lock-only
+    /// tap detector, no actor state anywhere near it.
+    private nonisolated static func listenState(_ stream: MWDATCamera.Stream) -> AnyListenerToken {
+        let cell = StreamStateCell()
+        return stream.statePublisher.listen { state in
+            let (prev, new) = cell.swap(state)
+            GlassesEvents.shared.onStreamTransition(from: prev, to: new)
         }
     }
 

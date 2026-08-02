@@ -262,7 +262,7 @@ struct MemoryGraphView: View {
                     }
                 }
             }
-            .navigationTitle("🕸 Graph")
+            .navigationTitle("Graph")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -491,9 +491,16 @@ struct MemoryGraphView: View {
         // Gate on the proxy's honest 503 {error}: an outage must NOT read as an
         // empty graph (masked-empty discipline — /api/graph route comment).
         let path = "/api/graph?all=1" + (showHistory ? "&include_closed=1" : "")
-        guard let d: [String: Any] = try? await Api.get(path, token: token),
-              (d["error"] == nil) else {
-            state = .failed("Login required or network error"); return
+        // ⚠️ `do/catch`, not `try?`: the caption has to name ONE cause, and only
+        // the thrown `ApiError` knows which (`LoadFailure`). The route pairs its
+        // `error` with a 503 or a 401, so an `error` arriving on a 2xx is an
+        // intermediary's doing — `badResponse` is the house line for that.
+        let d: [String: Any]
+        do {
+            d = try await Api.get(path, token: token)
+            guard d["error"] == nil else { throw ApiError.badResponse }
+        } catch {
+            state = .failed(LoadFailure.message(error)); return
         }
         let rawNodes = d["nodes"] as? [[String: Any]] ?? []
         let rawEdges = d["edges"] as? [[String: Any]] ?? []

@@ -15,6 +15,8 @@
 		106B62A427997541391C4CB1 /* VoiceCall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C7357B08AE66393E70432DC /* VoiceCall.swift */; };
 		115D4A5851A9D41535035759 /* WidgetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = EBC50495EC5FE233BE5E24FD /* WidgetStore.swift */; };
 		1792755B61646D4AB6B7D806 /* ChainView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8A05284631316627CB212C2C /* ChainView.swift */; };
+		17D512D499B77D6F248B6970 /* TinySetup.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8BC879FE2DE9BF05C63D273F /* TinySetup.swift */; };
+		1B6EE2B0F3967B0E9A2C4C0D /* NiclaVoiceGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = D26099BEFE6CCEE602B7A13F /* NiclaVoiceGateway.swift */; };
 		1C93029FD174923B359CF5C2 /* Keychain.swift in Sources */ = {isa = PBXBuildFile; fileRef = 32A8F79D06FBC3DB9119099E /* Keychain.swift */; };
 		1C945B69142C28591114B1B9 /* Geo.swift in Sources */ = {isa = PBXBuildFile; fileRef = B50C61BFC0E8191A9922D467 /* Geo.swift */; };
 		1EC7DC8F3AA7AF84EEC69873 /* Net.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F13983A14C2AE45FFA765A8 /* Net.swift */; };
@@ -23,6 +25,7 @@
 		28273E38ABBE639F7FFB9431 /* TinyWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A52E80E0BA5D812C0D86982 /* TinyWidgets.swift */; };
 		2B099E83973F328FCE33021C /* ExplorerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12034AA70EFC3A2F8CA0C0BD /* ExplorerTests.swift */; };
 		368C3863F579092E854B041A /* PayQuote.swift in Sources */ = {isa = PBXBuildFile; fileRef = 130860EEA891CBFD6D29E5F2 /* PayQuote.swift */; };
+		37022BB68D9C16746746CADE /* FlipperGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8109F6121987B852B6CB6438 /* FlipperGateway.swift */; };
 		3AAC8978D16A6C0079812CD9 /* TinyWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 3C7610C80674D0C17445EF9F /* TinyWidgets.appex */; platformFilter = ios; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		3EDE249289D884014EAB07E1 /* Speech.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000A3328F810D7E0249964D5 /* Speech.swift */; };
 		3F686E8CB10F974C2CD5966F /* Api.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA46B60769B65B655D3C90C /* Api.swift */; };
@@ -32,6 +35,7 @@
 		4604C31E8DD2CD95A42BECD6 /* Wearables.swift in Sources */ = {isa = PBXBuildFile; fileRef = B27A249C6A80102679CC8BCC /* Wearables.swift */; };
 		483FEAC1A66EEC1D35E7FBE5 /* TopUpTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F31BF7BE841978BF28086F5B /* TopUpTests.swift */; };
 		48C78B7707AEAAD66978D7DE /* TinyWatchApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 31E25A1ADDBE5C0DD2439C4B /* TinyWatchApp.swift */; };
+		49615E3CE9255F5A52601DC4 /* FlipperBlePanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DEB570CFF033558A88B00E5B /* FlipperBlePanel.swift */; };
 		4C33FA27E29BB24F74E02C4A /* Voice.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB80605A854F1016AE7B3CF1 /* Voice.swift */; };
 		4CA69ED9C2B50B7CA49A0F89 /* ModelConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323A45E0CDE843737E27AE5E /* ModelConfig.swift */; };
 		4D00E53D7E37E936EB31BA9F /* Messages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B02215DCCBD2AAA448B9160 /* Messages.swift */; };
@@ -58,6 +62,7 @@
 		6FF9D552D1F2145713707821 /* Motion.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28C58011688659F7B2A530D9 /* Motion.swift */; };
 		733E46C188571C09A34DC48B /* WatchBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DE5980E314E4727D0451904 /* WatchBridge.swift */; };
 		78316CDA7627414FF4E37964 /* WatchCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B3655FA9D1BA8C3A27FBEBB /* WatchCore.swift */; };
+		792620A16B5B6D6188034992 /* MediaCards.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2889701164285E53825CEE5D /* MediaCards.swift */; };
 		795FEA5FBAEE7678BA7B233B /* DeviceTools.swift in Sources */ = {isa = PBXBuildFile; fileRef = E94145671C12B6552E8C79FB /* DeviceTools.swift */; };
 		7CC1E887395EF01CC661257B /* Api.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2BA46B60769B65B655D3C90C /* Api.swift */; };
 		832BCC139CD9CA46BB7E6FDB /* Background.swift in Sources */ = {isa = PBXBuildFile; fileRef = 171FA24DD0A1C0E61EA2F357 /* Background.swift */; };
@@ -103,6 +108,7 @@
 		D88C9A089554758D17995274 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 086478BCB084EA16506D4AF3 /* Assets.xcassets */; };
 		E23F2E6856850D75CB6862B8 /* Panels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A9AD35B5B77CAE124AEDF67 /* Panels.swift */; };
 		E3BD5147D68C148A84988737 /* Briefing.swift in Sources */ = {isa = PBXBuildFile; fileRef = A45F0D68484CFD4910548C08 /* Briefing.swift */; };
+		E557C7D404B0609938BFDDA2 /* ChatMediaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CB4E0B27EA2F0C306640717F /* ChatMediaTests.swift */; };
 		E70F7EB5D8024C2FC3F2F6E0 /* AgentActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 49FB02858768765513AB0828 /* AgentActivity.swift */; };
 		E8FE2144BF45DAF1C2C925D9 /* Bluetooth.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BCAC72D09E9ECFC8A8DF72F /* Bluetooth.swift */; };
 		EE15842ADD6E2DE124141095 /* Media.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47D9055A24B738A90D9CEB5B /* Media.swift */; };
@@ -117,7 +123,9 @@
 		F643F0E8852B95E3D6665972 /* Onboarding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1DD8FCBEE3169A386AE39948 /* Onboarding.swift */; };
 		F6D33A0AC24476CA479942C9 /* AgentLiveWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 073F111ED3E4C3FF23809FA8 /* AgentLiveWidget.swift */; };
 		F826E7139C95930175CC4E2E /* ModelConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 323A45E0CDE843737E27AE5E /* ModelConfig.swift */; };
+		F91FA3BE42AD15CD55367707 /* TinyLive.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9AA2906D6C4652B3D2C3726 /* TinyLive.swift */; };
 		FE456CB6C538027D9FA99979 /* WatchCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B3655FA9D1BA8C3A27FBEBB /* WatchCore.swift */; };
+		FFCEBC217E4217AF1E2CFFF1 /* NiclaRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 902DD474E6F25F3D344611D0 /* NiclaRecorder.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -206,6 +214,7 @@
 		1DD8FCBEE3169A386AE39948 /* Onboarding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Onboarding.swift; sourceTree = "<group>"; };
 		22060EEF9BF1FD9DE3EFC81A /* Attachments.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Attachments.swift; sourceTree = "<group>"; };
 		257176987916558DA41A2209 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
+		2889701164285E53825CEE5D /* MediaCards.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaCards.swift; sourceTree = "<group>"; };
 		28C58011688659F7B2A530D9 /* Motion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Motion.swift; sourceTree = "<group>"; };
 		2A52E80E0BA5D812C0D86982 /* TinyWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyWidgets.swift; sourceTree = "<group>"; };
 		2BA46B60769B65B655D3C90C /* Api.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Api.swift; sourceTree = "<group>"; };
@@ -235,9 +244,12 @@
 		6BCAC72D09E9ECFC8A8DF72F /* Bluetooth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bluetooth.swift; sourceTree = "<group>"; };
 		6DAA21B8F9D304FC10960D32 /* Haptic.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Haptic.swift; sourceTree = "<group>"; };
 		6DB64C5D3D2F518C60B21B77 /* TaskTree.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskTree.swift; sourceTree = "<group>"; };
+		8109F6121987B852B6CB6438 /* FlipperGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlipperGateway.swift; sourceTree = "<group>"; };
 		84DA877DDEFDC372505B706A /* ChatStreamDecoderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatStreamDecoderTests.swift; sourceTree = "<group>"; };
 		8A05284631316627CB212C2C /* ChainView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainView.swift; sourceTree = "<group>"; };
+		8BC879FE2DE9BF05C63D273F /* TinySetup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinySetup.swift; sourceTree = "<group>"; };
 		8F3D80F0F4278EA31C489B8A /* ChainStatusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChainStatusTests.swift; sourceTree = "<group>"; };
+		902DD474E6F25F3D344611D0 /* NiclaRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NiclaRecorder.swift; sourceTree = "<group>"; };
 		90F4528D5A62BAFD7F65E91B /* StandingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StandingTests.swift; sourceTree = "<group>"; };
 		99D47E179FFC0E6D14054790 /* Update.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Update.swift; sourceTree = "<group>"; };
 		A27A717434D0C5BD9C4A48DF /* AgentLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLive.swift; sourceTree = "<group>"; };
@@ -261,10 +273,13 @@
 		C4FB1E573C4D0D44DF82022D /* MapScreen.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MapScreen.swift; sourceTree = "<group>"; };
 		C621305C23550CE05D6CA8A4 /* Config.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Config.swift; sourceTree = "<group>"; };
 		C6C05D0DB4CBE527F7ECEE89 /* WatchIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchIntents.swift; sourceTree = "<group>"; };
+		CB4E0B27EA2F0C306640717F /* ChatMediaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatMediaTests.swift; sourceTree = "<group>"; };
 		CBC3ADFB03E9B0AC5579A7B9 /* WearablesRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearablesRecorder.swift; sourceTree = "<group>"; };
 		D16B733BDE1BCF4A6686FD46 /* WatchWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchWidgets.swift; sourceTree = "<group>"; };
 		D25E5629B177873F14F1AA2F /* TinyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyTests.swift; sourceTree = "<group>"; };
+		D26099BEFE6CCEE602B7A13F /* NiclaVoiceGateway.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NiclaVoiceGateway.swift; sourceTree = "<group>"; };
 		D8264B73A8EA36D1CB572416 /* MemoryGraph.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryGraph.swift; sourceTree = "<group>"; };
+		DEB570CFF033558A88B00E5B /* FlipperBlePanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlipperBlePanel.swift; sourceTree = "<group>"; };
 		E630236CB9D535D909DFD465 /* Split.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Split.swift; sourceTree = "<group>"; };
 		E94145671C12B6552E8C79FB /* DeviceTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceTools.swift; sourceTree = "<group>"; };
 		EBC50495EC5FE233BE5E24FD /* WidgetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetStore.swift; sourceTree = "<group>"; };
@@ -272,6 +287,7 @@
 		EEDF3B7FC11570F42D589D15 /* WearablesLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WearablesLive.swift; sourceTree = "<group>"; };
 		F31BF7BE841978BF28086F5B /* TopUpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopUpTests.swift; sourceTree = "<group>"; };
 		F58ED7872AC159DF433123AA /* EndpointPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EndpointPanel.swift; sourceTree = "<group>"; };
+		F9AA2906D6C4652B3D2C3726 /* TinyLive.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TinyLive.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -362,6 +378,7 @@
 			children = (
 				A4970C9A33A59088D02FE90E /* AgentMapTests.swift */,
 				8F3D80F0F4278EA31C489B8A /* ChainStatusTests.swift */,
+				CB4E0B27EA2F0C306640717F /* ChatMediaTests.swift */,
 				84DA877DDEFDC372505B706A /* ChatStreamDecoderTests.swift */,
 				ABB479E32A4BE1042E36A1D1 /* EndpointPanelTests.swift */,
 				12034AA70EFC3A2F8CA0C0BD /* ExplorerTests.swift */,
@@ -406,6 +423,8 @@
 				E94145671C12B6552E8C79FB /* DeviceTools.swift */,
 				F58ED7872AC159DF433123AA /* EndpointPanel.swift */,
 				51D93C92C063D8A021F85385 /* Explorer.swift */,
+				DEB570CFF033558A88B00E5B /* FlipperBlePanel.swift */,
+				8109F6121987B852B6CB6438 /* FlipperGateway.swift */,
 				B50C61BFC0E8191A9922D467 /* Geo.swift */,
 				6DAA21B8F9D304FC10960D32 /* Haptic.swift */,
 				B424F99ED0AB1614C77E297F /* ImageGen.swift */,
@@ -414,12 +433,15 @@
 				C4FB1E573C4D0D44DF82022D /* MapScreen.swift */,
 				10DFD47916CD4331BD24B6B1 /* Markdown.swift */,
 				47D9055A24B738A90D9CEB5B /* Media.swift */,
+				2889701164285E53825CEE5D /* MediaCards.swift */,
 				D8264B73A8EA36D1CB572416 /* MemoryGraph.swift */,
 				0B02215DCCBD2AAA448B9160 /* Messages.swift */,
 				323A45E0CDE843737E27AE5E /* ModelConfig.swift */,
 				EC3D439C81F29ADB0353FAFF /* ModelPricing.swift */,
 				28C58011688659F7B2A530D9 /* Motion.swift */,
 				0F13983A14C2AE45FFA765A8 /* Net.swift */,
+				902DD474E6F25F3D344611D0 /* NiclaRecorder.swift */,
+				D26099BEFE6CCEE602B7A13F /* NiclaVoiceGateway.swift */,
 				07BA5DB02E8FFCC40F1C387C /* Notifications.swift */,
 				1DD8FCBEE3169A386AE39948 /* Onboarding.swift */,
 				4A9AD35B5B77CAE124AEDF67 /* Panels.swift */,
@@ -436,6 +458,8 @@
 				6DB64C5D3D2F518C60B21B77 /* TaskTree.swift */,
 				1CE320A9725C4646477C8B52 /* Theme.swift */,
 				5750E44BBFCCF8FC11119A26 /* TinyApp.swift */,
+				F9AA2906D6C4652B3D2C3726 /* TinyLive.swift */,
+				8BC879FE2DE9BF05C63D273F /* TinySetup.swift */,
 				516B12EFE240C561513FE935 /* TopUp.swift */,
 				A5C8AA512A89166A2EE0A401 /* Torch.swift */,
 				99D47E179FFC0E6D14054790 /* Update.swift */,
@@ -687,6 +711,7 @@
 			files = (
 				A342198CBF241B81F5549FA4 /* AgentMapTests.swift in Sources */,
 				B81C1F7434AFF110BA5C8298 /* ChainStatusTests.swift in Sources */,
+				E557C7D404B0609938BFDDA2 /* ChatMediaTests.swift in Sources */,
 				EF3EA1A67E687F5B9957F078 /* ChatStreamDecoderTests.swift in Sources */,
 				0876034CCFB3C8F469DD722A /* EndpointPanelTests.swift in Sources */,
 				2B099E83973F328FCE33021C /* ExplorerTests.swift in Sources */,
@@ -717,6 +742,8 @@
 				795FEA5FBAEE7678BA7B233B /* DeviceTools.swift in Sources */,
 				99297066A535DDB34EAE15E5 /* EndpointPanel.swift in Sources */,
 				426EA0CAE0237011FD8E9D59 /* Explorer.swift in Sources */,
+				49615E3CE9255F5A52601DC4 /* FlipperBlePanel.swift in Sources */,
+				37022BB68D9C16746746CADE /* FlipperGateway.swift in Sources */,
 				1C945B69142C28591114B1B9 /* Geo.swift in Sources */,
 				958CBE8BF5D86B0F0B55820B /* Haptic.swift in Sources */,
 				9B362E70DEE9FDA7C12376F8 /* ImageGen.swift in Sources */,
@@ -725,12 +752,15 @@
 				5EB914AA54F1C17FD9D605F5 /* MapScreen.swift in Sources */,
 				A5E19ACD062487057B2095CB /* Markdown.swift in Sources */,
 				EE15842ADD6E2DE124141095 /* Media.swift in Sources */,
+				792620A16B5B6D6188034992 /* MediaCards.swift in Sources */,
 				F001E2B80C1F593EE3BFF70B /* MemoryGraph.swift in Sources */,
 				4D00E53D7E37E936EB31BA9F /* Messages.swift in Sources */,
 				6F0A46478BED0B099F4B3746 /* ModelConfig.swift in Sources */,
 				4ED8F56194C88673F1B3A5FE /* ModelPricing.swift in Sources */,
 				6FF9D552D1F2145713707821 /* Motion.swift in Sources */,
 				1EC7DC8F3AA7AF84EEC69873 /* Net.swift in Sources */,
+				FFCEBC217E4217AF1E2CFFF1 /* NiclaRecorder.swift in Sources */,
+				1B6EE2B0F3967B0E9A2C4C0D /* NiclaVoiceGateway.swift in Sources */,
 				53334E5C90DA3CE76F557366 /* Notifications.swift in Sources */,
 				F643F0E8852B95E3D6665972 /* Onboarding.swift in Sources */,
 				E23F2E6856850D75CB6862B8 /* Panels.swift in Sources */,
@@ -747,6 +777,8 @@
 				ABDCD56C37D96C7E24AA9EA7 /* TaskTree.swift in Sources */,
 				A84C6EB902516A2A15F7D5BD /* Theme.swift in Sources */,
 				BE9777E0151241470C3E4C8D /* TinyApp.swift in Sources */,
+				F91FA3BE42AD15CD55367707 /* TinyLive.swift in Sources */,
+				17D512D499B77D6F248B6970 /* TinySetup.swift in Sources */,
 				B9587FA45120AA68CE5884AE /* TopUp.swift in Sources */,
 				BC3DC4BD13596B09CA685C0C /* Torch.swift in Sources */,
 				9DD03055D3EA8E3A40989F54 /* Update.swift in Sources */,
@@ -874,7 +906,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 61;
+				CURRENT_PROJECT_VERSION = 66;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -961,7 +993,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 61;
+				CURRENT_PROJECT_VERSION = 66;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;

@@ -295,7 +295,7 @@ struct WalletView: View {
                 withAnimation(.easeInOut(duration: 0.2)) { showIntro.toggle() }
             } label: {
                 HStack {
-                    Text("🌱 What is the tiny wallet?")
+                    Text("What is the tiny wallet?")
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                     Spacer()
@@ -425,7 +425,7 @@ struct WalletView: View {
     // ── Deposit ───────────────────────────────────────────────────────────
     private var depositCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("⬇️ Deposit USDC on \(deposit.chain == "base-sepolia" ? "Base Sepolia" : "Base")")
+            Text("Deposit USDC on \(deposit.chain == "base-sepolia" ? "Base Sepolia" : "Base")")
                 .font(.subheadline.weight(.semibold))
 
             if !deposit.configured {
@@ -530,7 +530,7 @@ struct WalletView: View {
     // ── Withdraw ─────────────────────────────────────────────────────────
     private var withdrawCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("⬆️ Withdraw USDC")
+            Text("Withdraw USDC")
                 .font(.subheadline.weight(.semibold))
             Text("Sends to your linked address instantly — no approval step. Min $1, flat $0.10 fee (gas), $500/day. Testnet trial credits aren't withdrawable as real USDC.")
                 .font(.caption)
@@ -665,7 +665,7 @@ struct WalletView: View {
     // ── Monetize (x402 + ERC-8004 URLs for priced tinys) ────────────────────
     private var monetizeCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("💰 Monetize your tinys")
+            Text("Monetize your tinys")
                 .font(.subheadline.weight(.semibold))
             // There is NO UI price control (no Settings/Your-AI price field on any
             // client) — the only mechanism is telling the tiny in chat. Point at

@@ -182,6 +182,51 @@ enum EndpointCamera {
     }
 }
 
+// ── Frame liveness ──────────────────────────────────────────────────────────
+
+/// 🔴 Is the frame on screen a LIVE view, or just the last one that arrived?
+///
+/// The panel keeps the last good frame when a tick fails, deliberately: flashing
+/// an empty box over a working camera is worse than showing a frame two seconds
+/// old. But the badge over that frame read `live` from the first successful
+/// decode and was never withdrawn — and it could not be, because `cameraFailed`
+/// is only ever set while `frame == nil`, so after one success this panel had no
+/// way left to report a failure at all. A chamber camera that died at 3am showed
+/// a still picture of a finished print, labelled live, for as long as the sheet
+/// stayed open.
+///
+/// FRESHNESS decides the word, not the last tick's outcome: one dropped frame is
+/// ordinary on a robot's own webcam and must not flicker the badge.
+///
+/// Web parity: `STALE_AFTER_MS` in app/devices/page.tsx. Android's copy of this
+/// panel still claims `live` unconditionally — pinned as a fails-when-fixed test.
+enum FrameLiveness {
+    /// Three ticks of `cameraLoop`'s 2s sleep. One tick may be lost to a slow
+    /// frame or a busy printer; three in a row is a stall, not a hiccup.
+    static let staleAfter: TimeInterval = 6
+
+    /// The one decision, so the badge, its tint and VoiceOver cannot disagree —
+    /// each of the three used to claim liveness on its own terms.
+    static func isLive(frameAt: Date?, now: Date = Date()) -> Bool {
+        guard let frameAt else { return false }
+        return now.timeIntervalSince(frameAt) < staleAfter
+    }
+
+    /// The badge, and deliberately not a diagnosis: `EndpointCamera.frame`
+    /// answers nil for every failure alike and keeps no reason, so the only
+    /// honest thing left to say is WHICH frame this is. The instant it was taken
+    /// goes beneath the image in the sheet's one voice for that, `ReadingAge`.
+    static func badge(live: Bool) -> String { live ? "live" : "last frame" }
+
+    /// What VoiceOver hears. The label said "Live camera view from X"
+    /// unconditionally — the same false claim with the volume up, and worse,
+    /// because a screen-reader user has no frozen picture to notice.
+    static func spoken(deviceName: String, live: Bool) -> String {
+        live ? "Live camera view from \(deviceName)"
+             : "Last camera frame from \(deviceName)"
+    }
+}
+
 // ── The panel ───────────────────────────────────────────────────────────────
 
 struct EndpointPanel: View {
@@ -197,6 +242,12 @@ struct EndpointPanel: View {
     @State private var note: String?
     @State private var frame: UIImage?
     @State private var cameraFailed = false
+    /// When the frame on screen arrived, and whether that is still recent enough
+    /// to call live. `frameLive` is republished by every tick of `cameraLoop`
+    /// rather than computed in `body`, because nothing else would re-render this
+    /// panel once the frames stopped — the badge would freeze along with them.
+    @State private var frameAt: Date?
+    @State private var frameLive = false
     /// Serializes the frame fetch: one in flight at a time, so a slow frame can't
     /// stack ticks behind it (the web gets this free from the browser's <img>).
     @State private var fetchingFrame = false
@@ -207,7 +258,17 @@ struct EndpointPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if hasCamera { cameraView }
+            if hasCamera {
+                cameraView
+                // 🕒 A frame that stopped refreshing says WHEN it was taken, in the
+                // same sentence the necklace camera and the Flipper reading use.
+                // Gated on `!frameLive` because while it is live the badge already
+                // answers the question, and on `frameAt` because an age with no
+                // reading under it dates nothing.
+                if !frameLive, let asOf = ReadingAge.asOf(frameAt) {
+                    Text(asOf).font(.caption2).foregroundStyle(.secondary)
+                }
+            }
             if !readings.isEmpty {
                 // Two columns of label/value — a phone-width version of the web's
                 // definition grid.
@@ -246,22 +307,25 @@ struct EndpointPanel: View {
                     .resizable()
                     .scaledToFill()
                     .clipShape(RoundedRectangle(cornerRadius: 10))
-                    .accessibilityLabel("Live camera view from \(deviceName)")
+                    .accessibilityLabel(FrameLiveness.spoken(deviceName: deviceName, live: frameLive))
             } else {
                 Text(cameraFailed ? "Camera unavailable" : "Connecting to camera…")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             if frame != nil {
-                // "live" badge, tinted only while a job is actually running.
+                // The badge, tinted only while a job is actually running AND the
+                // view is actually live — an accent-lit "live" over a frame from
+                // last night is the loudest version of the lie.
                 VStack {
                     HStack {
                         HStack(spacing: 4) {
-                            Circle().fill(running ? accent : Color.secondary).frame(width: 5, height: 5)
-                            Text("live").font(.caption2.weight(.medium))
+                            Circle().fill(frameLive && running ? accent : Color.secondary)
+                                .frame(width: 5, height: 5)
+                            Text(FrameLiveness.badge(live: frameLive)).font(.caption2.weight(.medium))
                         }
                         .padding(.horizontal, 7).padding(.vertical, 3)
                         .background(.black.opacity(0.6), in: Capsule())
-                        .foregroundStyle(running ? accent : Color.white.opacity(0.85))
+                        .foregroundStyle(frameLive && running ? accent : Color.white.opacity(0.85))
                         Spacer()
                     }
                     Spacer()
@@ -296,15 +360,21 @@ struct EndpointPanel: View {
                 if Task.isCancelled { return }
                 if let img {
                     frame = img
+                    frameAt = Date()
                     cameraFailed = false
                 } else if frame == nil {
                     // Only admit failure while we've never had a frame. Once one
                     // has landed, a dropped tick leaves the last frame up rather
-                    // than flashing an error over a working camera.
+                    // than flashing an error over a working camera — and the badge
+                    // stops calling it live, which is what that choice costs.
                     cameraFailed = true
                 }
                 fetchingFrame = false
             }
+            // Outside the scenePhase gate on purpose: the ticks skipped while
+            // backgrounded still have to age the frame, or a phone coming out of a
+            // pocket finds a five-minute-old picture still wearing a live badge.
+            frameLive = FrameLiveness.isLive(frameAt: frameAt)
             do { try await Task.sleep(for: .seconds(2)) } catch { return }
         }
     }

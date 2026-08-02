@@ -59,14 +59,35 @@ final class MessagesModel: ObservableObject {
     @Published var threads: [DmThread] = []
     @Published var msgs: [DmMsg] = []
     @Published var loading = false
-    /// Distinguishes "inbox is empty" from "couldn't reach the inbox"
-    @Published var failed = false
+    /// Distinguishes "inbox is empty" from "couldn't reach the inbox" — and,
+    /// since it holds the reason rather than a flag, says WHICH.
+    ///
+    /// ⚠️ This was `failed: Bool`, and a Bool can only produce a caption that
+    /// guesses. The one it produced was *"Couldn't load messages — check your
+    /// connection and pull to retry."* — two claims the app never checked, on a
+    /// route whose answers are measured: `401 {error:'login required'}` from
+    /// `app/api/messages/route.ts:43`, `500 {error:'messages unavailable'}` from
+    /// the worker's D1 path (messages.ts:346), `503` from the route's own 10s
+    /// bound, or no response at all. Only the last is a connection problem, and
+    /// for the commonest of the others *pulling* is the one remedy guaranteed
+    /// not to work — an expired session needs a sign-out. `try?` is what threw
+    /// the status away before any caption could use it.
+    @Published var failure: String?
     /// Same distinction for a single thread: without it a flaky-connection
     /// load leaves an existing conversation looking brand-new (blank scroll),
     /// inviting a redundant "hi" — the exact regression the web HUD guards
     /// against (MessagesHUD.tsx threadError). loading gates the spinner.
     @Published var threadLoading = false
-    @Published var threadFailed = false
+    @Published var threadFailure: String?
+    /// The peer stopped existing between the inbox load and the tap: the worker
+    /// answers `404 {error:"peer not found"}` for a login it can no longer
+    /// resolve (messages.ts:300). A **verdict, not an outage** — so it is kept
+    /// apart from `threadFailure`, which owns a Retry button that here could
+    /// only fail again. It also keeps two words off the screen: the wire's
+    /// "peer", which is not what anyone calls a person, and the chat table's
+    /// `friendlyHTTPError(404)` — *"That tiny doesn't exist"* — which answers a
+    /// question about a tiny when this is about someone you were talking to.
+    @Published var peerGone = false
     /// A DM send that didn't land — surfaced inline so the user can retry
     /// (the draft is restored) instead of the message silently vanishing.
     @Published var sendError: String?
@@ -82,11 +103,19 @@ final class MessagesModel: ObservableObject {
     func loadInbox(token: String?) async {
         loading = true
         defer { loading = false }
-        guard let d: [String: Any] = try? await Api.get("/api/messages", token: token) else {
-            failed = true
+        let d: [String: Any]
+        do {
+            d = try await Api.get("/api/messages", token: token)
+        } catch {
+            // `contentMessage`, not `message`: this is a list someone asked to
+            // SEE, so the chat table must not word a 404 as "That tiny doesn't
+            // exist". The owned statuses (401, 5xx, no-response) still get the
+            // house line, which is why the worker's internal "messages
+            // unavailable" never reaches the screen.
+            failure = LoadFailure.contentMessage(error)
             return
         }
-        failed = false
+        failure = nil
         threads = ((d["threads"] as? [[String: Any]]) ?? []).map {
             DmThread(
                 userId: $0["userId"] as? String ?? "",
@@ -99,6 +128,45 @@ final class MessagesModel: ObservableObject {
         }
     }
 
+    /// What a failed thread load means. Two outcomes, because the remedies are
+    /// opposite: one is worth another try and one never will be.
+    enum ThreadLoadFailure: Equatable {
+        /// The worker cannot resolve this login (`404 {error:"peer not found"}`,
+        /// messages.ts:300). Nothing the reader does changes that.
+        case gone
+        /// Anything else, with the line to show for it.
+        case retryable(String)
+    }
+
+    /// The split, as a pure function so every branch is checkable without a
+    /// network — the whole reason `try?` was able to hide here for so long.
+    ///
+    /// ⚠️ 404 is deliberately the ONLY permanent one. A 401 is transient (sign
+    /// out and back in), 5xx and a dead connection are transient by definition,
+    /// and 400 is unreachable on this route at all: `app/api/messages/route.ts`
+    /// always sets `userId` from the session, so the worker's
+    /// `400 {error:"userId required"}` cannot be produced by this client.
+    ///
+    /// ⚠️⚠️ And not EVERY 404 — only one that **explained itself**. Two different
+    /// things answer 404 on this path: the worker's
+    /// `404 {error:"peer not found"}` (messages.ts:300), which is about the
+    /// person, and its router's plain-text `404 Not Found.` (index.ts:225),
+    /// which a stale build reaches for a route that no longer exists — as does a
+    /// stale Next deploy for `/api/messages` itself. `Api.serverError(in:)`
+    /// returns nil for a non-JSON body, so "the server sent words" is exactly
+    /// the line between them. Calling someone unreachable because OUR build is
+    /// old would be the same unfounded claim this increment exists to remove,
+    /// just told about a person instead of a network. A bare 404 stays
+    /// retryable, where `contentMessage` gives it "Couldn't load it — try again
+    /// (HTTP 404)" rather than the chat table's "That tiny doesn't exist".
+    static func classify(_ error: Error) -> ThreadLoadFailure {
+        if case .http(404, let serverMsg)? = error as? ApiError,
+           !(serverMsg ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return .gone
+        }
+        return .retryable(LoadFailure.contentMessage(error))
+    }
+
     func loadThread(_ peer: DmThread, token: String?) async {
         threadRequest += 1
         let req = threadRequest
@@ -107,16 +175,24 @@ final class MessagesModel: ObservableObject {
         // B is still in flight must not clear B's threadLoading.
         defer { if req == threadRequest { threadLoading = false } }
         let login = peer.login.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? peer.login
-        guard let d: [String: Any] = try? await Api.get("/api/messages?with=\(login)", token: token) else {
+        let d: [String: Any]
+        do {
+            d = try await Api.get("/api/messages?with=\(login)", token: token)
+        } catch {
             // Drop a stale failure too: a slow A-load failing after the user
             // opened B must not flip B's thread into the error state.
-            if req == threadRequest { threadFailed = true }
+            guard req == threadRequest else { return }
+            switch MessagesModel.classify(error) {
+            case .gone:            peerGone = true;      threadFailure = nil
+            case .retryable(let m): threadFailure = m;   peerGone = false
+            }
             return
         }
         // The user switched threads (or back to the inbox) while this was in
         // flight — committing now would swap in the wrong thread's messages.
         guard req == threadRequest else { return }
-        threadFailed = false
+        threadFailure = nil
+        peerGone = false
         msgs = ((d["messages"] as? [[String: Any]]) ?? []).map {
             DmMsg(
                 id: $0["id"] as? Int ?? 0,
@@ -199,17 +275,39 @@ struct MessagesView: View {
     private var inbox: some View {
         List {
             if model.threads.isEmpty {
-                Text(model.loading ? "Loading…"
-                     : model.failed ? "Couldn't load messages — check your connection and pull to retry."
-                     : "No conversations yet. DMs sent from the web show up here.")
-                    .foregroundStyle(.secondary)
+                if model.loading {
+                    Text("Loading…").foregroundStyle(.secondary)
+                } else if let why = model.failure {
+                    // The reason, and an affordance that works for all of them.
+                    // The old line named "check your connection" and "pull to
+                    // retry" — and a pull is exactly what does NOT fix the
+                    // commonest failure here, an expired session.
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(why).font(.subheadline).foregroundStyle(.secondary)
+                        Button("Try again") { Task { await model.loadInbox(token: session.token) } }
+                            .buttonStyle(.bordered)
+                    }
+                } else {
+                    Text("No conversations yet. DMs sent from the web show up here.")
+                        .foregroundStyle(.secondary)
+                }
+            } else if let why = model.failure {
+                // ⚠️ Threads on screen AND a failed load: the list is STALE. The
+                // caption above is only reachable on an EMPTY inbox, so without
+                // this row a failed pull-to-refresh said nothing at all and the
+                // surface implied the list was current — the same claim the app
+                // can't back up, made by omission instead of in words. This is
+                // the commoner case in practice: an inbox with threads in it.
+                Label(why, systemImage: "exclamationmark.arrow.circlepath")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             ForEach(model.threads) { t in
                 Button {
                     peer = t
                     model.msgs = []
                     model.sendError = nil
-                    model.threadFailed = false
+                    model.threadFailure = nil
+                    model.peerGone = false
                     Task { await model.loadThread(t, token: session.token) }
                 } label: {
                     HStack(spacing: 10) {
@@ -252,9 +350,23 @@ struct MessagesView: View {
                         if model.threadLoading {
                             HStack { ProgressView().scaleEffect(0.8); Text("Loading…").foregroundStyle(.secondary) }
                                 .frame(maxWidth: .infinity).padding(.top, 40)
-                        } else if model.threadFailed {
+                        } else if model.peerGone {
+                            // No Retry: the worker cannot resolve this login, so
+                            // every retry ends the same way. Said in the words
+                            // someone would use about a person — not the wire's
+                            // "peer not found", and not the chat table's "That
+                            // tiny doesn't exist", which is about a tiny.
+                            Text("@\(peer.login) isn't reachable any more.")
+                                .font(.subheadline).foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity).padding(.top, 40)
+                        } else if let why = model.threadFailure {
                             VStack(spacing: 12) {
-                                Text("Couldn't load this conversation.").font(.subheadline).foregroundStyle(.secondary)
+                                // Was the fixed line "Couldn't load this
+                                // conversation." — true, and it told the reader
+                                // nothing they could act on. The status was
+                                // available all along; `try?` discarded it.
+                                Text(why).font(.subheadline).foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
                                 Button("Retry") { Task { await model.loadThread(peer, token: session.token) } }
                                     .buttonStyle(.bordered)
                             }

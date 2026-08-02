@@ -196,6 +196,13 @@ final class WearablesManager: ObservableObject {
                 lines.append("Heard through the glasses moments ago (on-device transcript): \"\(String(heard.suffix(400)))\"")
             }
         }
+        // Derived tap events (GlassesEvents) — "the user tapped the glasses"
+        // is a signal worth answering ("want a photo?"), and the SDK gives
+        // us no other channel for it. Android-identical wording.
+        let taps = GlassesEvents.shared.recent()
+        if !taps.isEmpty {
+            lines.append("Recent glasses events: \(taps.joined(separator: "; ")).")
+        }
         return lines.joined(separator: "\n")
     }
 
@@ -314,6 +321,8 @@ final class WearablesManager: ObservableObject {
             "recording": GlassesRecorder.shared.isRecording,
         ]
         if let thermal, thermal != .unknown { facts["thermal"] = String(describing: thermal) }
+        let taps = GlassesEvents.shared.recent()
+        if !taps.isEmpty { facts["recentEvents"] = taps }
         return facts
     }
 

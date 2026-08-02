@@ -7,6 +7,7 @@
  * launches (Documents/chat-history.json).
  */
 import SwiftUI
+import CoreBluetooth
 import WidgetKit
 import PhotosUI
 import AVFoundation
@@ -1267,7 +1268,7 @@ final class ChatModel: ObservableObject {
             // ungated too.
             if liveIds.isEmpty, reply.failedPrompt == nil, !reply.text.isEmpty,
                UIApplication.shared.applicationState != .active {
-                await Notify.post(title: "🌱 \(tiny) replied",
+                await Notify.post(title: "\(tiny) replied",
                                   body: String(reply.text.prefix(100)))
             }
             flushQueue(token: token)
@@ -1841,6 +1842,27 @@ struct ChatView: View {
         .accessibilityLabel("Glasses live view")
     }
     #endif
+
+    // 💎 The necklace's glasses-style live view (TinyLive.swift): LAN MJPEG +
+    // PCM from the Nicla — same PiP card pattern, no MWDAT dependency.
+    @State private var showTinyLive = false
+
+    @ViewBuilder private var tinyLiveOverlayView: some View {
+        if showTinyLive {
+            TinyLiveOverlay(shown: $showTinyLive)
+        }
+    }
+
+    private var tinyLiveToolbarButton: some View {
+        Button {
+            TinyDesign.haptic()
+            showTinyLive.toggle()
+        } label: {
+            Image(systemName: "sparkles.tv")
+                .foregroundStyle(showTinyLive ? Color.green : Color.primary)
+        }
+        .accessibilityLabel("Necklace live view")
+    }
     @ObservedObject private var voice = VoiceMode.shared
     // 📞 Real speech-to-speech call (VoiceCall.swift) — a full-screen call
     // surface, distinct from VoiceMode's dictation-and-send.
@@ -1889,6 +1911,7 @@ struct ChatView: View {
     /// Named sessions sheet (web's /save + /load)
     @State private var showSessions = false
     @State private var showCallRecordings = false
+    @State private var showTranscripts = false
     /// /forgetall is irreversible (wipes ALL memories + the turn log) — web
     /// gates it behind confirm() (Chat.tsx:1602), android behind a re-run
     /// token. iOS wiped on the first bare /forgetall with no guard; hold it
@@ -2217,7 +2240,12 @@ struct ChatView: View {
             // Rendering it via overlay (not a sheet) keeps the chat usable
             // while watching the stream — the PiP the user asked for.
             #if canImport(MWDATCore) && canImport(MWDATCamera)
-            .overlay(alignment: .topTrailing) { glassesLiveOverlayView }
+            .overlay(alignment: .topTrailing) {
+                VStack(alignment: .trailing, spacing: 8) {
+                    glassesLiveOverlayView
+                    tinyLiveOverlayView
+                }
+            }
             #endif
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -2257,20 +2285,29 @@ struct ChatView: View {
                     }
                 }
                 #endif
+                // 💎 Necklace live view — the glasses button's sibling.
+                ToolbarItem(placement: .topBarTrailing) {
+                    if session.deviceId != nil || session.token != nil {
+                        tinyLiveToolbarButton
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         if let u = session.user {
                             Text("@\(u.login)")
                         }
-                        if session.deviceId != nil {
-                            Label("Device enrolled — 🟢 live", systemImage: "iphone.radiowaves.left.and.right")
+                        Button {
+                            showMessages = true
+                        } label: {
+                            Label(
+                                session.unreadDms > 0 ? "Messages (\(session.unreadDms))" : "Messages",
+                                systemImage: session.unreadDms > 0 ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right"
+                            )
                         }
-                        if chat.tiny != "tiny" {
-                            Button {
-                                chat.switchTiny("tiny")
-                            } label: {
-                                Label("Back to tiny", systemImage: "arrow.uturn.backward")
-                            }
+                        Button {
+                            showDevices = true
+                        } label: {
+                            Label("My devices", systemImage: "iphone.radiowaves.left.and.right")
                         }
                         Button {
                             showMemory = true
@@ -2288,31 +2325,36 @@ struct ChatView: View {
                             Label("Toolbox", systemImage: "wrench.and.screwdriver")
                         }
                         Button {
-                            showDevices = true
+                            showSettings = true
                         } label: {
-                            Label("My devices", systemImage: "iphone.radiowaves.left.and.right")
+                            Label("Settings", systemImage: "gearshape")
                         }
-                        // Group: this ViewBuilder sits at its 10-child limit —
-                        // Nearby + Map share a slot instead of adding one.
-                        Group {
+                        // Account menu order (user ask 2026-08-02): Messages in
+                        // the first row, then My devices, Memory, Scheduled
+                        // jobs, Toolbox, Settings — every
+                        // other entry lives one level down in More. The interior
+                        // keeps its pre-wrap indentation on purpose: this region
+                        // is co-edited by a concurrent session and re-indenting
+                        // would entangle the two diffs.
+                        Menu {
+                        if session.deviceId != nil {
+                            Label("Device enrolled — live", systemImage: "iphone.radiowaves.left.and.right")
+                        }
+                        if chat.tiny != "tiny" {
                             Button {
-                                showNearby = true
+                                chat.switchTiny("tiny")
                             } label: {
-                                Label("Nearby devices", systemImage: "dot.radiowaves.left.and.right")
-                            }
-                            Button {
-                                showMap = true
-                            } label: {
-                                Label("Map", systemImage: "map")
+                                Label("Back to tiny", systemImage: "arrow.uturn.backward")
                             }
                         }
+                        // Nearby left this menu when pairing moved into My
+                        // devices (fe618556) — one place answers "what's
+                        // around", not two. NearbyView itself stays for the
+                        // iPad sidebar route.
                         Button {
-                            showMessages = true
+                            showMap = true
                         } label: {
-                            Label(
-                                session.unreadDms > 0 ? "Messages (\(session.unreadDms))" : "Messages",
-                                systemImage: session.unreadDms > 0 ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right"
-                            )
+                            Label("Map", systemImage: "map")
                         }
                         Button {
                             showActivity = true
@@ -2321,11 +2363,6 @@ struct ChatView: View {
                                 session.unreadEvents > 0 ? "Activity (\(session.unreadEvents))" : "Activity",
                                 systemImage: session.unreadEvents > 0 ? "bolt.fill" : "bolt"
                             )
-                        }
-                        Button {
-                            showSettings = true
-                        } label: {
-                            Label("Settings", systemImage: "gearshape")
                         }
                         // Owner-only: the live-call voice is a per-tiny server
                         // field — everyone who calls this tiny hears it.
@@ -2341,10 +2378,19 @@ struct ChatView: View {
                         } label: {
                             Label("Sessions", systemImage: "square.stack.3d.up")
                         }
-                        Button {
-                            showCallRecordings = true
-                        } label: {
-                            Label("Call recordings", systemImage: "recordingtape")
+                        // Group: the ViewBuilder is at its 10-child limit —
+                        // Call recordings + Transcripts share a slot.
+                        Group {
+                            Button {
+                                showCallRecordings = true
+                            } label: {
+                                Label("Call recordings", systemImage: "recordingtape")
+                            }
+                            Button {
+                                showTranscripts = true
+                            } label: {
+                                Label("Transcripts", systemImage: "waveform.badge.mic")
+                            }
                         }
                         if !chat.messages.isEmpty {
                             Button {
@@ -2374,6 +2420,9 @@ struct ChatView: View {
                         // ⌘N — hardware keyboard "new conversation"; the
                         // chord surfaces in the iPad ⌘-hold shortcut HUD
                         .keyboardShortcut("n", modifiers: .command)
+                        } label: {
+                            Label("More", systemImage: "ellipsis.circle")
+                        }
                         Button(role: .destructive) { session.logout() } label: {
                             Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
                         }
@@ -2385,6 +2434,7 @@ struct ChatView: View {
             }
             .sheet(isPresented: $showSessions) { SessionsView(chat: chat) }
             .sheet(isPresented: $showCallRecordings) { CallRecordingsView() }
+            .sheet(isPresented: $showTranscripts) { NiclaTranscriptsView() }
             .sheet(item: $shareURL) { url in
                 // System share sheet for the fresh tiny.technology link
                 ActivitySheet(items: [url])
@@ -2498,6 +2548,13 @@ struct ChatView: View {
                 if MemoryHarness.autoOpensSheet(arguments: ProcessInfo.processInfo.arguments) {
                     showMemory = true
                 }
+                // 💎 Same split again for My devices (DevicesHarness). This one
+                // needs the auto-open more than the others: simctl can't send a
+                // tap, and `openurl tinyapp://devices` puts an "Open in tiny?"
+                // system alert in front of the screen being photographed.
+                if DevicesHarness.autoOpensSheet(arguments: ProcessInfo.processInfo.arguments) {
+                    showDevices = true
+                }
                 // `--map-tracking-harness` → opens the map full-screen with tracking
                 // already on (TinyMapView.init sets it, since permission has to fire
                 // on the "locate me" TAP and the CLI can't send one). Without this the
@@ -2555,7 +2612,14 @@ struct ChatView: View {
                 voice.toggle { text in chat.send(text, token: session.token) }
             }
         case "ask":
-            focused = true
+            // 💻/🤖 A trusted banner tap stashed its redeem turn (RedeemStash —
+            // the text never rides the URL, so a Safari tinyapp://ask cannot
+            // inject a prompt: empty stash → just focus, today's behavior).
+            if let q = RedeemStash.take() {
+                chat.send(q, token: session.token)
+            } else {
+                focused = true
+            }
         case "messages":
             showMessages = true
         case "memory":
@@ -3411,10 +3475,11 @@ struct ChatView: View {
             #else
             break
             #endif
-        case "learn", "recall", "unlearn", "send_message", "read_messages":
-            // Server tools (worker-backed memory + DMs) — /api/voice/tool
-            // runs the same session-bound tool objects chat mounts. viaTiny
-            // stamps the sender surface for send_message.
+        case "learn", "recall", "unlearn", "send_message", "read_messages",
+             "nicla_take_photo", "nicla_take_video", "nicla_listen", "nicla_status":
+            // Server tools (worker-backed memory + DMs + the 💎 necklace) —
+            // /api/voice/tool runs the same session-bound tool objects chat
+            // mounts. viaTiny stamps the sender surface for send_message.
             Task {
                 let out: [String: Any]
                 do {
@@ -3996,11 +4061,20 @@ struct MessageBubble: View {
                 ReasoningDisclosure(reasoning: msg.reasoning)
             }
             if !msg.text.isEmpty {
+                // 🖼️ Media the agent embedded (necklace photos/GIF clips/WAVs,
+                // glasses MP4s) render as real players — the prose keeps only
+                // the words. Users: `![…](url)` no longer prints literally.
+                let split = msg.role == "assistant"
+                    ? ChatMedia.extract(from: msg.text) : (msg.text, [])
+                ForEach(split.1) { item in
+                    ChatMediaCard(media: item)
+                }
+                if !split.0.isEmpty || msg.role != "assistant" {
                 Group {
                     if msg.role == "assistant" {
                         // Real markdown: fenced code → cards w/ copy,
                         // prose → AttributedString (clickable links)
-                        MarkdownText(text: msg.text)
+                        MarkdownText(text: split.0)
                     } else {
                         Text(msg.text)
                     }
@@ -4043,6 +4117,7 @@ struct MessageBubble: View {
                         }
                     }
                 }
+                }   // end prose (skipped when the whole message was media)
                 // 🪙 P1.2 — token usage tag (web's per-message tok display),
                 // with a per-turn ~$ estimate when the model is priceable
                 // (ModelPricing) — web/android parity.
@@ -4196,12 +4271,12 @@ struct PaywallCard: View {
                     }
                 }
             } else {
-                // accessibilityLabel strips the decorative 💳/↻ glyph so
-                // VoiceOver reads a clean "Add funds"/"Retry" instead of the
+                // accessibilityLabel strips the decorative ↻ glyph so
+                // VoiceOver reads a clean "Retry" instead of the
                 // glyph name as noise before the verb — matching the care the
                 // card title already takes hiding its 💸 (:3765).
                 let addFunds = Button(action: onAddFunds) {
-                    filledLabel("💳 Add funds")
+                    filledLabel("Add funds")
                 }
                 .accessibilityLabel("Add funds")
                 if let onRetry {
@@ -4242,11 +4317,23 @@ struct PaywallCard: View {
     }
 }
 
+/// Which tiny board this beacon is, in words. An `unknown` version means
+/// firmware newer than this build — say so rather than guessing a board, since
+/// the guess would send the user into the wrong setup flow.
+func niclaKindLabel(_ info: TinyBeaconInfo) -> String {
+    switch info.kind {
+    case .vision: return "Nicla Vision"
+    case .voice: return "Nicla Voice"
+    case .unknown: return "tiny hardware"
+    }
+}
+
 /// Nearby BLE devices (menu → Nearby devices) — the same scan the web agent
 /// gets when it asks the phone what's around.
 struct NearbyView: View {
     @ObservedObject private var ble = Bluetooth.shared
     @Environment(\.dismiss) private var dismiss
+    @State private var setupTarget: BleDevice?
 
     var body: some View {
         NavigationStack {
@@ -4264,12 +4351,30 @@ struct NearbyView: View {
                             .fill(d.rssi > -55 ? Color.green : d.rssi > -75 ? .yellow : .gray)
                             .frame(width: 9, height: 9)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(d.name).font(.subheadline)
-                            Text("RSSI \(d.rssi) dBm").font(.caption2).foregroundStyle(.secondary)
+                            HStack(spacing: 5) {
+                                Text(d.name).font(.subheadline)
+                                if d.tiny != nil { Text("💎").font(.caption) }
+                            }
+                            // Name the BOARD, not just "tiny hardware": the two
+                            // necklaces need different setup (the Voice has no
+                            // WiFi), so the row should already say which one is
+                            // in front of you — the beacon's version byte
+                            // carries it, no connection needed.
+                            Text(d.tiny == nil ? "RSSI \(d.rssi) dBm"
+                                 : "\(niclaKindLabel(d.tiny!)) · \(d.tiny!.provisioned ? "configured" : "ready to set up") · RSSI \(d.rssi) dBm")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
+                        if let t = d.tiny {
+                            Spacer()
+                            Button(t.provisioned ? "Reconfigure" : "Set up") { setupTarget = d }
+                                .font(.caption.weight(.semibold))
+                                .buttonStyle(.borderedProminent)
+                                .controlSize(.mini)
                         }
                     }
                 }
             }
+            .sheet(item: $setupTarget) { d in TinySetupView(beacon: d) }
             .navigationTitle("Nearby")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -4481,5 +4586,164 @@ private struct ForgetAllDialog: ViewModifier {
         } message: {
             Text("This can't be undone.")
         }
+    }
+}
+
+/// The AirPods moment (loop ask #5): an unprovisioned tiny beacon nearby
+/// raises this bottom card while the app is open — name the hardware, offer
+/// one-tap Connect, and hand off to the existing TinySetupView provisioner
+/// in place. "Not now" (or a swipe down) stands it down for the session.
+private struct PairingCardView: View {
+    let d: BleDevice
+    let onConnect: () -> Void
+    let onNotNow: () -> Void
+    @Environment(\.tinyAccent) private var accent
+    @State private var connecting = false
+
+    private var kindLabel: String {
+        switch d.tiny?.kind {
+        case .voice: return "Nicla Voice"
+        case .vision: return "Nicla Vision"
+        default: return "tiny hardware"
+        }
+    }
+
+    /// Ripple drives the repeatForever ring animation; arrived drives the
+    /// one-shot spring entrance. Separate flags: a repeating animation keyed
+    /// on the same value as a spring would fight it.
+    @State private var rippling = false
+    @State private var arrived = false
+
+    var body: some View {
+        if connecting {
+            TinySetupView(beacon: d)
+        } else {
+            VStack(spacing: 20) {
+                // The AirPods proximity grammar: rings leave the device and
+                // fade — "this is near you, right now" — over a soft accent
+                // disc so the glyph reads as hardware, not an icon in space.
+                ZStack {
+                    ForEach(0..<3, id: \.self) { ring in
+                        Circle()
+                            .stroke(accent.opacity(0.5), lineWidth: 1.5)
+                            .frame(width: 96, height: 96)
+                            .scaleEffect(rippling ? 2.1 : 1.0)
+                            .opacity(rippling ? 0 : 0.6)
+                            .animation(
+                                .easeOut(duration: 2.4)
+                                    .repeatForever(autoreverses: false)
+                                    .delay(Double(ring) * 0.8),
+                                value: rippling
+                            )
+                    }
+                    Circle()
+                        .fill(LinearGradient(colors: [accent.opacity(0.28), accent.opacity(0.08)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
+                        .frame(width: 96, height: 96)
+                        .overlay(Circle().stroke(accent.opacity(0.35), lineWidth: 1))
+                    Image(systemName: d.tiny?.kind == .voice ? "waveform.badge.mic" : "sparkles.tv")
+                        .font(.system(size: 40, weight: .medium))
+                        .foregroundStyle(accent)
+                        .symbolEffect(.pulse)
+                }
+                .frame(height: 116)
+                .padding(.top, 26)
+                .scaleEffect(arrived ? 1 : 0.7)
+                .opacity(arrived ? 1 : 0)
+                VStack(spacing: 5) {
+                    Text(kindLabel)
+                        .font(.title2.weight(.semibold))
+                    Text("\(d.name) · ready to set up")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    connecting = true
+                    onConnect()
+                } label: {
+                    Text("Connect")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 15)
+                        .background(
+                            LinearGradient(colors: [accent, accent.opacity(0.8)],
+                                           startPoint: .top, endPoint: .bottom),
+                            in: Capsule()
+                        )
+                        .foregroundStyle(.black)
+                }
+                .padding(.top, 2)
+                Button("Not now") { onNotNow() }
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 28)
+            .onAppear {
+                rippling = true
+                withAnimation(.spring(response: 0.5, dampingFraction: 0.7)) { arrived = true }
+            }
+        }
+    }
+}
+
+/// Proximity pairing, attached once to ChatView's outer chain (a ViewModifier
+/// — the chain sits at the type-checker's budget). A short sweep runs when the
+/// app comes to the foreground (throttled to one per minute, and never while
+/// signed out — enrollment would just 401); the first unprovisioned tiny
+/// beacon raises PairingCardView with a soft haptic. Each beacon is offered
+/// once per app run — a dismissed card must not nag.
+struct ProximityPairing: ViewModifier {
+    @ObservedObject private var ble = Bluetooth.shared
+    @EnvironmentObject var session: TinySession
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var target: BleDevice?
+    @State private var offered: Set<UUID> = []
+    @State private var lastSweep = Date.distantPast
+    @State private var detent: PresentationDetent = .height(400)
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear { sweep() }
+            .onChange(of: scenePhase) { _, p in
+                if p == .active { sweep() }
+            }
+            .onChange(of: ble.devices) { _, devs in
+                // Harness runs seed ble.devices with demo beacons
+                // (DevicesHarness) — the card must not rise over their
+                // screenshots, same rule as the permission asks (27b7cbc9).
+                guard !HarnessRun.suppressesSystemPrompts(arguments: ProcessInfo.processInfo.arguments) else { return }
+                guard target == nil, session.token != nil else { return }
+                guard let d = devs.first(where: {
+                    $0.tiny?.provisioned == false && !offered.contains($0.id)
+                }) else { return }
+                offered.insert(d.id)
+                Haptic.shared.play(pattern: "success", times: 1, intensity: 0.6)
+                target = d
+            }
+            .sheet(item: $target) { d in
+                PairingCardView(
+                    d: d,
+                    onConnect: { detent = .large },
+                    onNotNow: { target = nil }
+                )
+                .presentationDetents([.height(400), .large], selection: $detent)
+                .presentationCornerRadius(28)
+            }
+    }
+
+    private func sweep() {
+        // Ambient sweeping must never be the thing that raises the Bluetooth
+        // permission ask: CBCentralManager's CREATION is the prompt
+        // (Bluetooth.startScan's own comment), and this sweep runs at app
+        // open. Until the user grants BLE somewhere deliberate — My devices,
+        // where they asked for a scan — stand down. Harness runs can't
+        // answer dialogs at all (HarnessRun, same rule as 27b7cbc9).
+        guard CBCentralManager.authorization == .allowedAlways else { return }
+        guard !HarnessRun.suppressesSystemPrompts(arguments: ProcessInfo.processInfo.arguments) else { return }
+        guard session.token != nil,
+              Date().timeIntervalSince(lastSweep) > 60 else { return }
+        lastSweep = Date()
+        ble.startScan(duration: 10)
     }
 }

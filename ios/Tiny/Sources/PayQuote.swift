@@ -332,7 +332,7 @@ struct PayQuoteCard: View {
                         if let onAddFunds { onAddFunds() }
                         else if let u = URL(string: "\(Config.serverBase)/wallet") { openURL(u) }
                     } label: {
-                        Text("💳 Add funds")
+                        Text("Add funds")
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 12).padding(.vertical, 7)
                             .background(accent, in: Capsule())

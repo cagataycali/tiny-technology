@@ -37,6 +37,78 @@ enum ApiError: LocalizedError {
     }
 }
 
+/// 🔴 Why a list sheet is empty, in words that name ONE cause.
+///
+/// Five sheets — My Devices, Jobs, Memory, the memory graph and Activity — put
+/// the same caption under their retry button: "Login required or network error".
+/// Two mutually exclusive causes, with the app committing to neither, and the
+/// remedies are opposite: an expired session needs a sign-out and back in, and
+/// no amount of retrying will fix it; a dropped connection needs signal, and
+/// signing out would only lose the token that still works. A reader who is told
+/// both learns nothing, and "Login required" is the worker's own wire phrase
+/// echoed onto a human surface.
+///
+/// The app was never actually guessing — `try?` was. Every one of those loads
+/// discarded a thrown `ApiError` whose `errorDescription` is already
+/// `Api.httpMessage`, the one table `HTTPErrorTests` exists to keep from
+/// drifting. Catch it instead of dropping it and the sheet can just say which.
+enum LoadFailure {
+    /// The caption for a load that didn't happen.
+    static func message(_ error: Error) -> String {
+        // Already speaks the house language, including the server's own words
+        // where the server is describing THIS request (a 424 naming the
+        // dependency), so a 401 reads the same here as everywhere else.
+        // (`localizedDescription`, not `errorDescription ?? …`: the optional
+        // form would need a fallback line for a state this enum cannot be in,
+        // and copy nobody can reach is copy nobody can check. A test asserts
+        // the LocalizedError bridging really does hand back the table's line.)
+        if let api = error as? ApiError { return api.localizedDescription }
+        // The only way to get here with nothing having arrived. URLError's own
+        // description names the cause ("The Internet connection appears to be
+        // offline") but never the remedy; status 0 is the house code for it.
+        if error is URLError { return Api.friendlyHTTPError(0) }
+        // ⚠️ Bytes DID arrive and weren't JSON — `Api.get`'s
+        // `JSONSerialization` throws an NSCocoaError, not an `ApiError`, and a
+        // mid-redeploy HTML error page served with a 200 is the everyday way
+        // that happens. "Check your connection" would blame the wrong thing.
+        return ApiError.badResponse.localizedDescription
+    }
+
+    /// The caption for a failed CONTENT load — a list or a profile someone asked
+    /// to SEE, as opposed to a message they sent.
+    ///
+    /// ⚠️ `message` ends at `Api.friendlyHTTPError`, and that is the CHAT table:
+    /// it words 404 as "That tiny doesn't exist" and 402 as "This tiny charges
+    /// per message". On a community list or a builder profile those are
+    /// confident answers to a question nobody asked, about a thing that is not a
+    /// tiny — the same defect the devices sheet's revoke had (`4b91ceac`), and
+    /// worse than a bare number, because a number is merely unhelpful.
+    ///
+    /// The table is right wherever it describes the TRANSPORT instead of a chat:
+    /// the `statusOwnsTheMessage` set (401, 0, 5xx) plus 424's degraded
+    /// dependency. And a server that sent its own `error` string is describing
+    /// THIS request, so it still wins — `httpMessage` already prefers it, and
+    /// that path is untouched here. What's left is a non-owning status with no
+    /// body to explain itself, which is exactly the worker's router-level
+    /// `404 Not Found.` reached by a stale build. For that: the code, and
+    /// nothing the app can't back up.
+    static func contentMessage(_ error: Error) -> String {
+        if case .http(let status, let serverMsg)? = error as? ApiError,
+           (serverMsg ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           !Api.statusOwnsTheMessage(status), status != 424 {
+            return "Couldn't load it — try again (HTTP \(status))"
+        }
+        return message(error)
+    }
+
+    /// The same rule for a caller holding a status rather than a thrown error —
+    /// the two panels that fetch `plugin.tiny.technology` directly, where `Api`'s
+    /// own base URL doesn't apply. One rule, two doors.
+    static func contentMessage(status: Int, serverMsg: String? = nil) -> String {
+        contentMessage(ApiError.http(status, serverMsg))
+    }
+}
+
 /// Pull the first structured object out of a tool-result `content` array. The
 /// Strands SDK wraps an object return as a `{json:{…}}` block; a string return
 /// arrives as `{text:"…"}` (which, for our JSON-returning tools, is a JSON
@@ -109,6 +181,19 @@ enum Api {
         let data = try await request(path, token: token)
         guard let obj = try JSONSerialization.jsonObject(with: data) as? T else { throw ApiError.badResponse }
         return obj
+    }
+
+    /// The `Codable` twin of `get`: the raw body, with the SAME failure
+    /// contract — the 30s bound, the Bearer header, and `ApiError.http(code,
+    /// serverError(in:))` on a non-2xx.
+    ///
+    /// A caller with a `Decodable` row type used to reach past all of that to a
+    /// bare `URLSession` and `try? JSONDecoder().decode`, which loses the status
+    /// entirely. That is how an expired session became "No calls yet": the
+    /// refusal body decoded cleanly into a struct of optionals, and a screen
+    /// that never learned a status has nothing to report.
+    static func getData(_ path: String, token: String?) async throws -> Data {
+        try await request(path, token: token)
     }
 
     static func post<T>(_ path: String, token: String?, body: [String: Any]) async throws -> T {

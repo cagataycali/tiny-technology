@@ -172,7 +172,10 @@ final class VoiceCall: NSObject, ObservableObject {
 
         guard let (data, resp) = try? await URLSession.shared.data(for: req),
               let http = resp as? HTTPURLResponse else {
-            return .failure("No response — check your connection.")
+            // Status 0 is the house code for "nothing answered" — and line 183
+            // already asks the table, so writing the sentence here made this the
+            // one copy free to drift (it had a period the table's line doesn't).
+            return .failure(Api.friendlyHTTPError(0))
         }
         let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
         if http.statusCode == 402 || (obj?["code"] as? String) == "byok_required" {
@@ -559,13 +562,33 @@ struct VoiceCallView: View {
 // ── Call recordings — past calls, replayable like podcast episodes ───────────
 
 /// One row of GET /api/voice/sessions (worker VOICE_LIST_SQL columns).
-private struct CallSession: Identifiable, Decodable {
+struct CallSession: Identifiable, Decodable {
     let id: String
     let tiny_name: String?
     let status: String?
     let started_at: Double?
     let duration_ms: Double?
     let segment_count: Int?
+}
+
+/// 🔴 The body of GET /api/voice/sessions — `ok` included, and that is the fix.
+///
+/// The route answers exactly three ways: `200 {ok:true, sessions:[…]}`,
+/// `401 {ok:false, error:"login required"}`, and `502 {ok:false, error:…}` when
+/// the worker is unreachable or answers an error. This struct used to be
+/// `{ let sessions: [CallSession]? }` — and an absent key satisfies an optional
+/// property, so **both refusal bodies decoded successfully** with `sessions ==
+/// nil`. The screen then read `[]` and drew "No calls yet": a confident
+/// statement about the user's own recordings, made by a screen that never got an
+/// answer. An expired session looked like a deleted archive.
+///
+/// `ok` is required, so a body that isn't the documented success shape can only
+/// throw. (The status is caught upstream now — `Api.getData` throws on any
+/// non-2xx — and this gate is the other half: an intermediary between the app
+/// and the worker is exactly what pairs a 200 with a body that says otherwise.)
+struct CallSessionsBody: Decodable {
+    let ok: Bool
+    let sessions: [CallSession]?
 }
 
 /// Every finished call streams as ONE stitched WAV from the worker
@@ -596,7 +619,20 @@ struct CallRecordingsView: View {
                 if loading {
                     ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let errorText {
-                    Text(errorText).foregroundStyle(.secondary).padding()
+                    // The house failure state (Activity, Jobs, Memory, the graph,
+                    // My Devices): the reason, and something to do about it. Grey
+                    // body text with no control was a dead end — and the caption
+                    // now ends in "try again" often enough that not offering the
+                    // button was a promise the screen didn't keep. The glyph is
+                    // this screen's own subject crossed out, NOT a cause: a
+                    // wifi.slash over "Session expired" blames the wrong thing.
+                    ContentUnavailableView {
+                        Label("Couldn't load calls", systemImage: "waveform.slash")
+                    } description: {
+                        Text(errorText)
+                    } actions: {
+                        Button("Retry") { loading = true; Task { await load() } }
+                    }
                 } else if sessions.isEmpty {
                     ContentUnavailableView("No calls yet", systemImage: "phone.arrow.up.right",
                                            description: Text("Finished voice calls appear here — replay them like podcast episodes."))
@@ -633,7 +669,7 @@ struct CallRecordingsView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(playingId == s.id ? "Pause call with \(s.tiny_name ?? "tiny")" : "Play call with \(s.tiny_name ?? "tiny")")
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("📞 \(s.tiny_name ?? "tiny")")
+                    Text(s.tiny_name ?? "tiny")
                         .font(.subheadline.weight(.semibold))
                     HStack(spacing: 6) {
                         if let t = s.started_at {
@@ -748,7 +784,7 @@ struct CallRecordingsView: View {
 
     private func updateNowPlaying(_ s: CallSession) {
         var info: [String: Any] = [
-            MPMediaItemPropertyTitle: "📞 \(s.tiny_name ?? "tiny")",
+            MPMediaItemPropertyTitle: s.tiny_name ?? "tiny",
             MPMediaItemPropertyArtist: "tiny call recording",
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
             MPNowPlayingInfoPropertyPlaybackRate: player?.rate ?? 0,
@@ -761,28 +797,39 @@ struct CallRecordingsView: View {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 
+    /// The rows a response body yields — or a throw the caption can name.
+    ///
+    /// Separated from `load` so every answer this route can give is checkable
+    /// without a network: the whole defect was that two of the three decoded
+    /// into an empty list instead of an error.
+    static func rows(from data: Data) throws -> [CallSession] {
+        let body = try JSONDecoder().decode(CallSessionsBody.self, from: data)
+        guard body.ok, let list = body.sessions else { throw ApiError.badResponse }
+        // Only finished calls stitch (live ones 409); hide sub-2s pocket dials
+        // and zero-segment rows (no audio ever journaled — e.g. calls that
+        // died in an upstream outage; their stitch 404s, the row is dead).
+        return list.filter {
+            ($0.status == "ended" || $0.status == "error")
+                && ($0.duration_ms ?? 0) > 2000
+                && ($0.segment_count ?? 0) > 0
+        }
+    }
+
     private func load() async {
         defer { loading = false }
         guard let token = session.token else {
             errorText = "Sign in to see your call recordings."
             return
         }
-        var req = URLRequest(url: URL(string: Config.serverBase + "/api/voice/sessions")!)
-        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        req.timeoutInterval = 15
-        struct Wrap: Decodable { let sessions: [CallSession]? }
-        guard let (data, _) = try? await URLSession.shared.data(for: req),
-              let wrap = try? JSONDecoder().decode(Wrap.self, from: data) else {
-            errorText = "Couldn't load calls — check your connection."
-            return
-        }
-        // Only finished calls stitch (live ones 409); hide sub-2s pocket dials
-        // and zero-segment rows (no audio ever journaled — e.g. calls that
-        // died in an upstream outage; their stitch 404s, the row is dead).
-        sessions = (wrap.sessions ?? []).filter {
-            ($0.status == "ended" || $0.status == "error")
-                && ($0.duration_ms ?? 0) > 2000
-                && ($0.segment_count ?? 0) > 0
+        // ⚠️ `Api.getData`, not a bare `URLSession`: reaching past the house
+        // client is what threw the status away, and a screen with no status can
+        // only guess at a cause. `LoadFailure` reads the thrown error; it names
+        // ONE reason, from the same table the rest of the app uses.
+        do {
+            sessions = try Self.rows(from: try await Api.getData("/api/voice/sessions", token: token))
+            errorText = nil
+        } catch {
+            errorText = LoadFailure.message(error)
         }
     }
 }

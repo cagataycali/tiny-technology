@@ -80,7 +80,7 @@ struct ChainView: View {
 
     // ── Network ─────────────────────────────────────────────────────────────
     private var networkSection: some View {
-        Section("⛓️ Network") {
+        Section("Network") {
             if let caip2 = status.caip2 {
                 LabeledContent("Chain") {
                     HStack(spacing: 6) {
@@ -178,7 +178,7 @@ struct ChainView: View {
                 }
             }
         } header: {
-            Text("💸 Recent TinyUSDC activity")
+            Text("Recent TinyUSDC activity")
         } footer: {
             if !status.transfers.isEmpty {
                 Text("Tap a row to copy its transaction hash.")

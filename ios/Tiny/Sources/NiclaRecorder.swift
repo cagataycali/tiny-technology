@@ -1,0 +1,871 @@
+/**
+ * 🎙️ NiclaRecorder — the Nicla Voice necklace's "voice recorder" half.
+ *
+ * The necklace itself can NEVER carry audio over BLE (64KB of RAM; a
+ * 128-byte characteristic once broke every connection — see
+ * NiclaVoiceGateway's header). So a wake event triggers THIS: the phone's
+ * mic records a short clip while Apple's on-device speech recognition
+ * transcribes it in the same pass — one engine, one tap, audio file +
+ * transcript together (the GlassesListener shape, plus an AVAudioFile).
+ *
+ * Three callers:
+ *   - NiclaVoiceGateway.handleWake (gated on Config.recordOnWake)
+ *   - the relay envelope {type:"record", seconds, reason} — the worker's
+ *     nicla_voice_record tool reaching this phone (Session.swift handles it
+ *     in BOTH the foreground poller and backgroundBeat: relay envelopes are
+ *     claim-on-poll, an unhandled type is consumed and destroyed)
+ *   - the "Record now" button in VoiceDevicePanel
+ *
+ * After a take: audio saved under Documents/nicla-transcripts/ and uploaded
+ * to /api/media (audio/mp4, 6MB cap ≈ 25min of 32kbps mono AAC — far above
+ * the 120s clamp), transcript POSTed to /api/devices/transcript with the
+ * NECKLACE's device token (attribution: the necklace heard it). If that
+ * route isn't deployed yet, falls back to the `device_note` event kind —
+ * already allowlisted — so transcripts join the agent's context either way.
+ *
+ * House crash rules obeyed: fresh AVAudioEngine per take, format guard
+ * before installTap, tap + recognizer closures born in nonisolated statics
+ * (the c9 rule), one mic — refuses to start while VoiceMode owns the input.
+ */
+import AVFoundation
+import Speech
+import SwiftUI
+
+/// A take's outcome — Sendable so nonisolated callers (backgroundBeat) can
+/// receive it across the MainActor boundary; [String: Any] cannot.
+struct NiclaRecordResult: Sendable {
+    let ok: Bool
+    let transcript: String
+    let transcriptId: String
+    let audioUrl: String?
+    let seconds: Int
+    let error: String?
+
+    static func failure(_ message: String) -> NiclaRecordResult {
+        NiclaRecordResult(ok: false, transcript: "", transcriptId: "",
+                          audioUrl: nil, seconds: 0, error: message)
+    }
+}
+
+struct NiclaTranscript: Identifiable, Codable, Equatable {
+    let id: String
+    let at: Date
+    let seconds: Int
+    let label: String
+    let text: String
+    /// Local audio filename inside store dir (nil if the file write failed)
+    var audioFile: String?
+    /// Hosted /api/media URL (nil if upload failed or signed out)
+    var audioUrl: String?
+}
+
+/// Everything the realtime tap + recognizer callbacks touch — mutation
+/// behind one lock, zero main-actor state (the c9/RecorderBox pattern).
+private final class TakeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var file: AVAudioFile?
+    private var text = ""
+    private(set) var wroteFrames: Int = 0
+
+    init(file: AVAudioFile?) { self.file = file }
+
+    func write(_ buffer: AVAudioPCMBuffer) {
+        lock.lock(); defer { lock.unlock() }
+        guard let f = file else { return }
+        do {
+            try f.write(from: buffer)
+            wroteFrames += Int(buffer.frameLength)
+        } catch {
+            // A failed write poisons the container — stop writing, keep the
+            // transcript half of the take alive.
+            file = nil
+        }
+    }
+
+    var transcript: String { lock.lock(); defer { lock.unlock() }; return text }
+
+    /// Which task's words the live buffer currently belongs to.
+    ///
+    /// `cancel()` is asynchronous: the outgoing task's callback can fire AFTER
+    /// the box has been banked and handed to its replacement. Unlike TinyLive —
+    /// which throws its box away per restart and so cannot be hit by this — one
+    /// box spans every task in the take, because the banked text is the take's
+    /// only copy. Without a generation, a late callback writes the previous
+    /// utterance back into the live buffer (fullText would then emit it twice,
+    /// once banked and once live) and sets `ended` on a task that just started,
+    /// tripping an immediate second restart.
+    private var generation = 0
+    var currentGeneration: Int { lock.lock(); defer { lock.unlock() }; return generation }
+
+    func setText(_ t: String, gen: Int) {
+        lock.lock()
+        if gen == generation { text = t }
+        lock.unlock()
+    }
+
+    // ── One task is not enough for a 120-second take ──────────────────────
+    //
+    // ONE SFSpeechRecognitionTask reports ONE utterance. After its first
+    // sentence it stops producing results and, critically, keeps accepting
+    // appended buffers without complaint — so a take of up to 120s (the memo
+    // button passes exactly that) stored only its opening sentence while the
+    // m4a beside it held the whole thing. Nothing looked broken: the reply said
+    // ok and the text was a plausible short sentence.
+    //
+    // TinyLive already learned this against 125s of the board's real audio (one
+    // task there transcribed NOTHING at all). Same shape here: bank a finished
+    // task's words, start another, and read the accumulated text at the end.
+
+    /// Utterances from tasks that have already ended.
+    private var banked: [String] = []
+    private var ended = false
+    private var deliveredFinal = false
+
+    /// The task is over — it errored or delivered its final result.
+    ///
+    /// Ignored from a superseded task: a cancelled predecessor reporting its own
+    /// death must not mark the live task dead.
+    func markEnded(reportedUtterance: Bool, gen: Int) {
+        lock.lock()
+        if gen == generation {
+            ended = true
+            if reportedUtterance { deliveredFinal = true }
+        }
+        lock.unlock()
+    }
+    var isEnded: Bool { lock.lock(); defer { lock.unlock() }; return ended }
+
+    /// Ended by delivering a final result rather than erroring out.
+    ///
+    /// The two endings need opposite handling. A final result means everything
+    /// heard was already reported, so replaying the tail audio into the next task
+    /// re-transcribes accounted-for speech and manufactures duplicates. An error
+    /// can strike mid-utterance with syllables that exist nowhere else.
+    var deliveredUtterance: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return deliveredFinal
+    }
+
+    /// Move the live task's words into the bank and arm the box for a new task.
+    ///
+    /// Dedupes against the whole bank, not just the last entry: a replayed tail
+    /// makes the next task re-transcribe a sentence that may be two utterances
+    /// back, and a segment reading the same sentence twice is worse than a
+    /// clipped one — a model treats it as two things being said.
+    /// Returns the generation the NEXT task must report under.
+    @discardableResult
+    func bank(_ raw: String? = nil) -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let t = (raw ?? text).trimmingCharacters(in: .whitespacesAndNewlines)
+        text = ""
+        ended = false
+        deliveredFinal = false
+        generation += 1        // anything the outgoing task says from here is stale
+        guard !t.isEmpty else { return generation }
+        let existing = banked.joined(separator: " ").lowercased()
+        let incoming = t.lowercased()
+        if existing.contains(incoming) { return generation }
+        // A longer re-reading of the previous utterance replaces it.
+        if let prev = banked.last, incoming.contains(prev.lowercased()) {
+            banked[banked.count - 1] = t
+            return generation
+        }
+        banked.append(t)
+        return generation
+    }
+
+    /// Everything the take has heard: banked utterances plus the live task's.
+    var fullText: String {
+        lock.lock(); defer { lock.unlock() }
+        let live = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (banked + (live.isEmpty ? [] : [live])).joined(separator: " ")
+    }
+
+    /// Finalize the container. close() is EXPLICIT (iOS 18+) because relying
+    /// on dealloc shipped a real bug: the first e2e clip uploaded 97KB of
+    /// ftyp+AAC packets with NO moov atom — the bytes were read before the
+    /// deferred finalization wrote the index, and the hosted file was
+    /// unplayable everywhere while the reply said "ok". Measure the file,
+    /// not the reply.
+    func finish() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let wrote = wroteFrames > 0 && file != nil
+        try? file?.close()
+        file = nil
+        return wrote
+    }
+}
+
+@MainActor
+final class NiclaRecorder: ObservableObject {
+    static let shared = NiclaRecorder()
+
+    @Published private(set) var isRecording = false
+    @Published private(set) var level: Float = 0
+    /// Newest first; capped — the durable copy is the server's transcript store.
+    @Published private(set) var transcripts: [NiclaTranscript] = []
+    @Published private(set) var lastError: String?
+
+    private static let indexCap = 50
+
+    /// Floor between recognizer restarts inside one take.
+    ///
+    /// Same value and same reason as TinyLive's: a task that ends without
+    /// reporting anything is usually a quiet room ("No speech detected" after
+    /// ~8s), and rebuilding a task per chunk of silence was measured at 316
+    /// restarts in 125s — which destroyed recognition instead of restoring it. A
+    /// task that DID report an utterance bypasses this floor entirely, because
+    /// the speaker is very likely still talking.
+    private static let minRestartSeconds: TimeInterval = 2
+
+    /// Set by stopEarly() to end the take in progress before its deadline.
+    /// Reset when a take CLAIMS the mic, not when one finishes: a stopEarly()
+    /// that arrives just after a take ends would otherwise sit here set and kill
+    /// the next take on its first tick.
+    private var stopRequested = false
+
+    private init() { transcripts = Self.loadIndex() }
+
+    /// End the current take now, keeping everything it captured.
+    ///
+    /// record(seconds:) used to be a promise the user could not take back — the
+    /// take slept out its full duration no matter what. That is fine for the
+    /// agent's fixed-length "record 10s" call and wrong for a recorder a person
+    /// operates: you stop talking, so the recording should stop, and the take
+    /// should still transcribe, upload and store what it got. This is a request,
+    /// not a teardown; the take itself finalizes the file and uploads, which is
+    /// why the audio survives being stopped mid-sentence.
+    func stopEarly() {
+        guard isRecording else { return }
+        stopRequested = true
+    }
+
+    // ── The take ──────────────────────────────────────────────────────────
+
+    /// One-shot: record `seconds` of phone mic audio while transcribing
+    /// on-device. Returns a Sendable outcome every caller can relay.
+    func record(seconds: Int, label: String, token: String?) async -> NiclaRecordResult {
+        let clamped = min(max(seconds, 5), 120)
+        guard !isRecording else { return .failure("already recording") }
+        guard !VoiceMode.shared.active else {
+            return .failure("voice mode is using the microphone — stop it first")
+        }
+        // Claim the mic SYNCHRONOUSLY, before the first await below.
+        //
+        // @MainActor gives mutual exclusion, not atomicity across suspension
+        // points: every `await` yields the actor. The guard above and the old
+        // `isRecording = true` (down past the permission requests and the
+        // session setup) were separated by several awaits, so two wakes in one
+        // burst BOTH passed the guard and raced to install a tap on the single
+        // shared input node — two engines, two taps, one mic. The board really
+        // does deliver bursts (8 back-to-back wake notifications measured on
+        // hardware), so this was reachable, not theoretical, and it made a lie
+        // of the gateway's "NiclaRecorder refuses to double-start" comment.
+        isRecording = true
+        // Clear any stale early-stop here, where the mic is claimed — see
+        // stopRequested. A stop that lands between takes must not kill the next.
+        stopRequested = false
+        var claimed = true
+        /// Give the claim back on a path that never reaches the take.
+        func release() {
+            guard claimed else { return }
+            claimed = false
+            isRecording = false
+            level = 0
+        }
+        guard await Self.speechAuthorized(),
+              await AVAudioApplication.requestRecordPermission() else {
+            release()
+            lastError = "microphone/speech permission not granted"
+            return .failure("microphone/speech permission not granted on the phone")
+        }
+        do {
+            let audio = AVAudioSession.sharedInstance()
+            try audio.setCategory(.playAndRecord, mode: .default, options: [.allowBluetooth, .defaultToSpeaker])
+            try audio.setActive(true)
+        } catch {
+            release()
+            return .failure("mic session: \(error.localizedDescription)")
+        }
+
+        guard let recognizer = SFSpeechRecognizer(locale: Locale.current) ?? SFSpeechRecognizer(),
+              recognizer.isAvailable else {
+            release()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            return .failure("speech recognition unavailable on this phone")
+        }
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+        // A take here is up to 10s of unprompted speech that a model reads later
+        // — unlike the short command phrases elsewhere in the app, it needs
+        // sentence boundaries to stay legible. Without this a wake-triggered
+        // transcript arrives as one unpunctuated run-on.
+        request.addsPunctuation = true
+
+        // Fresh engine per take; format guard before installTap (an invalid
+        // format is an uncatchable ObjC exception, not a Swift error).
+        let engine = AVAudioEngine()
+        let input = engine.inputNode
+        let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            release()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            return .failure("the mic isn't ready (audio route mid-change) — try again in a second")
+        }
+
+        let id = UUID().uuidString
+        let fileURL = Self.storeDir().appendingPathComponent("\(id).m4a")
+        // AAC mono-ish at the tap's own rate/channels: the processing format
+        // must MATCH the tap buffers exactly or write(from:) throws on frame 1.
+        let file = try? AVAudioFile(
+            forWriting: fileURL,
+            settings: [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: format.sampleRate,
+                AVNumberOfChannelsKey: format.channelCount,
+                AVEncoderBitRateKey: 32_000,
+            ],
+            commonFormat: format.commonFormat,
+            interleaved: format.isInterleaved)
+        let box = TakeBox(file: file)
+
+        let slot = RequestSlot(request)
+        Self.installTap(on: input, format: format, feed: slot, box: box) { [weak self] lvl in
+            Task { @MainActor in
+                guard let self, self.isRecording else { return }
+                self.level = lvl
+            }
+        }
+        engine.prepare()
+        do {
+            try engine.start()
+        } catch {
+            release()
+            input.removeTap(onBus: 0)
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            return .failure("mic: \(error.localizedDescription)")
+        }
+
+        // isRecording is already true (claimed above); the take now owns it.
+        lastError = nil
+        var task = Self.recognize(recognizer, request: request, box: box,
+                                  gen: box.currentGeneration)
+        var taskStartedAt = Date()
+
+        // Sleep in slices so stopEarly() can end the take, instead of one
+        // uninterruptible sleep to the deadline. 200ms is the granularity of
+        // "Stop feels instant" without waking the actor often enough to matter
+        // next to the audio tap already running. The same tick also watches for
+        // a dead recognizer, which is why the loop cannot become one long sleep.
+        let startedAt = Date()
+        let deadline = startedAt.addingTimeInterval(Double(clamped))
+        while Date() < deadline {
+            if stopRequested { break }
+
+            // ONE task reports ONE utterance, then goes silent while still
+            // accepting buffers. On a take of up to 120s that meant everything
+            // after the first sentence was dropped — silently, with a full-length
+            // m4a beside it. Replace the task and keep its words.
+            //
+            // Rate-limited the way TinyLive's is: an ended task during a quiet
+            // room is the common case ("No speech detected" after ~8s), and
+            // rebuilding one per chunk of silence was measured at 316 restarts in
+            // 125s, which destroyed recognition rather than restoring it. So
+            // restart INSTANTLY when an utterance was reported (the speaker is
+            // very likely still going) and otherwise wait out the floor.
+            if box.isEnded,
+               box.deliveredUtterance
+                   || Date().timeIntervalSince(taskStartedAt) >= Self.minRestartSeconds {
+                // Replay the tail only if the task died mid-utterance: after a
+                // clean final result that audio is already transcribed, and
+                // replaying it produces the same sentence twice.
+                let owedReplay = !box.deliveredUtterance
+                let gen = box.bank()   // banking bumps the generation
+                slot.current?.endAudio()
+                task.cancel()
+
+                let next = SFSpeechAudioBufferRecognitionRequest()
+                next.shouldReportPartialResults = true
+                next.requiresOnDeviceRecognition = recognizer.supportsOnDeviceRecognition
+                next.addsPunctuation = true
+                slot.swap(to: next, replay: owedReplay)
+                task = Self.recognize(recognizer, request: next, box: box, gen: gen)
+                taskStartedAt = Date()
+            }
+
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        // What the take REALLY captured. Storing `clamped` here would label a
+        // 4-second stopped-early take as 60 seconds, which is a lie in the list,
+        // in the agent's context, and in the duration the server keeps. Floor of
+        // 1 so a stop within the first tick isn't recorded as a 0-second take.
+        let actualSeconds = max(1, min(clamped, Int(Date().timeIntervalSince(startedAt).rounded())))
+        stopRequested = false
+
+        slot.current?.endAudio()      // the CURRENT request, not the first one
+        // Give on-device recognition a beat to finalize the tail of the take.
+        try? await Task.sleep(for: .milliseconds(700))
+        task.cancel()
+        engine.stop()
+        input.removeTap(onBus: 0)
+        release()
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+
+        // fullText, not transcript: `transcript` is only the LIVE task's value,
+        // which after a restart is the last utterance alone. A 90s memo that
+        // restarted four times would store its closing sentence and drop the rest.
+        let heard = box.fullText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasAudio = box.finish()
+        if !hasAudio { try? FileManager.default.removeItem(at: fileURL) }
+
+        var entry = NiclaTranscript(
+            id: id, at: Date(), seconds: actualSeconds, label: label,
+            text: heard.isEmpty ? "(silence)" : heard,
+            audioFile: hasAudio ? "\(id).m4a" : nil, audioUrl: nil)
+
+        // Upload the audio (best-effort; the transcript is the payload).
+        // The moov check is the tripwire for the unfinalized-container bug:
+        // an m4a without its index plays nowhere, and uploading one turns a
+        // healthy "ok" reply into a lie about what's actually hosted.
+        let bearer = token ?? Keychain.get("tiny_token")
+        if hasAudio, let clip = try? Data(contentsOf: fileURL), !clip.isEmpty,
+           clip.count <= 6 * 1024 * 1024,
+           clip.range(of: Data("moov".utf8)) != nil {
+            if let up: [String: Any] = try? await Api.post("/api/media", token: bearer, body: [
+                "data": clip.base64EncodedString(),
+                "contentType": "audio/mp4",
+            ]), let url = up["url"] as? String {
+                entry.audioUrl = url
+            }
+        }
+
+        transcripts.insert(entry, at: 0)
+        pruneAndSave()
+        await postToServer(entry)
+
+        return NiclaRecordResult(ok: true, transcript: heard, transcriptId: id,
+                                 audioUrl: entry.audioUrl, seconds: actualSeconds, error: nil)
+    }
+
+    /// Store speech that was transcribed somewhere OTHER than a phone-mic take.
+    ///
+    /// TinyLive transcribes the Nicla Vision's `/audio` stream as it plays it:
+    /// the words are the necklace's own microphone, not this phone's, so there
+    /// is no take, no local m4a and nothing to upload — but the transcript
+    /// belongs in exactly the same two places (the list the user reads, and the
+    /// context the agent reads). Text-only rows are why `audioFile`/`audioUrl`
+    /// are optional and why `playable()` checks both.
+    func storeHeard(text: String, label: String, seconds: Int) {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return }
+        let entry = NiclaTranscript(
+            id: UUID().uuidString, at: Date(), seconds: max(1, seconds),
+            label: label, text: clean, audioFile: nil, audioUrl: nil)
+        transcripts.insert(entry, at: 0)
+        pruneAndSave()
+        // Attributed to the PHONE, not to the Voice necklace. The device token
+        // is what resolves the owner server-side, so posting a Vision-heard
+        // segment with the Voice's credential would file it under a board that
+        // was not in the room. The Vision cannot post for itself (its token
+        // lives on the board and it has no session), so the phone — whose
+        // recognizer produced these words — is the honest signer.
+        Task { await postToServer(entry, asVoiceNecklace: false) }
+    }
+
+    // ── Server join: the transcript reaches the agent's context ───────────
+
+    /// POST to /api/devices/transcript as the NECKLACE (device-token auth);
+    /// falls back to the phone's own device identity, and to the allowlisted
+    /// `device_note` event kind while the transcript route isn't deployed.
+    private func postToServer(_ t: NiclaTranscript, asVoiceNecklace: Bool = true) async {
+        let phone = Keychain.get("tiny_device_id").flatMap { did in
+            Keychain.get("tiny_device_token").map { (deviceId: did, token: $0) }
+        }
+        let creds = asVoiceNecklace
+            ? (NiclaVoiceGateway.shared.credentials ?? phone)
+            : phone
+        guard let creds else { return }
+        var body: [String: Any] = [
+            "deviceId": creds.deviceId, "token": creds.token,
+            "text": t.text, "label": t.label, "durationS": t.seconds,
+        ]
+        if let u = t.audioUrl { body["audioUrl"] = u }
+        if let r = try? await Api.postRaw("/api/devices/transcript", body: body),
+           r["ok"] as? Bool == true { return }
+        // Fallback rail: a short preview on the event ring (detail ≤240 chars
+        // worker-side) still lands in the next chat turn's context block.
+        let preview = String(t.text.prefix(180))
+        _ = try? await Api.postRaw("/api/devices/event", body: [
+            "deviceId": creds.deviceId, "token": creds.token,
+            "kind": "device_note",
+            "detail": "🎙️ \(t.label): “\(preview)”" + (t.audioUrl.map { " \($0)" } ?? ""),
+        ])
+    }
+
+    // ── Reading the durable copy back ─────────────────────────────────────
+
+    /// Merge the server's transcripts into the local list.
+    ///
+    /// This class was WRITE-ONLY: every take was POSTed, and the view then
+    /// listed from the local index — capped at 50, in Documents. So the header's
+    /// claim that "the durable copy is the server's transcript store" was true
+    /// of the data and false of the app, which could never see it. A reinstall,
+    /// a second device, or simply the 51st recording lost transcripts the server
+    /// still held.
+    ///
+    /// Local rows WIN on id collision: only they know about the downloaded audio
+    /// file, and overwriting one with the server's preview would replace the
+    /// full text with 200 chars and strip its offline playback.
+    func refreshFromServer() async {
+        guard let list: [String: Any] = try? await Api.get(
+            "/api/devices/transcript?limit=50", token: Keychain.get("tiny_token")),
+            let rows = list["transcripts"] as? [[String: Any]]
+        else { return }
+        let known = Set(transcripts.map(\.id))
+        let fetched: [NiclaTranscript] = rows.compactMap { r in
+            guard let id = r["id"] as? String, !known.contains(id) else { return nil }
+            // The list endpoint returns `preview` (200 chars server-side); a tap
+            // can fetch the full text by id later. `created` is unixepoch.
+            let text = (r["preview"] as? String) ?? (r["text"] as? String) ?? ""
+            let created = (r["created"] as? Double) ?? Double(r["created"] as? Int ?? 0)
+            return NiclaTranscript(
+                id: id,
+                at: Date(timeIntervalSince1970: created),
+                seconds: (r["duration_s"] as? Int) ?? 0,
+                label: (r["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "recording",
+                text: text,
+                audioFile: nil,
+                audioUrl: (r["audio_url"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+        }
+        guard !fetched.isEmpty else { return }
+        transcripts = (transcripts + fetched).sorted { $0.at > $1.at }
+        pruneAndSave()
+    }
+
+    // ── Local persistence (Documents-JSON house pattern, Sessions.swift) ──
+
+    private static func storeDir() -> URL {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("nicla-transcripts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static func audioURL(for t: NiclaTranscript) -> URL? {
+        t.audioFile.map { storeDir().appendingPathComponent($0) }
+    }
+
+    private static func loadIndex() -> [NiclaTranscript] {
+        let url = storeDir().appendingPathComponent("index.json")
+        guard let data = try? Data(contentsOf: url),
+              let list = try? JSONDecoder().decode([NiclaTranscript].self, from: data) else { return [] }
+        return list
+    }
+
+    private func pruneAndSave() {
+        // Keep the newest `indexCap`, but NEVER evict a row that owns a local
+        // audio file just because server rows outnumber it.
+        //
+        // Since refreshFromServer() merges by date, a server row can sort above
+        // an older local recording and push it past the cap — and the old prune
+        // deleted the dropped row's file. That would mean a refresh silently
+        // destroying the only offline copy of audio the user can still play,
+        // which is the opposite of what pulling the durable copy is for. Rows
+        // with a file on disk are kept; only server-shaped rows (no local audio,
+        // re-fetchable any time) are dropped to make room.
+        let hasLocalAudio = { (t: NiclaTranscript) -> Bool in
+            Self.audioURL(for: t).map { FileManager.default.fileExists(atPath: $0.path) } == true
+        }
+        var kept: [NiclaTranscript] = []
+        var dropped: [NiclaTranscript] = []
+        for t in transcripts {
+            if kept.count < Self.indexCap || hasLocalAudio(t) { kept.append(t) } else { dropped.append(t) }
+        }
+        for d in dropped {
+            if let url = Self.audioURL(for: d) { try? FileManager.default.removeItem(at: url) }
+        }
+        transcripts = kept
+        let url = Self.storeDir().appendingPathComponent("index.json")
+        if let data = try? JSONEncoder().encode(transcripts) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    func delete(_ t: NiclaTranscript) {
+        if let url = Self.audioURL(for: t) { try? FileManager.default.removeItem(at: url) }
+        transcripts.removeAll { $0.id == t.id }
+        pruneAndSave()
+    }
+
+    // ── Nonisolated bridge layer (closures born free of actor isolation) ──
+
+    private nonisolated static func speechAuthorized() async -> Bool {
+        await withCheckedContinuation { c in
+            SFSpeechRecognizer.requestAuthorization { c.resume(returning: $0 == .authorized) }
+        }
+    }
+
+    private nonisolated static func installTap(
+        on input: AVAudioInputNode, format: AVAudioFormat,
+        feed: RequestSlot, box: TakeBox,
+        onLevel: @escaping @Sendable (Float) -> Void
+    ) {
+        input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+            // Through the SLOT, not a captured request: a take outlives its first
+            // recognition task, and a tap wired to the original request would
+            // keep feeding a dead one for the rest of a two-minute memo.
+            feed.append(buffer)
+            box.write(buffer)
+            onLevel(VoiceMode.rms(of: buffer))
+        }
+    }
+
+    /// `gen` stamps every callback with the task it came from, so a cancelled
+    /// predecessor cannot write into its replacement's live buffer (see
+    /// TakeBox.currentGeneration).
+    private nonisolated static func recognize(
+        _ recognizer: SFSpeechRecognizer,
+        request: SFSpeechAudioBufferRecognitionRequest, box: TakeBox, gen: Int
+    ) -> SFSpeechRecognitionTask {
+        recognizer.recognitionTask(with: request) { result, error in
+            if let text = result?.bestTranscription.formattedString {
+                box.setText(text, gen: gen)
+            }
+            // A task ending is normal and frequent, not an error to report: it
+            // fires after every utterance, and after ~8s of a quiet room with
+            // "No speech detected". The take loop watches isEnded and replaces
+            // the task; without this the box never learns the task is deaf.
+            let final = result?.isFinal == true
+            if final || error != nil {
+                box.markEnded(reportedUtterance: final, gen: gen)
+            }
+        }
+    }
+}
+
+/// The request the live tap appends to, swappable underneath it.
+///
+/// The tap is installed once per take and runs on a realtime audio thread, but
+/// the recognition task it feeds is replaced several times during a long take
+/// (one task reports one utterance). A captured request would go stale on the
+/// first swap; this indirection is what lets the take restart recognition without
+/// tearing down the engine, the file, or the level meter.
+///
+/// Also holds the preroll: ~2s of recent audio replayed into a replacement task
+/// when the old one died MID-utterance, so the syllables it never reported are
+/// not lost. Not replayed after a clean final result — that audio is already
+/// accounted for, and replaying it manufactures duplicate text.
+private final class RequestSlot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var preroll: [AVAudioPCMBuffer] = []
+    private var held = 0
+    /// 2s at 16kHz. Matches TinyLive's window, which was tuned against the
+    /// board's real stream.
+    private static let prerollFrames = 32_000
+
+    init(_ r: SFSpeechAudioBufferRecognitionRequest?) { request = r }
+
+    func append(_ buffer: AVAudioPCMBuffer) {
+        lock.lock()
+        request?.append(buffer)
+        preroll.append(buffer)
+        held += Int(buffer.frameLength)
+        while held > Self.prerollFrames, preroll.count > 1 {
+            held -= Int(preroll.removeFirst().frameLength)
+        }
+        lock.unlock()
+    }
+
+    /// Install a new request, optionally replaying the preroll into it.
+    func swap(to r: SFSpeechAudioBufferRecognitionRequest?, replay: Bool) {
+        lock.lock()
+        request = r
+        if replay, let r {
+            for b in preroll { r.append(b) }
+        }
+        lock.unlock()
+    }
+
+    var current: SFSpeechAudioBufferRecognitionRequest? {
+        lock.lock(); defer { lock.unlock() }
+        return request
+    }
+}
+
+// ── Transcripts UI (CallRecordingsView's shape, local-first) ──────────────
+
+struct NiclaTranscriptsView: View {
+    @ObservedObject private var rec = NiclaRecorder.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var player: AVPlayer?
+    @State private var playingId: String?
+    /// End-of-playback observer, torn down in stopPlayback() so a second play
+    /// does not stack another one on the same notification.
+    @State private var endObserver: NSObjectProtocol?
+    /// Surfaced, not swallowed: record() explains every refusal in words
+    /// ("voice mode is using the microphone — stop it first"), and a Record
+    /// button that silently does nothing is the worst version of that.
+    @State private var recordError: String?
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if rec.isRecording {
+                    // A live take is the most important thing on screen while it
+                    // runs: the meter is the only proof the mic is really hearing
+                    // you, and partial recognition text is not shown anywhere
+                    // else in this view.
+                    VStack(spacing: 10) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 34)).foregroundStyle(.red)
+                            .symbolEffect(.variableColor.iterative)
+                        HStack(spacing: 3) {
+                            ForEach(0 ..< 14, id: \.self) { i in
+                                Capsule()
+                                    .fill(Double(rec.level) * 14 > Double(i) ? Color.red : Color.secondary.opacity(0.25))
+                                    .frame(width: 4, height: 8 + CGFloat(i % 5) * 5)
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.15), value: rec.level)
+                        Text("Recording — tap Stop when you're done.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                        Button {
+                            rec.stopEarly()
+                        } label: {
+                            Label("Stop and save", systemImage: "stop.circle.fill")
+                        }
+                        .buttonStyle(.borderedProminent).tint(.red)
+                    }
+                    .padding()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if rec.transcripts.isEmpty {
+                    ContentUnavailableView {
+                        Label("No transcripts yet", systemImage: "waveform.badge.mic")
+                    } description: {
+                        Text("Tap Record, or say the necklace's wake word. The phone captures the audio and transcribes it on-device — it lands here and in your tiny's context.")
+                    } actions: {
+                        Button("Check for recordings") { Task { await rec.refreshFromServer() } }
+                    }
+                } else {
+                    List {
+                        ForEach(rec.transcripts) { t in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "waveform.badge.mic").foregroundStyle(.green)
+                                    Text(t.label).font(.caption).bold()
+                                    Spacer()
+                                    Text(t.at.formatted(date: .abbreviated, time: .shortened))
+                                        .font(.caption2).foregroundStyle(.secondary)
+                                }
+                                Text(t.text).font(.callout)
+                                HStack(spacing: 14) {
+                                    if playable(t) {
+                                        Button {
+                                            toggle(t)
+                                        } label: {
+                                            Label(playingId == t.id ? "Stop" : "Play \(t.seconds)s",
+                                                  systemImage: playingId == t.id ? "stop.circle.fill" : "play.circle")
+                                        }
+                                        .font(.caption)
+                                    }
+                                    ShareLink(item: "\(t.label) — \(t.text)") {
+                                        Label("Share", systemImage: "square.and.arrow.up")
+                                    }
+                                    .font(.caption)
+                                    if t.audioUrl != nil {
+                                        Label("uploaded", systemImage: "checkmark.icloud")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .padding(.vertical, 2)
+                        }
+                        .onDelete { idx in
+                            for i in idx { rec.delete(rec.transcripts[i]) }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Transcripts")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                // Record from the screen where the recordings live. This view was
+                // read-only, so the ONLY way to start a take by hand was the
+                // Voice device panel — a different screen, and one that shows
+                // nothing at all unless a necklace is paired to this phone. The
+                // phone's mic and Apple's on-device recognition are what actually
+                // do the work here, so a take never needed the board present.
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        if rec.isRecording {
+                            rec.stopEarly()
+                        } else {
+                            Task {
+                                let r = await rec.record(seconds: 120, label: "memo", token: nil)
+                                if !r.ok { recordError = r.error ?? "Recording failed." }
+                            }
+                        }
+                    } label: {
+                        Label(rec.isRecording ? "Stop" : "Record",
+                              systemImage: rec.isRecording ? "stop.circle.fill" : "mic.circle")
+                    }
+                    .tint(rec.isRecording ? .red : nil)
+                }
+            }
+            // Pull the durable copy on open, and on demand: takes made while
+            // this phone was elsewhere (a wake the necklace relayed through
+            // another device, or a nicla_voice_record the agent commanded) exist
+            // only on the server until something asks for them.
+            .task { await rec.refreshFromServer() }
+            .refreshable { await rec.refreshFromServer() }
+            .onDisappear { stopPlayback() }
+            .alert("Couldn't record", isPresented: .constant(recordError != nil)) {
+                Button("OK") { recordError = nil }
+            } message: {
+                Text(recordError ?? "")
+            }
+        }
+    }
+
+    private func playable(_ t: NiclaTranscript) -> Bool {
+        NiclaRecorder.audioURL(for: t).map { FileManager.default.fileExists(atPath: $0.path) } == true
+            || t.audioUrl != nil
+    }
+
+    private func toggle(_ t: NiclaTranscript) {
+        if playingId == t.id { stopPlayback(); return }
+        stopPlayback()
+        let local = NiclaRecorder.audioURL(for: t)
+            .flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        guard let url = local ?? t.audioUrl.flatMap(URL.init(string:)) else { return }
+        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setActive(true)
+        let p = AVPlayer(url: url)
+        player = p
+        playingId = t.id
+        // Reset the row when the clip ends on its own. Without this nothing ever
+        // clears playingId except another tap, so a finished clip left the button
+        // reading "Stop" forever and the audio session held active — and the next
+        // row's Play looked like it did nothing, because toggle() saw a stale id.
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime, object: p.currentItem, queue: .main
+        ) { _ in
+            Task { @MainActor in stopPlayback() }
+        }
+        p.play()
+    }
+
+    private func stopPlayback() {
+        if let o = endObserver {
+            NotificationCenter.default.removeObserver(o)
+            endObserver = nil
+        }
+        player?.pause()
+        player = nil
+        playingId = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+}

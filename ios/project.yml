@@ -15,7 +15,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # OTA build number — bump on every /ios push (scripts/push-ota.sh syncs
     # the manifest to this; the in-app Updater compares against it)
-    CURRENT_PROJECT_VERSION: 61
+    CURRENT_PROJECT_VERSION: 66
 packages:
   # Meta Wearables Device Access Toolkit (glasses). Binary xcframeworks with
   # ios-arm64 + simulator slices ONLY — no Mac Catalyst slice, hence the
@@ -81,11 +81,30 @@ targets:
         - UIInterfaceOrientationLandscapeRight
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
+        # ⚠️ The line above is App Transport Security (it permits plain HTTP to
+        # local names) and is NOT the iOS 14+ local-network PRIVACY gate. That
+        # gate is the key below, and it was missing — so every LAN-direct dial
+        # to the necklace (http://192.168.x.x:8080) was denied by the system.
+        # TinyLive.probe() then failed on a board that was serving MJPEG fine,
+        # discovery never cached a base, and the live view fell back to cloud
+        # frame polling forever: exactly "it says connecting through the cloud
+        # but I'm on the same WiFi". Verified 2026-08-02 — the board answered
+        # / and /stream (84 frames in 11s) from the Mac at the same moment the
+        # phone could not reach it at all.
+        NSLocalNetworkUsageDescription: tiny connects directly to your necklace on your WiFi for live video and audio — that direct link is much faster than routing frames through the cloud, and the media never leaves your network.
         UIBackgroundModes:
         - fetch
         - audio
         # Glasses (Meta Wearables DAT): stay connected while backgrounded
         - bluetooth-peripheral
+        # Nicla Voice: the app is the CENTRAL for the necklace, which is a
+        # different mode from the line above — bluetooth-peripheral does NOT
+        # cover it. Without this, iOS suspends the gateway's CBCentralManager on
+        # backgrounding, so a necklace under a coat stops delivering wake events
+        # and the phone stops heartbeating on its behalf (the board has no WiFi
+        # and cannot report for itself). Being pocketed is the normal case for a
+        # wearable, so this is the mode that makes the product work at all.
+        - bluetooth-central
         - external-accessory
         # The DAT accessory protocol — required for ExternalAccessory sessions
         UISupportedExternalAccessoryProtocols:

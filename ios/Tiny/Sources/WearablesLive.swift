@@ -25,6 +25,61 @@ import AVFoundation
 import MWDATCore
 import MWDATCamera
 
+/**
+ * 🕶️ Tap events — DAT 0.8.0 ships NO button/gesture API; a capture-button
+ * tap surfaces only as the ACTIVE stream flipping streaming↔paused (rule
+ * measured on Android with Meta's mock kit — the transition fired on the
+ * exact tap, both edges). Every stream owner (the live HUD, the recorder)
+ * feeds its transitions here; the agent reads the result in
+ * contextIfLinked()/meta_glasses_status. Called from realtime queues —
+ * everything behind the lock. Android twin: fleet/WearablesEvents.kt
+ * (the labels are byte-identical on purpose; one event language).
+ */
+final class GlassesEvents: @unchecked Sendable {
+    static let shared = GlassesEvents()
+    private let lock = NSLock()
+    private var events: [(at: Date, label: String)] = []
+
+    func record(_ label: String) {
+        lock.lock(); defer { lock.unlock() }
+        events.append((Date(), label))
+        if events.count > 8 { events.removeFirst(events.count - 8) }
+    }
+
+    /// Human lines from the last two minutes, oldest first; empty when quiet.
+    func recent() -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let now = Date()
+        return events.filter { now.timeIntervalSince($0.at) <= 120 }
+            .map { "\(Int(now.timeIntervalSince($0.at)))s ago: \($0.label)" }
+    }
+
+    /// The tap rule, single-sourced: streaming↔paused on an ACTIVE stream.
+    /// Startup passes through starting/waitingForDevice without ever holding
+    /// streaming, so those never record.
+    func onStreamTransition(from: StreamState?, to: StreamState) {
+        if from == .streaming, to == .paused {
+            record("the user TAPPED the glasses capture button (stream paused)")
+        }
+        if from == .paused, to == .streaming {
+            record("the user TAPPED the glasses capture button again (stream resumed)")
+        }
+    }
+}
+
+/// Per-stream previous-state cell so a listener can hand (from, to) pairs
+/// to the tap rule from a realtime queue.
+final class StreamStateCell: @unchecked Sendable {
+    private let lock = NSLock()
+    private var prev: StreamState?
+    func swap(_ new: StreamState) -> (StreamState?, StreamState) {
+        lock.lock(); defer { lock.unlock() }
+        let p = prev
+        prev = new
+        return (p, new)
+    }
+}
+
 @MainActor
 final class GlassesLive: ObservableObject {
     static let shared = GlassesLive()
@@ -62,8 +117,17 @@ final class GlassesLive: ObservableObject {
                 throw WearablesCaptureError.noStream
             }
             self.stream = stream
+            let stateCell = StreamStateCell()
             tokens.append(stream.statePublisher.listen { [weak self] state in
-                Task { @MainActor in self?.stateText = String(describing: state) }
+                // Tap detection (GlassesEvents' rule) — runs lock-only, safe
+                // on the delivery queue; only the label publish hops to main.
+                let (prev, new) = stateCell.swap(state)
+                GlassesEvents.shared.onStreamTransition(from: prev, to: new)
+                Task { @MainActor in
+                    self?.stateText = new == .paused
+                        ? "paused — tap the glasses to resume"
+                        : String(describing: new)
+                }
             })
             tokens.append(stream.videoFramePublisher.listen { [weak self] videoFrame in
                 // makeUIImage() runs off-main (frame delivery thread) — only
@@ -257,6 +321,16 @@ final class GlassesListener {
         await postResult(toolUseId, token: token, payload: payload)
     }
 
+    /// Which microphone the audio session is actually capturing from —
+    /// "bluetooth" = the glasses (their HFP profile) or a paired headset,
+    /// "phone" = the built-in mic. Keeps the agent honest about which
+    /// microphone heard the transcript (Android posts the same field).
+    private static func micRoute() -> String {
+        let bt = AVAudioSession.sharedInstance().currentRoute.inputs
+            .contains { $0.portType == .bluetoothHFP }
+        return bt ? "bluetooth" : "phone"
+    }
+
     /// The shared core (voice answers over its own WS, not the mailbox).
     func listen(seconds: Int) async -> [String: Any] {
         let clamped = min(max(seconds, 3), 30)
@@ -267,7 +341,8 @@ final class GlassesListener {
             try? await Task.sleep(nanoseconds: UInt64(clamped) * 1_000_000_000)
             let after = GlassesLive.shared.transcript
             let heard = after.hasPrefix(before) ? String(after.dropFirst(before.count)) : after
-            return ["ok": true, "transcript": heard.trimmingCharacters(in: .whitespacesAndNewlines)]
+            return ["ok": true, "transcript": heard.trimmingCharacters(in: .whitespacesAndNewlines),
+                    "micRoute": Self.micRoute()]
         }
         return await listenOnce(seconds: clamped)
     }
@@ -314,10 +389,12 @@ final class GlassesListener {
         input.removeTap(onBus: 0)
 
         let heard = box.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let route = Self.micRoute()
         if heard.isEmpty {
-            return ["ok": true, "transcript": "", "note": "heard nothing — silence, or the glasses weren't the active mic route"]
+            return ["ok": true, "transcript": "", "micRoute": route,
+                    "note": "heard nothing — silence, or the glasses weren't the active mic route"]
         }
-        return ["ok": true, "transcript": heard]
+        return ["ok": true, "transcript": heard, "micRoute": route]
     }
 
     /// c9 rule: the recognizer callback is born HERE, nonisolated.
