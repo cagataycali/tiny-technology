@@ -695,3 +695,104 @@ describe('the screen stream and buttons are wired to the numbers the firmware an
     }
   })
 })
+
+/**
+ * A reading is two facts — the values and WHEN they were read — and the second
+ * one was missing everywhere.
+ *
+ * `refresh()` wraps all three reads in `try?` and keeps the previous `info` when
+ * they fail, deliberately: a board that answers two of three is worth showing,
+ * and a blank panel is worse than a stale line. But total failure then looked
+ * identical to success, and both consumers presented the kept reading as current
+ * — the panel by stamping `Date()` after the call regardless of its outcome, the
+ * relay reply by carrying no age at all. The failure that matters is not a dead
+ * link (that one is obvious) but a live link to a board that has stopped
+ * answering RPC, which is what an app opening on its screen does: every read
+ * times out and a flat Flipper reports "🔋 100% charged".
+ */
+describe('a status reading never claims to be newer than it is', () => {
+  const refresh = swiftBody(gateway, 'func refresh(within budget:')
+  const statusLine = swiftBody(gateway, 'func statusLine(')
+
+  it('refresh reports whether it learned anything, and dates only what it learned', () => {
+    // The return value IS the fix: without it every caller had to assume success.
+    expect(gateway).toMatch(/@discardableResult\s*\n\s*func refresh\(within budget: TimeInterval = \.infinity\) async -> Bool/)
+    expect(refresh).toMatch(/return learned/)
+    // info and infoAt move together or not at all. Two separate `if`s would let a
+    // future edit re-date a reading it did not replace, which is the whole bug.
+    expect(refresh).toMatch(/if learned \{[^}]*self\.info = reading[^}]*self\.infoAt = Date\(\)[^}]*\}/s)
+    expect(gateway).toMatch(/@Published private\(set\) var infoAt: Date\?/)
+  })
+
+  it('the panel dates the reading by when the BOARD answered, not when asked', () => {
+    // The regression this replaces, exactly as it was: `stamp = Date()` on the
+    // line after the await, unconditional.
+    expect(panel).not.toMatch(/stamp = Date\(\)/)
+    expect(panel).not.toMatch(/@State private var stamp/)
+    expect(panel).toContain('ReadingAge.asOf(flipper.infoAt)')
+    // And a failed refresh has to say so — the figures stay on screen, so
+    // silence would read as "these are current".
+    const panelRefresh = swiftBody(panel, 'private func refresh() async')
+    expect(panelRefresh).toMatch(/let learned = await flipper\.refresh\(\)/)
+    expect(panelRefresh).toMatch(/if !learned \{/)
+    expect(panelRefresh).toMatch(/note = "Couldn't read the Flipper/)
+  })
+
+  it('the relay reply carries the age when the reading is a memory', () => {
+    // Three branches, and the middle one is the new one: linked, refresh failed,
+    // an old reading in hand.
+    expect(statusLine).toMatch(/let fresh = await refresh\(within: Self\.relayStatusBudgetS\)/)
+    expect(statusLine).toMatch(/if fresh, let i = info/)
+    expect(statusLine).toMatch(/read just now/)
+    expect(statusLine).toMatch(/if let i = info, let at = infoAt/)
+    expect(statusLine).toMatch(/Self\.age\(of: at\)/)
+    expect(statusLine).toMatch(/last reading that worked/)
+    // A summary must never be emitted without one qualifier or the other. Every
+    // interpolation of `.summary` here is inside a branch that dates it.
+    const summaries = statusLine.match(/\\\(i\.summary\)/g) ?? []
+    expect(summaries.length).toBe(2)
+  })
+
+  it('age is elapsed time, not a clock reading in an unstated timezone', () => {
+    const age = swiftBody(gateway, 'static func age(of when: Date')
+    expect(age).toMatch(/ago/)
+    // Injectable `now`, or the function is untestable and unpinnable.
+    expect(gateway).toMatch(/static func age\(of when: Date, now: Date = Date\(\)\)/)
+    // Ascending thresholds, so no window can fall through to a wrong unit.
+    const bounds = Array.from(age.matchAll(/s < (\d+)/g)).map(m => Number(m[1]))
+    expect(bounds.length).toBeGreaterThanOrEqual(3)
+    expect(bounds.slice()).toEqual(bounds.slice().sort((a, b) => a - b))
+  })
+
+  it('the status read fits inside the wait the backend actually gives it', () => {
+    const budget = Number(gateway.match(/relayStatusBudgetS: TimeInterval = (\d+)/)![1])
+    const wait = Number(backend.match(/export const STATUS_WAIT_S = (\d+)/)![1])
+    // The backend names its own number now, and the tool uses that name — a 45
+    // edited to 20 there must not leave this pin passing against a literal.
+    expect(backend).toMatch(/^\s+STATUS_WAIT_S,$/m)
+    expect(backend).not.toMatch(/flipperInvoke\([\s\S]{0,400}?\n\s+45,/)
+    // Two relay hops of up to ~5s each, plus the phone's own poll interval:
+    // finishing at the buzzer is finishing too late.
+    expect(budget).toBeLessThan(wait / 2)
+    // …and inside a BGAppRefresh window, which is the loop most likely to serve
+    // this envelope (phone in a pocket, board in the other one).
+    expect(budget).toBeLessThan(30)
+  })
+
+  it('the budget is load-bearing: the three reads outlast it on their own', () => {
+    const each = ['deviceInfoS', 'powerInfoS', 'storageInfoS'].map(
+      k => Number(gateway.match(new RegExp(`${k}: TimeInterval = (\\d+)`))![1]))
+    const budget = Number(gateway.match(/relayStatusBudgetS: TimeInterval = (\d+)/)![1])
+    // If the sum fitted, the budget would be decoration and deleting it would
+    // change nothing — this is the assertion that keeps it honest.
+    expect(each.reduce((a, b) => a + b, 0)).toBeGreaterThan(budget)
+    // Each read asks for min(its own ceiling, what's left) and is SKIPPED when
+    // too little remains, rather than being issued with a doomed deadline.
+    for (const k of ['deviceInfoS', 'powerInfoS', 'storageInfoS']) {
+      expect(refresh, `${k} must be budget-checked`).toContain(`allow(Self.${k})`)
+    }
+    expect(refresh).toMatch(/left >= Self\.minRequestS \? min\(want, left\) : nil/)
+    // No read may bypass the budget by keeping its default timeout.
+    expect(refresh).not.toMatch(/await (deviceInfo|powerInfo|storageInfo)\(\)/)
+  })
+})

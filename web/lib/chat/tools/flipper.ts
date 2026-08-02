@@ -92,6 +92,18 @@ export type FlipperHost = {
  */
 export const MAX_LISTEN_S = 30
 
+/**
+ * How long flipper_status waits for the host's answer.
+ *
+ * Named because the other side has to fit inside it. A phone answering over BLE
+ * reads firmware, battery and free space, and those three requests' own ceilings
+ * add up to more than this — so `FlipperGateway.relayStatusBudgetS` caps the
+ * whole read well under this number. Left unbounded, a slow board produced an
+ * answer nobody was still waiting for: this tool reported "no answer within 45s"
+ * while the phone was mid-request, which reads as a dead Flipper.
+ */
+export const STATUS_WAIT_S = 45
+
 /** Parse the worker's capabilities column: JSON array string, array, or null. */
 export function parseCaps(raw: unknown): string[] {
   try {
@@ -276,7 +288,7 @@ export const makeFlipperStatusTool = (userId: string | null | undefined) => tool
     const r = await flipperInvoke(
       userId,
       'Run use_flipper with action "info", then use_flipper with action "power_info". Report the firmware version, hardware model, battery charge level and charge state. Do not run any other action.',
-      45,
+      STATUS_WAIT_S,
       { action: 'status' },
     )
     if (r.error) return { ok: false, host: host.name, transport: host.transport, error: r.error }

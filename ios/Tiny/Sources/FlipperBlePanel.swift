@@ -23,10 +23,6 @@ struct FlipperBlePanel: View {
     @State private var showScreen = false
     @State private var busy = false
     @State private var note: String?
-    /// When `flipper.info` was last read. The line it dates is a battery
-    /// percentage and a free-space figure, and neither stays true because the
-    /// sheet is still open — the same rule FlipperDevicePanel established.
-    @State private var stamp: Date?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -80,8 +76,11 @@ struct FlipperBlePanel: View {
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 // Inside the same branch, so an age is never drawn without the
-                // reading it ages.
-                if let asOf = ReadingAge.asOf(stamp) {
+                // reading it ages — and dated by when the board answered, not by
+                // when anyone asked. The line it dates is a battery percentage
+                // and a free-space figure, and neither stays true because the
+                // panel is still open. Same rule FlipperDevicePanel established.
+                if let asOf = ReadingAge.asOf(flipper.infoAt) {
                     Text(asOf).font(.caption2).foregroundStyle(.secondary)
                 }
             }
@@ -117,8 +116,16 @@ struct FlipperBlePanel: View {
         busy = true
         defer { busy = false }
         note = nil
-        await flipper.refresh()
-        stamp = Date()
+        // ⚠️ The age line is dated by `flipper.infoAt` — when the READING was
+        // taken — never by when this button was pressed. Stamping `Date()` here
+        // unconditionally is what this used to do, and a refresh whose every
+        // request timed out then relabelled the old battery figure "as of" the
+        // moment the user tapped: the one mechanism in the app for admitting a
+        // reading's age, certifying a stale one instead.
+        let learned = await flipper.refresh()
+        if !learned {
+            note = "Couldn't read the Flipper just now — the link is up but it didn't answer. The figures above are the last ones that worked."
+        }
     }
 
     private func beep() async {

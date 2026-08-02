@@ -360,6 +360,16 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// characteristic discovery is not the same as being able to ask anything.
     @Published private(set) var linked = false
     @Published private(set) var info: FlipperInfo?
+    /// When `info` was actually READ off the board — not when someone last asked.
+    ///
+    /// ⚠️ These are the two facts a reading has, and they have to travel together.
+    /// `refresh()` keeps the previous `info` when a read fails, deliberately (a
+    /// blank panel is worse than a stale line), which means every consumer is
+    /// holding something that may be minutes old with no way to tell. A battery
+    /// percentage and a free-space figure are exactly the kind of fact that reads
+    /// as current, so a stale one presented plainly is not a small inaccuracy —
+    /// it is the app saying a dead board is at 100%.
+    @Published private(set) var infoAt: Date?
     @Published private(set) var lastError: String?
     @Published private(set) var scanning = false
     @Published private(set) var found: [Found] = []
@@ -437,6 +447,30 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// A varint is ten bytes at most. More than that at the head of the buffer
     /// without one parsing means those bytes are not a length prefix at all.
     private static let maxVarintBytes = 10
+
+    // MARK: - How long a status read may take
+
+    /// Per-request ceilings. DeviceInfo is the slowest thing the board does — 60
+    /// frames, one key each — and free space is the quickest.
+    static let deviceInfoS: TimeInterval = 25
+    static let powerInfoS: TimeInterval = 15
+    static let storageInfoS: TimeInterval = 12
+
+    /// Total time `statusLine()` may spend, which is NOT the sum of the three
+    /// above (52s) — and that gap is the point.
+    ///
+    /// `flipper_status` waits `STATUS_WAIT_S` = 45s for this phone's reply
+    /// (`lib/chat/tools/flipper.ts`), and each relay hop costs up to ~5s of poll
+    /// on the way there and back. A background beat is tighter still: a
+    /// BGAppRefresh window is about 30 seconds for everything, heartbeat
+    /// included. So an unbounded status read had a worst case that outlived every
+    /// caller it has — the tool reported "no answer" while the phone was still
+    /// dutifully asking, and the answer it eventually built was thrown away.
+    static let relayStatusBudgetS: TimeInterval = 20
+    /// Not worth issuing a request with less than this left: the reply cannot
+    /// land before the budget is gone, and a request nobody is waiting for still
+    /// spends the board's battery.
+    private static let minRequestS: TimeInterval = 4
 
     // MARK: - What fits in a relay reply
 
@@ -527,6 +561,7 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         stop()
         unit = nil
         info = nil
+        infoAt = nil
         lastError = nil
     }
 
@@ -878,20 +913,21 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         return out
     }
 
-    func deviceInfo() async throws -> [String: String] {
+    func deviceInfo(timeout: TimeInterval = FlipperGateway.deviceInfoS) async throws -> [String: String] {
         // 60 keys, one frame each — the slowest thing we ask for.
         try await keyValues(Cmd.deviceInfoReq, respField: Cmd.deviceInfoResp,
-                            timeout: 25, label: "device info")
+                            timeout: timeout, label: "device info")
     }
 
-    func powerInfo() async throws -> [String: String] {
+    func powerInfo(timeout: TimeInterval = FlipperGateway.powerInfoS) async throws -> [String: String] {
         try await keyValues(Cmd.powerInfoReq, respField: Cmd.powerInfoResp,
-                            timeout: 15, label: "power info")
+                            timeout: timeout, label: "power info")
     }
 
-    func storageInfo(_ path: String = "/ext") async throws -> (total: UInt64, free: UInt64) {
+    func storageInfo(_ path: String = "/ext",
+                     timeout: TimeInterval = FlipperGateway.storageInfoS) async throws -> (total: UInt64, free: UInt64) {
         let frames = try await request(PB.sub(Cmd.storageInfoReq, PB.str(1, path)),
-                                      timeout: 12, label: "free space")
+                                      timeout: timeout, label: "free space")
         try checkStatus(frames)
         guard let r = frames.compactMap({ $0.msg(Cmd.storageInfoResp) }).first else {
             throw FlipperError.malformed("free space")
@@ -1073,43 +1109,98 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// Fill `info` from the board. Each piece is independent: a Flipper that
     /// answers DeviceInfo but not Storage.Info (no SD card) should still show its
     /// firmware rather than one blanket failure.
-    func refresh() async {
+    /// Read firmware, battery and free space.
+    ///
+    /// Returns **whether this attempt actually learned anything**, which is the
+    /// half that used to be missing. Every read is `try?` on purpose — a board
+    /// that answers two of three is worth showing — but that also means total
+    /// failure looked exactly like success to every caller, and the previous
+    /// reading was then presented as the current one. `infoAt` moves only when
+    /// the reading does, so nothing downstream can date a memory as fresh.
+    ///
+    /// `budget` caps the WHOLE read, not each request: with three ceilings adding
+    /// up to 52s, an unbounded refresh could outlive the relay caller waiting for
+    /// it. Reads are dropped from the end when time runs short, so a slow board
+    /// still yields firmware and battery rather than nothing at all.
+    @discardableResult
+    func refresh(within budget: TimeInterval = .infinity) async -> Bool {
+        let started = Date()
+        /// What this read may ask for, or nil when there is no point asking.
+        func allow(_ want: TimeInterval) -> TimeInterval? {
+            guard budget.isFinite else { return want }
+            let left = budget - Date().timeIntervalSince(started)
+            return left >= Self.minRequestS ? min(want, left) : nil
+        }
         var next = FlipperInfo()
-        if let d = try? await deviceInfo() {
+        if let t = allow(Self.deviceInfoS), let d = try? await deviceInfo(timeout: t) {
             next.firmware = d["firmware_version"] ?? ""
             next.model = d["hardware_model"] ?? ""
             next.deviceName = d["hardware_name"] ?? ""
         }
-        if let p = try? await powerInfo() {
+        if let t = allow(Self.powerInfoS), let p = try? await powerInfo(timeout: t) {
             next.batteryPct = p["charge_level"].flatMap { Int($0) }
             next.chargeState = p["charge_state"] ?? ""
         }
-        if let s = try? await storageInfo() {
+        if let t = allow(Self.storageInfoS), let s = try? await storageInfo(timeout: t) {
             next.totalBytes = s.total
             next.freeBytes = s.free
         }
         // `let` before the hop: a var captured by a concurrently-executing
         // closure is an error under Swift 6.
         let reading = next
+        // An answer that carried no values is not a reading. The board can reply
+        // OK to DeviceInfo and hand back nothing usable, and treating that as
+        // success would re-date the old line without replacing it.
+        let learned = reading != FlipperInfo()
         await MainActor.run {
             // Keep the last good reading if this attempt learned nothing — a
-            // blank panel is worse than a stale line, and the caller shows when.
-            if reading != FlipperInfo() { self.info = reading }
+            // blank panel is worse than a stale line. What must NOT be kept is
+            // the impression that it is current, which is what `infoAt` is for.
+            if learned {
+                self.info = reading
+                self.infoAt = Date()
+            }
         }
+        return learned
+    }
+
+    /// How old a reading is, in words, for a reader who cannot see this phone's
+    /// clock. A relay reply lands in a web chat, so "as of 8:35:12" would be a
+    /// timestamp in an unstated timezone — an elapsed time is the same fact
+    /// without the ambiguity.
+    static func age(of when: Date, now: Date = Date()) -> String {
+        let s = Int(max(0, now.timeIntervalSince(when)))
+        if s < 10 { return "seconds ago" }
+        if s < 90 { return "\(s)s ago" }
+        if s < 5400 { return "\(Int((Double(s) / 60).rounded()))min ago" }
+        return "\(Int((Double(s) / 3600).rounded()))h ago"
     }
 
     /// The one-line answer for `flipper_status` when the phone is the host.
     /// Names the transport, because "over Bluetooth from this phone" is the
     /// difference between a Flipper in the user's pocket and one on a desk.
+    ///
+    /// ⚠️ And it names WHEN, because the interesting failure here is not a link
+    /// that is down — that one is obvious and handled below — but a link that is
+    /// up while the board has stopped answering RPC, which is what happens the
+    /// moment an app opens on its screen. Every read then fails, `refresh()`
+    /// keeps the last good `info`, and a line built from it states a remembered
+    /// battery level in the present tense. The board can be flat, or not there.
     func statusLine() async -> String {
+        let name = unit?.name ?? "Flipper"
         guard linked else {
             return unit == nil
                 ? "No Flipper is paired with this phone."
-                : "\(unit!.name) is paired but not connected right now — it's out of range or powered off."
+                : "\(name) is paired but not connected right now — it's out of range or powered off."
         }
-        await refresh()
-        let name = unit?.name ?? "Flipper"
-        return "\(name) — \(info?.summary ?? "linked") (over Bluetooth from this phone)"
+        let fresh = await refresh(within: Self.relayStatusBudgetS)
+        if fresh, let i = info {
+            return "\(name) — \(i.summary) (over Bluetooth from this phone, read just now)"
+        }
+        if let i = info, let at = infoAt {
+            return "\(name) — the Bluetooth link is up, but it didn't answer a status request just now; something may be open on its screen. This is the last reading that worked, \(Self.age(of: at)): \(i.summary)"
+        }
+        return "\(name) — connected over Bluetooth, but it hasn't answered a status request yet. If an app is open on its screen, close it and ask again."
     }
 }
 
