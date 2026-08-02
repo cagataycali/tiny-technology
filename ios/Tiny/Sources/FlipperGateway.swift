@@ -409,6 +409,20 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// the two diverge on purpose while the app is in the background, where the
     /// stream is stopped but still owed back to the view that asked for it.
     private var streamWanted = false
+    /// Whether this app can currently show a frame, maintained by the two phase
+    /// observers in `init()`. A resume needs BOTH this and `streamWanted`: a view
+    /// wanting frames says nothing about whether anyone can see them.
+    ///
+    /// ⚠️ Deliberately NOT derived from `UIApplication.applicationState`. Every
+    /// read would happen *during* a phase transition, which is the one moment that
+    /// value is ambiguous: at `willEnterForegroundNotification` the app has not yet
+    /// become active, so a guard written against `.active` would block the very
+    /// resume that notification exists to trigger.
+    ///
+    /// Starting `true` is safe even for a process launched straight into the
+    /// background (a BGAppRefresh beat): `streamWanted` is not persisted, so a
+    /// fresh process has nothing owed, and only a view on screen can set it.
+    private var foreground = true
     /// Kept so the pair can be found from one place. NotificationCenter owns the
     /// blocks and this singleton never deinits, so nothing removes them.
     private var phaseObservers: [NSObjectProtocol] = []
@@ -558,12 +572,19 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
             ) { [self] _ in
+                // The flag is set HERE, synchronously, not inside the Task: with
+                // `queue: nil` this block runs on the thread UIKit posts from, while
+                // the Task is a hop later. That hop is a window in which a re-link
+                // could restart the mirror into a phone that is already in a pocket
+                // — the exact cost this flag exists to prevent.
+                foreground = false
                 Task { @MainActor in await suspendScreenStream() }
             },
             NotificationCenter.default.addObserver(
                 forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
             ) { [self] _ in
-                Task { @MainActor in await resumeScreenStreamIfWanted() }
+                foreground = true
+                Task { @MainActor in await resumeScreenStreamIfWanted(.returnedToForeground) }
             },
         ]
     }
@@ -747,6 +768,17 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
                 self.linkedAt = Date()
                 self.lastError = nil
             }
+            // A dropped link takes the board's RPC session and the screen stream
+            // with it, but NOT the sheet that was watching — the panel's `.task`
+            // has already run, so before this nothing put the mirror back and a
+            // healthy reconnected board went on showing an empty view forever,
+            // with no text saying to close and reopen it. `streamWanted` survives a
+            // disconnect for exactly this moment; a deliberate `stop()` clears it.
+            //
+            // Ahead of `refresh()` on purpose: the mirror is the thing being looked
+            // at, and a status read can spend the better part of a minute on a slow
+            // board. Costs nothing when no sheet is open — the guard sees no debt.
+            await resumeScreenStreamIfWanted(.relinked)
             await refresh()
         }
     }
@@ -1173,21 +1205,47 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         if hold != .invalid { UIApplication.shared.endBackgroundTask(hold) }
     }
 
-    /// Put the mirror back on the way in from the background — and only then.
+    /// Why a mirror is being put back. The two callers agree on everything except
+    /// the sentence a failure produces, and that sentence has to name the real
+    /// cause: telling someone the app was in the background when what actually
+    /// happened is that their Flipper walked out of range sends them to fix the
+    /// wrong thing.
+    enum ResumeCause {
+        case returnedToForeground
+        case relinked
+
+        var failureText: String {
+            switch self {
+            case .returnedToForeground:
+                return "The screen mirror was stopped while the app was in the background and couldn't be restarted"
+            case .relinked:
+                return "The Flipper reconnected, but the screen mirror couldn't be restarted"
+            }
+        }
+    }
+
+    /// Put the mirror back: on the way in from the background, or after the link
+    /// dropped and came back under a sheet that is still open.
+    ///
+    /// ⚠️ Both arms are load-bearing and they are not the same question.
+    /// `streamWanted` = a view wants frames; `foreground` = anyone can see them.
+    /// Resuming on a re-link without the second arm would restart the kilobyte-per
+    /// -redraw flood into a pocketed phone — reopening, through the link's door,
+    /// exactly the hole the phase observers were added to close.
     @MainActor
-    func resumeScreenStreamIfWanted() async {
+    func resumeScreenStreamIfWanted(_ cause: ResumeCause) async {
         // `linked`, because a stream needs an RPC session; `!streaming`, because
         // these notifications are not guaranteed to alternate (a relaunch straight
         // into the foreground), and a second start under a live mirror would reset
         // its frame counter.
-        guard streamWanted, linked, !streaming else { return }
+        guard streamWanted, foreground, linked, !streaming else { return }
         do {
             try await startScreenStream()
         } catch {
             // Not silent: otherwise the panel just says "Not streaming." about a
             // mirror the user left running, and the stop we sent looks like the
             // board's fault.
-            lastError = "The screen mirror was stopped while the app was in the background and couldn't be restarted: \(error.localizedDescription)"
+            lastError = "\(cause.failureText): \(error.localizedDescription)"
         }
     }
 

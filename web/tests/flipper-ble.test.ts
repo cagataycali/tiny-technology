@@ -123,6 +123,24 @@ const swiftCase = (body: string, label: string): string => {
   return block
 }
 
+/**
+ * The one `addObserver(...)` registration that mentions `notification`.
+ *
+ * Split on the registration boundary, NOT a byte window. The window form
+ * (`/didEnterBackgroundNotification[\s\S]{0,400}suspend/`) is the same time bomb
+ * this file has now been bitten by four times in its other shape: it holds until
+ * someone writes five lines of comment between the name and the call, then goes
+ * red on correct code — and had the call sat at 401 it would have gone green
+ * covering nothing.
+ */
+const observerFor = (init: string, notification: string): string => {
+  const blocks = init.split('NotificationCenter.default.addObserver').slice(1)
+  expect(blocks.length, 'no addObserver registrations found at all').toBeGreaterThan(0)
+  const block = blocks.find(b => b.includes(notification))
+  expect(block, `nothing registers ${notification}`).toBeDefined()
+  return block as string
+}
+
 const host = (over: Partial<FlipperHost> & Pick<FlipperHost, 'transport'>): FlipperHost => ({
   id: `dev-${over.transport}`, name: over.transport === 'ble' ? 'pocket-phone' : 'workshop-mac',
   online: true, platform: over.transport === 'ble' ? 'ios' : 'darwin', ...over,
@@ -1184,22 +1202,22 @@ describe('a screen stream does not outlive the foreground', () => {
   // guard held.
   const gwInit = () => swiftBody(gateway, 'override private init() {')
   const suspend = () => swiftBody(gateway, 'func suspendScreenStream() async {')
-  const resume = () => swiftBody(gateway, 'func resumeScreenStreamIfWanted() async {')
+  // Name plus the minimum that disambiguates, so a new parameter does not read as
+  // a deleted function.
+  const resume = () => swiftBody(gateway, 'func resumeScreenStreamIfWanted(')
 
   it('leaving the foreground stops the stream', () => {
-    const body = gwInit()
-    expect(body).toMatch(/UIApplication\.didEnterBackgroundNotification/)
     // The call, not just the registration: an observer that fires nothing is the
     // same silence as no observer.
-    expect(body).toMatch(/didEnterBackgroundNotification[\s\S]{0,400}suspendScreenStream\(\)/)
+    expect(observerFor(gwInit(), 'UIApplication.didEnterBackgroundNotification'))
+      .toMatch(/suspendScreenStream\(\)/)
   })
 
   it('coming back starts it again — the stop is not a one-way trip', () => {
     // Without this the change is a trade, not a fix: the user returns to a mirror
     // that is dark and stays dark until they close and reopen the sheet.
-    const body = gwInit()
-    expect(body).toMatch(/UIApplication\.willEnterForegroundNotification/)
-    expect(body).toMatch(/willEnterForegroundNotification[\s\S]{0,400}resumeScreenStreamIfWanted\(\)/)
+    expect(observerFor(gwInit(), 'UIApplication.willEnterForegroundNotification'))
+      .toMatch(/resumeScreenStreamIfWanted\(/)
   })
 
   it('a suspend keeps the debt: the view still wants its frames', () => {
@@ -1226,12 +1244,18 @@ describe('a screen stream does not outlive the foreground', () => {
       .toMatch(/streamWanted = true/)
   })
 
-  it('a resume needs a want, a link, and no stream already running', () => {
-    // All three in one guard: `linked` because a stream needs an RPC session, and
-    // `!streaming` because these notifications are not guaranteed to alternate —
-    // a second start under a live mirror would reset its frame counter.
-    expect(codeOnly(resume(), /guard/))
-      .toMatch(/guard streamWanted, linked, !streaming else \{ return \}/)
+  it('a resume needs a want, a visible app, a link, and no stream running', () => {
+    // Four arms in ONE guard: `linked` because a stream needs an RPC session,
+    // `!streaming` because these notifications are not guaranteed to alternate (a
+    // second start under a live mirror would reset its frame counter), and
+    // `foreground` because a view wanting frames says nothing about whether anyone
+    // can see them. Asserted arm by arm, order-independent — the order carries no
+    // meaning and a verbatim string would red on a correct reshuffle.
+    const guard = codeOnly(resume(), /guard/).match(/guard ([^\n]*?) else \{ return \}/)
+    expect(guard, 'the resume no longer opens with a single early-return guard').toBeTruthy()
+    for (const arm of ['streamWanted', 'foreground', 'linked', '!streaming']) {
+      expect(guard![1], `the guard lost its ${arm} arm`).toContain(arm)
+    }
   })
 
   it('a suspend with nothing streaming sends nothing', () => {
@@ -1267,8 +1291,120 @@ describe('a screen stream does not outlive the foreground', () => {
   it('a resume that fails says why, instead of leaving a dark mirror', () => {
     // The panel would otherwise just read "Not streaming." about a mirror the user
     // left running, and the stop this app sent would look like the board's fault.
-    const body = resume()
-    expect(body).toMatch(/lastError = /)
-    expect(body).toMatch(/background/)
+    expect(resume()).toMatch(/lastError = /)
+  })
+})
+
+/**
+ * c10 — a mirror survives the link dropping, and does NOT come back in a pocket.
+ *
+ * c9 stopped the stream when the app left the foreground and gave it back on the
+ * way in. It left the other half open, and flagged it: the link itself can drop
+ * and return under a sheet that is still on screen. The firmware closes the RPC
+ * session on disconnect, taking the stream with it; the panel's `.task` has
+ * already run once; `finishLink()` proved the new link and refreshed the status
+ * card. Nothing put the mirror back. So a board that reconnected perfectly well —
+ * a few steps out of range and back, which is the normal life of a Flipper in a
+ * pocket — showed an empty view forever, with no text suggesting the one recovery
+ * that works: close the sheet and reopen it.
+ *
+ * The trap in fixing it is that the obvious fix reopens c9's hole through a
+ * different door. A phone can be backgrounded AND lose the link (that is what a
+ * pocket is), so a resume hung on the link alone restarts the kilobyte-per-redraw
+ * flood into an app nobody is looking at. Hence two independent facts: does a view
+ * want frames, and can anyone see them.
+ */
+describe('a mirror comes back when the link does — but not into a pocket', () => {
+  const resume = () => swiftBody(gateway, 'func resumeScreenStreamIfWanted(')
+  const link = () => swiftBody(gateway, 'private func finishLink() {')
+  const gwInit = () => swiftBody(gateway, 'override private init() {')
+
+  it('a proved link puts a wanted mirror back', () => {
+    // The whole defect in one line: before this, `finishLink` refreshed the status
+    // card and stopped, and the view that wanted frames was never told.
+    expect(codeOnly(link(), /resumeScreenStreamIfWanted/))
+      .toMatch(/resumeScreenStreamIfWanted\(\.relinked\)/)
+  })
+
+  it('the resume happens after the link is claimed, or its own guard blocks it', () => {
+    // `resumeScreenStreamIfWanted` guards on `linked`. Called before the
+    // MainActor.run that sets it, it would return silently every time — a wire that
+    // reads as connected and does nothing at all.
+    const body = codeOnly(link(), /linked = true/)
+    expect(body.indexOf('linked = true'))
+      .toBeLessThan(body.indexOf('resumeScreenStreamIfWanted'))
+  })
+
+  it('the picture comes back before the status card, not after it', () => {
+    // A status read is three RPCs and can spend the better part of a minute on a
+    // slow board. The mirror is the thing being looked at, so it goes first; and
+    // when no sheet is open the guard makes this free.
+    const body = codeOnly(link(), /refresh\(\)/)
+    expect(body.indexOf('resumeScreenStreamIfWanted')).toBeLessThan(body.indexOf('refresh()'))
+  })
+
+  it('a re-link into a backgrounded app does NOT restart the stream', () => {
+    // The regression this fix could have been. A pocketed phone drops and regains
+    // the link constantly; without the `foreground` arm each cycle would restart a
+    // mirror nobody can see, on the board's own battery, sharing the link with the
+    // relay poll that IS the feature while backgrounded.
+    const guard = codeOnly(resume(), /guard/)
+    expect(guard).toMatch(/guard[^\n]*\bforeground\b/)
+  })
+
+  it('both phase observers maintain the flag the guard reads', () => {
+    // A flag only one side sets is worse than no flag: leave out the foreground
+    // half and the mirror never comes back at all.
+    expect(observerFor(gwInit(), 'UIApplication.didEnterBackgroundNotification'))
+      .toMatch(/foreground = false/)
+    expect(observerFor(gwInit(), 'UIApplication.willEnterForegroundNotification'))
+      .toMatch(/foreground = true/)
+  })
+
+  it('the flag is set synchronously, ahead of the hop that does the async work', () => {
+    // `queue: nil` means the observer block runs on the thread UIKit posts from,
+    // while the Task inside it is a hop later. Setting the flag inside that Task
+    // leaves a window where a re-link can start a stream into a phone that has
+    // already gone dark — the precise thing being prevented.
+    const block = codeOnly(observerFor(gwInit(), 'UIApplication.didEnterBackgroundNotification'),
+                           /foreground = false/)
+    expect(block.indexOf('foreground = false')).toBeLessThan(block.indexOf('Task {'))
+  })
+
+  it('the app counts as visible until told otherwise', () => {
+    // A `false` default would be a mirror that refuses to start until the app has
+    // been backgrounded once. Safe because `streamWanted` is not persisted: a
+    // process launched straight into the background is owed nothing.
+    expect(codeOnly(gateway, /var foreground/)).toMatch(/var foreground = true/)
+  })
+
+  it('the flag is not read back off UIApplication during the transition', () => {
+    // Every read here happens *during* a phase change, which is the one moment
+    // `applicationState` is ambiguous: at willEnterForeground the app has not become
+    // active yet, so a guard written against `.active` would block the very resume
+    // that notification exists to trigger.
+    expect(codeOnly(resume())).not.toMatch(/applicationState/)
+  })
+
+  it('a failed resume names the cause it actually had', () => {
+    // Two callers, two different true sentences. Telling someone the app was in the
+    // background when their Flipper walked out of range sends them to fix the wrong
+    // thing — the failure mode c5, c6 and c8 each landed on from a different angle.
+    const cause = swiftBody(gateway, 'enum ResumeCause {')
+    expect(cause).toMatch(/case returnedToForeground/)
+    expect(cause).toMatch(/case relinked/)
+    expect(cause).toMatch(/background/)
+    expect(cause).toMatch(/reconnected/)
+    // And the sentence is taken FROM the cause, not hardcoded beside it: a resume
+    // that always says "background" is the wrong-cause bug with extra ceremony.
+    expect(codeOnly(resume(), /lastError/)).toMatch(/lastError = "\\\(cause\.failureText\)/)
+  })
+
+  it('the two causes do not say the same thing', () => {
+    // A parameter threaded through to two identical strings is decoration.
+    const texts = Array.from(
+      swiftBody(gateway, 'enum ResumeCause {').matchAll(/return "([^"]+)"/g), m => m[1])
+    expect(texts.length, 'the cause no longer resolves to per-case text').toBe(2)
+    expect(texts[0]).not.toBe(texts[1])
   })
 })
