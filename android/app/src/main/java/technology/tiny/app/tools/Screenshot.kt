@@ -98,6 +98,26 @@ object Screenshot {
         app.emitScreenshot(toolUseId, "")
     }
 
+    /**
+     * The user granted the projection, but after the asking request died
+     * (ScreenshotConsentActivity.CONSENT_WINDOW_MS). Nothing was captured.
+     *
+     * Reported as its own outcome rather than `{denied:true}` — they said yes,
+     * and recording a decline they never made would be a lie the model repeats
+     * back to them. iOS parity: Screenshot.postExpired.
+     */
+    suspend fun postExpired(app: TinyApp, toolUseId: String) {
+        postResult(
+            app, toolUseId,
+            JSONObject()
+                .put("ok", false)
+                .put("error", "the capture request expired before the user answered — nothing was captured"),
+        )
+        // Same in-process release as a decline, or a voice call's tool turn hangs
+        // for the full timeout on a capture that is never coming.
+        app.emitScreenshot(toolUseId, "")
+    }
+
     private suspend fun postResult(app: TinyApp, toolUseId: String, payload: JSONObject) {
         // Best-effort: a failed post degrades to the server's 90s timeout — worse
         // UX, still honest. The mailbox row stays tiny (the image is already in R2).

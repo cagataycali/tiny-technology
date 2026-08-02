@@ -148,6 +148,17 @@ final class Screenshot {
         await postResult(toolUseId, token: token, payload: ["denied": true])
     }
 
+    /// Consent arrived after the asking request died. Posted best-effort (the
+    /// row is almost certainly swept — see `askRemoteConsent`), and NOT as
+    /// `{denied:true}`: the user allowed it, and blaming them for a deadline
+    /// they never saw would be a lie the model would then repeat.
+    func postExpired(toolUseId: String, token: String?) async {
+        await postResult(toolUseId, token: token, payload: [
+            "ok": false,
+            "error": "the capture request expired before the user answered — nothing was captured",
+        ])
+    }
+
     // ── Remote consent (use_device relay path) ────────────────────────────────
 
     /// Ask for consent and run the capture for a REMOTE ask — the web agent
@@ -177,6 +188,21 @@ final class Screenshot {
     /// Returns true when the prompt was actually presented; false means no
     /// window/scene to present in, and the caller must post the failure itself
     /// (nothing may leave the server's poll stranded).
+    ///
+    /// ⏱️ **The prompt expires with the request that asked for it.** A remote ask
+    /// is one the user is not waiting for — the phone is in a pocket, so an
+    /// unnoticed alert is the NORMAL case, not the edge case. Without a deadline
+    /// the two clocks come apart: the server's callback gives up at 90s and the
+    /// turn ends, while the alert sits there indefinitely. A tap 40 minutes
+    /// later would then capture whatever is on screen AT THAT MOMENT — a
+    /// different app, someone's messages — upload it permanently (nothing ever
+    /// deletes R2 media), and deliver it to NOBODY, because the poll is long
+    /// over and the mailbox row was swept at 15 minutes.
+    ///
+    /// That is consent applied to a moment it was never given for. So the tap is
+    /// only honoured while the asking request is still alive; afterwards the
+    /// alert says so and captures nothing. Declining stays valid forever —
+    /// "no" needs no deadline.
     @discardableResult
     func askRemoteConsent(toolUseId: String, token: String?, reason: String, tiny: String) -> Bool {
         guard let scene = UIApplication.shared.connectedScenes
@@ -201,19 +227,66 @@ final class Screenshot {
             title: "Let \(tiny) see your screen?",
             message: "Asked from another device.\n\n\(body)",
             preferredStyle: .alert)
+        // Captured when the ask ARRIVES, so the countdown covers the time the
+        // alert spends waiting to be noticed — not the time after it's tapped.
+        let asked = Date()
         alert.addAction(UIAlertAction(title: "Allow once", style: .default) { _ in
             Task { @MainActor in
+                guard Self.isConsentStillLive(asked) else {
+                    // The screen in front of the user now is NOT the screen the
+                    // agent asked about, and nothing is listening any more. Say
+                    // so on the phone: silently doing nothing after an explicit
+                    // "Allow" reads as the app being broken.
+                    self.explainExpired(host: host, tiny: tiny)
+                    return
+                }
                 _ = await self.run(toolUseId: toolUseId, token: token,
                                    fallback: Self.keyWindowSnapshot())
             }
         })
         alert.addAction(UIAlertAction(title: "Don't allow", style: .cancel) { _ in
             Task { @MainActor in
+                // No deadline on "no": posting a late decline is harmless (the
+                // row is swept or ignored) and it keeps this path dead simple.
                 await self.postDenied(toolUseId: toolUseId, token: token)
             }
         })
         host.present(alert, animated: true)
         return true
+    }
+
+    /// What a consent prompt resolved to. `expired` is deliberately NOT folded
+    /// into `denied`: the user DID allow it, and reporting "the user declined"
+    /// would be the same species of confabulation the device audit exists to
+    /// stop. Nobody is listening by then either way — the distinction is about
+    /// telling the truth locally, not about the wire.
+    enum ConsentOutcome { case allowed, denied, expired }
+
+    /// How long an "Allow once" tap stays good for. The server's callback polls
+    /// 90s (lib/chat/tools/platform.ts) — past that no result can reach the
+    /// model, so a capture would be pixels taken for nobody. The small grace
+    /// covers the capture+upload round trip for a tap that lands right at the
+    /// buzzer, which is worth more than the second of precision it costs.
+    static let consentWindow: TimeInterval = 100
+
+    static func isConsentStillLive(_ asked: Date) -> Bool {
+        Date().timeIntervalSince(asked) < consentWindow
+    }
+
+    /// Replace an expired prompt with an explanation. Deliberately NOT an error
+    /// about a "timeout": the user did nothing wrong, and what they most need to
+    /// know is that nothing was captured and nothing was sent.
+    private func explainExpired(host: UIViewController, tiny: String) {
+        var top: UIViewController = host
+        while let presented = top.presentedViewController, !presented.isBeingDismissed {
+            top = presented
+        }
+        let alert = UIAlertController(
+            title: "That request expired",
+            message: "\(tiny) stopped waiting for this one, so nothing was captured and nothing was sent. Ask again if you still want it to see your screen.",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        top.present(alert, animated: true)
     }
 
     // ── Capture ──────────────────────────────────────────────────────────────

@@ -236,15 +236,27 @@ final class ChatModel: ObservableObject {
     private var screenshotConsent: CheckedContinuation<Bool, Never>?
 
     /// Publish the consent request and suspend until the user decides.
-    private func askScreenshotConsent(reason: String) async -> Bool {
+    ///
+    /// ⏱️ The answer is only honoured while the asking request is still alive.
+    /// Even here — where the user IS watching a turn they started — the two
+    /// clocks can come apart: they can lock the phone or switch apps mid-turn,
+    /// the server's callback gives up at 90s, and the alert survives all of it
+    /// (SwiftUI re-presents it on return). A tap after that captured whatever
+    /// was on screen at THAT moment for a request nobody was listening to any
+    /// more, and stored it permanently. So the window is shared with the relay
+    /// path rather than reasoned about twice.
+    private func askScreenshotConsent(reason: String) async -> Screenshot.ConsentOutcome {
         // A stale continuation (shouldn't happen — captures are serialized by
         // the round-trip) is declined so it can't leak.
         screenshotConsent?.resume(returning: false)
         screenshotConsent = nil
-        return await withCheckedContinuation { cont in
+        let asked = Date()
+        let allowed = await withCheckedContinuation { cont in
             screenshotConsent = cont
             pendingScreenshot = ScreenshotConsent(reason: reason)
         }
+        guard allowed else { return .denied }
+        return Screenshot.isConsentStillLive(asked) ? .allowed : .expired
     }
 
     /// The ChatView's alert calls this on Allow (true) / Don't Allow (false).
@@ -867,8 +879,15 @@ final class ChatModel: ObservableObject {
     }
 
     func voiceScreenshot(reason: String, token: String?) async -> [String: Any] {
-        guard await askScreenshotConsent(reason: reason) else {
+        switch await askScreenshotConsent(reason: reason) {
+        case .denied:
             return ["denied": true, "note": "the user declined this capture"]
+        case .expired:
+            // Allowed, but too late to be the screen that was asked about —
+            // reported as its own outcome, never as a decline the user didn't make.
+            return ["ok": false, "error": "the capture request expired before it was answered — nothing was captured"]
+        case .allowed:
+            break
         }
         let fallback = Screenshot.keyWindowSnapshot()
         guard let img = await Screenshot.shared.run(toolUseId: "voice-\(UUID().uuidString)",
@@ -1105,14 +1124,20 @@ final class ChatModel: ObservableObject {
                         // fallback) and appends the same card generate_image
                         // uses. run()/postDenied() always post an outcome.
                         activeTool = "screenshot"
-                        if await askScreenshotConsent(reason: reason) {
+                        switch await askScreenshotConsent(reason: reason) {
+                        case .allowed:
                             let fallback = Screenshot.keyWindowSnapshot()
                             if let img = await Screenshot.shared.run(toolUseId: id, token: token, fallback: fallback) {
                                 reply.images.append(img)
                                 setReply(reply)
                             }
-                        } else {
+                        case .denied:
                             await Screenshot.shared.postDenied(toolUseId: id, token: token)
+                        case .expired:
+                            // Allowed too late: capture nothing (the screen has
+                            // moved on and the poll is over), and post the honest
+                            // reason rather than a decline the user never gave.
+                            await Screenshot.shared.postExpired(toolUseId: id, token: token)
                         }
                         activeTool = nil
                     case .metaTakePhoto(let id):

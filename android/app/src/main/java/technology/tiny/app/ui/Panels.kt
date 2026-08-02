@@ -40,6 +40,7 @@ import androidx.compose.material.icons.outlined.Visibility
 import androidx.compose.material.icons.outlined.Window
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.Call
+import androidx.compose.material.icons.outlined.CropFree
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.LocationOn
@@ -158,6 +159,11 @@ internal fun capabilityIcon(c: String): ImageVector? = when (c) {
     "speak" -> Icons.Outlined.VolumeUp
     "open_app" -> Icons.Outlined.Apps
     "image_gen" -> Icons.Outlined.AutoAwesome
+    // Screen capture — always behind a per-capture consent prompt, so the glyph
+    // is a framing one rather than anything suggesting it happens silently.
+    // (This phone has ADVERTISED screenshot on the wire since the capability
+    // widening, but rendered it as a bare word here: no icon, no label.)
+    "screenshot" -> Icons.Outlined.CropFree
     "voice" -> Icons.Outlined.RecordVoiceOver
     "see" -> Icons.Outlined.RemoveRedEye
     // Daemon/CLI capabilities (the Mac's long list)
@@ -225,6 +231,9 @@ internal val CAPABILITY_LABELS: Map<String, String> = mapOf(
     "open_app" to "opens apps",
     "image_gen" to "makes images",
     "glasses" to "glasses",
+    // "screenshot" as a bare token reads like a noun the device HAS; it's a
+    // thing the phone can be ASKED to do, and only with a tap each time.
+    "screenshot" to "shows its screen",
     // ── Mesh nodes (tiny-tech device-tools.ts) ──
     "mcp" to "MCP", // an acronym, so at least let it read as a NAME
     "files" to "files",
