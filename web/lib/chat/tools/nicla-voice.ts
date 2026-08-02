@@ -27,10 +27,11 @@
  * recognizer. That is what the recorder half commands —
  *
  *   nicla_voice_record      — relay a {type:'record'} envelope to the PHONE
- *                             (platform 'ios-arm64', a pull device with a real
+ *                             (any device declaring the `record` capability —
+ *                             iPhone or Pixel, a pull device with a real
  *                             mailbox); it records, transcribes on-device,
- *                             uploads audio via /api/media and stores the text
- *                             at POST /api/devices/transcript
+ *                             uploads audio via /api/media WHERE IT CAN, and
+ *                             stores the text at POST /api/devices/transcript
  *   nicla_voice_transcripts — list stored transcripts, newest first
  *   nicla_voice_transcript  — one transcript in full, by id
  *
@@ -40,6 +41,10 @@
 import { z } from 'zod'
 import { tool } from '@strands-agents/sdk'
 import { clampWait } from './nicla'
+// The same capability parser the Flipper host resolver uses — one reading of
+// the worker's `capabilities` column (JSON-array string, array, or malformed)
+// for every hardware resolver in this directory. See [RECORD_CAP].
+import { parseCaps } from './flipper'
 
 const WORKER = process.env.TINY_WORKER_URL || 'https://plugin.tiny.technology'
 const ikey = () => ({
@@ -143,28 +148,72 @@ export const makeNiclaVoiceWakesTool = (userId: string | null | undefined) => to
 })
 
 /**
- * The user's PHONE — the recorder. platform 'ios-arm64' (Session.swift
- * enrolls the tiny app itself as a daemon device), online preferred. This is
- * deliberately NOT resolveVoice: the necklace has no relay mailbox to send a
- * record envelope to, and pointing the recorder at it would be four confident
- * failures again. `online` here is real presence (the app heartbeats while
- * foregrounded), so offline means the app is closed or backgrounded — the
- * phone itself is almost certainly fine.
+ * The capability a device must declare to be sent a `{type:'record'}` envelope
+ * — the ONE thing this resolver actually needs to be true.
+ *
+ * ⚠️ RESOLVED BY CAPABILITY, NOT BY PLATFORM, AND THAT IS THE FIX FOR A REAL
+ * OUTAGE. This filter read `platform === 'ios-arm64'` for its whole life, so
+ * every tool below refused an account whose only phone is the Pixel — "No phone
+ * is enrolled on this account", to a user holding an enrolled phone that
+ * implements this envelope end to end (FleetManager.handleEnvelope's
+ * `type == "record"` arm → PhoneRecorder → POST /api/devices/transcript). The
+ * Android app enrolls as `android-arm64` (FleetManager.enrollIfNeeded), so a
+ * platform test could only ever name one of the two phones that can answer.
+ *
+ * A union of two platform strings would have fixed today and broken the next
+ * client, which is why this asks the question the rail cares about instead. It
+ * is also the shape flipper.ts already uses for exactly this reason
+ * (`resolveFlipperHosts` picks by `flipper`/`flipper_ble`), so the two hardware
+ * resolvers in this directory now agree.
+ *
+ * Both phones declare it and both RE-ASSERT it on their first heartbeat after
+ * launch (Session.swift `beatCapabilities`, FleetManager's `if (first)`), so a
+ * row that predates the capability heals itself rather than staying invisible.
+ * Nothing else in the fleet claims it: the two Nicla boards advertise
+ * `mic`/`wake`/`imu`/`ble` and a tiny-tech CLI node declares its resolved tool
+ * labels (`apple`, `computer`, `flipper`, `adb`…) — none is `record`, so this
+ * cannot resolve a laptop with no microphone.
+ */
+export const RECORD_CAP = 'record'
+
+/**
+ * The user's PHONE — the recorder. Any enrolled device declaring [RECORD_CAP],
+ * online preferred. This is deliberately NOT resolveVoice: the necklace has no
+ * relay mailbox to send a record envelope to, and pointing the recorder at it
+ * would be four confident failures again. `online` here is real presence (the
+ * app heartbeats while foregrounded), so offline means the app is closed or
+ * backgrounded — the phone itself is almost certainly fine.
+ *
+ * `platform` is returned so a caller can say WHICH phone it reached without
+ * having to ask the fleet again — the two answer this envelope with different
+ * payloads (see [makeNiclaVoiceRecordTool] on `audio_url`).
  */
 export async function resolvePhone(userId: string):
-    Promise<{ id: string; name: string; online: boolean } | null> {
+    Promise<{ id: string; name: string; online: boolean; platform: string } | null> {
   const d = await fetch(`${WORKER}/device/list?userId=${encodeURIComponent(userId)}`, {
     headers: ikey(), cache: 'no-store',
   }).then(r => r.json()).catch(() => null)
-  const phones = (d?.devices || []).filter((x: any) => x.platform === 'ios-arm64')
+  const phones = (d?.devices || []).filter((x: any) => parseCaps(x.capabilities).includes(RECORD_CAP))
   if (!phones.length) return null
   const best = phones.find((x: any) => x.online) || phones[0]
-  return { id: best.id, name: best.name, online: !!best.online }
+  return {
+    id: best.id, name: best.name, online: !!best.online,
+    platform: String(best.platform ?? ''),
+  }
 }
 
 export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budgetS?: number) => tool({
   name: 'nicla_voice_record',
-  description: "Record what the user says next and get it back as TEXT: the user's paired phone (the tiny app) records N seconds through its own mic, transcribes on-device, and answers with a transcript preview + a transcript id + the hosted audio URL. This is the phone's microphone, not the necklace's — the Nicla Voice board only spots wake words; the phone hears the words that follow. Needs the tiny app open on the phone. Takes roughly the recording length plus a few seconds.",
+  // ⚠️ "if the phone could host one" is not hedging — it is the difference
+  // between the two phones that answer this envelope, and stating it here is
+  // what stops the agent promising a recording that was never uploadable.
+  // iOS taps AVAudioEngine into SFSpeechRecognizer and an AVAudioFile off the
+  // same buffers, so its reply carries an audioUrl. Android's SpeechRecognizer
+  // captures inside Google's recognition-service process — the app never sees
+  // the samples and the mic is exclusive — so its reply omits the key entirely
+  // and `audio_url` is null (PhoneRecorder's header states the constraint and
+  // its scope). The TEXT is what this tool is for and both phones deliver it.
+  description: "Record what the user says next and get it back as TEXT: the user's paired phone (the tiny app) records N seconds through its own mic, transcribes on-device, and answers with a transcript preview + a transcript id — plus the hosted audio URL if that phone could host one. This is the phone's microphone, not the necklace's — the Nicla Voice board only spots wake words; the phone hears the words that follow. IMPORTANT: audio_url is null on an Android phone by platform constraint, because its speech recognizer owns the microphone and never hands this app the samples — that is NOT a failed recording and NOT a missing transcript. Report what was said; only mention audio if the user asks for it, and then say the words were kept and the recording could not be. Needs the tiny app open on the phone. Takes roughly the recording length plus a few seconds.",
   inputSchema: z.object({
     seconds: z.number().int().optional().describe('How long to record, in seconds (clamped 5-120, default 10).'),
     reason: z.string().max(200).optional().describe('Optional short reason — the phone shows it while recording.'),
@@ -173,7 +222,11 @@ export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budg
     if (!userId) return { ok: false, error: 'Login required — the recorder belongs to the user account.' }
     const phone = await resolvePhone(userId)
     if (!phone) {
-      return { ok: false, error: 'No phone is enrolled on this account — the tiny app on the phone does the recording and transcription; the necklace itself cannot.' }
+      // ⚠️ "no phone declaring `record`", not "no phone": this sentence was
+      // reached by every Android-only account for as long as the resolver
+      // tested the platform string, and it told a user holding an enrolled
+      // Pixel that they had no phone. It is now true when it is said.
+      return { ok: false, error: 'No phone on this account is offering to record — the tiny app (iPhone or Android) does the recording and transcription; the necklace itself cannot. If the app is installed, open it once so it re-registers what it can do.' }
     }
     if (!phone.online) {
       // Same honesty rule as the wake tools: this phone is not dead, its app
@@ -208,11 +261,22 @@ export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budg
       try {
         const p = JSON.parse(d.reply.payload)
         if (p.error) return { ok: false, error: String(p.error) }
+        const audioUrl = p.audioUrl ? String(p.audioUrl) : null
         return {
           ok: true,
           result: String(p.result ?? ''),
           transcript_id: p.transcriptId ? String(p.transcriptId) : null,
-          audio_url: p.audioUrl ? String(p.audioUrl) : null,
+          audio_url: audioUrl,
+          // ⚠️ A null audio_url has TWO causes and the agent cannot tell them
+          // apart from the value: this phone never had a file to upload, or an
+          // upload failed. Only the resolver knows which, so it says so here
+          // rather than leaving the model to infer a failure from a null and
+          // report "the recording didn't work" about a transcript it is holding.
+          ...(audioUrl ? {} : {
+            audio_note: phone.platform === 'android-arm64'
+              ? 'No audio URL, and nothing went wrong: an Android phone cannot keep the samples its speech recognizer consumed, so this take is text-only by design. The transcript IS the recording.'
+              : 'No audio URL came back with this take — the transcript is stored either way, and nicla_voice_transcript returns the full text.',
+          }),
           note: 'The result is a preview — nicla_voice_transcript with the id returns the full text.',
         }
       } catch {
