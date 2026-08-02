@@ -1708,3 +1708,117 @@ describe('losing Bluetooth is losing the link, not a lesser event', () => {
       .not.toMatch(/lastError = /)
   })
 })
+
+/**
+ * c13 — the pairing scan outlived every view that wanted it.
+ *
+ * `.onDisappear` is not "the app left the foreground". c9 established that for the
+ * screen stream and gave it two phase observers; the pairing sheet had the same
+ * hole and no cover at all, so `stopScan()` — reachable only from Cancel and
+ * `.onDisappear` — was simply never called. Lock the phone with the sheet open and
+ * the radio stayed armed for as long as the app was backgrounded, which with
+ * `bluetooth-central` in Info.plist is bounded by nothing: iOS keeps scanning on a
+ * suspended app's behalf, because that is what the mode is for.
+ *
+ * Two facts make it worse than a leak. A nil-service scan discovers NOTHING while
+ * backgrounded — iOS requires a background scan to name its services — so the cost
+ * bought nothing, and it was spent next to the BLE link and the relay poll that ARE
+ * the feature there (P5's exact flow). And it is the normal case, not an edge: the
+ * sheet's own footer sends the user to the Flipper's Settings → Bluetooth, and
+ * `subscribeFailureText` sends them there again when a bond fails. Leaving the app
+ * with this sheet open is the instruction; auto-lock is thirty seconds.
+ *
+ * The fix is c9's shape: `scanWanted` (a sheet is asking) split from `scanning`
+ * (the radio is on), a suspend that keeps the debt and a stop that settles it.
+ */
+describe('a pairing scan does not outlive the view that wanted it', () => {
+  const initBody = () => swiftBody(gateway, 'override private init()')
+  const begin = () => codeOnly(swiftBody(gateway, 'private func beginScanIfPossible()'), /guard/)
+  const suspend = () => codeOnly(swiftBody(gateway, 'private func suspendScan()'), /scanning/)
+  const armCode = (body: string) => codeOnly(body, /\S/)
+
+  it('backgrounding stops the scan', () => {
+    // The hole: the only stop was a view callback, and a sheet on screen when the
+    // phone locks never disappears. Asserted on the observer that actually fires.
+    const bg = observerFor(initBody(), 'didEnterBackgroundNotification')
+    expect(codeOnly(bg, /suspend/), 'nothing stops the scan when the app backgrounds')
+      .toMatch(/suspendScan\(\)/)
+  })
+
+  it('and it is stopped synchronously, not behind a hop iOS can suspend', () => {
+    // Unlike the stream's stop — a frame that has to cross BLE behind flow control,
+    // which is why that one holds a background-task assertion — this needs nothing
+    // from the board. Left inside the `Task`, a suspension before the hop leaves the
+    // radio scanning with nobody able to stop it.
+    const bg = codeOnly(observerFor(initBody(), 'didEnterBackgroundNotification'), /suspendScan/)
+    const call = bg.indexOf('suspendScan()')
+    const task = bg.indexOf('Task {')
+    expect(task, 'the background observer no longer has a Task').toBeGreaterThan(-1)
+    expect(call, 'suspendScan() must run before the Task hop, not inside it')
+      .toBeLessThan(task)
+  })
+
+  it('returning to the foreground puts it back', () => {
+    const fg = observerFor(initBody(), 'willEnterForegroundNotification')
+    expect(codeOnly(fg, /resume/)).toMatch(/resumeScanIfWanted\(\)/)
+  })
+
+  it('the debt is a separate fact from the radio, or the resume has nothing to read', () => {
+    // `scanning` is set by the radio and cleared by the suspend, so it cannot also
+    // mean "a sheet is asking" — that conflation is what left c9's stream unable to
+    // come back, one flag over.
+    expect(gateway).toMatch(/private var scanWanted = false/)
+    expect(codeOnly(swiftBody(gateway, 'func startScan()'), /scanWanted/))
+      .toMatch(/scanWanted = true/)
+    expect(codeOnly(swiftBody(gateway, 'private func resumeScanIfWanted()'), /guard/))
+      .toMatch(/guard scanWanted/)
+  })
+
+  it('a suspend keeps the debt; the deliberate stop settles it', () => {
+    // The whole difference between the two stops. A suspend that cleared the want
+    // would never resume (c9's bug); a Cancel that kept it would restart a scan for
+    // a sheet the user closed, on the next foreground.
+    expect(suspend(), 'suspending must not decide the user is finished')
+      .not.toMatch(/scanWanted/)
+    expect(suspend()).toMatch(/scanning = false/)
+    expect(codeOnly(swiftBody(gateway, 'func stopScan()'), /scanWanted/))
+      .toMatch(/scanWanted = false/)
+  })
+
+  it('the radio is asked to stop, not just the flag', () => {
+    // A flag flipped without `central.stopScan()` is the same leak with a tidier
+    // variable: iOS keeps scanning for a backgrounded app that declared
+    // bluetooth-central, so only the call ends it.
+    expect(suspend()).toMatch(/central\?\.stopScan\(\)/)
+  })
+
+  it('no scan is ever ARMED in the background either', () => {
+    // The choke point, so a future caller cannot reintroduce one. Without service
+    // UUIDs iOS discovers nothing while backgrounded, so such a scan cannot succeed
+    // — it can only spend the radio beside the link and the relay poll.
+    expect(begin(), 'beginScanIfPossible must refuse while backgrounded')
+      .toMatch(/guard foreground/)
+    // And the nil-service scan is the reason the guard is required, not optional.
+    expect(codeOnly(swiftBody(gateway, 'private func beginScanIfPossible()'), /scanForPeripherals/))
+      .toMatch(/scanForPeripherals\(withServices: nil/)
+  })
+
+  it('a Bluetooth toggle can still recover a scan', () => {
+    // The hole the split would have opened if the wake-up kept reading `scanning`:
+    // Bluetooth off in the foreground, background, foreground, Bluetooth on. The
+    // suspend has cleared `scanning`, so the arm would find nothing to resume while
+    // the sheet is still on screen asking.
+    const on = stateArms().find(a => a.label.includes('.poweredOn'))
+    expect(on, 'no .poweredOn arm').toBeDefined()
+    const code = armCode(on!.body)
+    expect(code, 'the wake-up must read the want, not the radio flag')
+      .toMatch(/if scanWanted/)
+    expect(code).toMatch(/beginScanIfPossible\(\)/)
+  })
+
+  it('and the sheet still has its own stop, for the case that DOES disappear', () => {
+    // The phase observers are the cover, not the replacement: a dismissed sheet
+    // should stop the radio there and then rather than at the next backgrounding.
+    expect(codeOnly(panel, /onDisappear/)).toMatch(/onDisappear \{ flipper\.stopScan\(\) \}/)
+  })
+})

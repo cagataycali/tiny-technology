@@ -409,6 +409,11 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// the two diverge on purpose while the app is in the background, where the
     /// stream is stopped but still owed back to the view that asked for it.
     private var streamWanted = false
+    /// The same split for the pairing scan: a sheet is asking to see Flippers.
+    /// `scanning` is whether the RADIO is scanning, and the two diverge in exactly
+    /// the window that matters — backgrounded, where a scan cannot work and must
+    /// not be left armed, but is still owed to the sheet that is still on screen.
+    private var scanWanted = false
     /// Whether this app can currently show a frame, maintained by the two phase
     /// observers in `init()`. A resume needs BOTH this and `streamWanted`: a view
     /// wanting frames says nothing about whether anyone can see them.
@@ -578,12 +583,18 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
                 // could restart the mirror into a phone that is already in a pocket
                 // — the exact cost this flag exists to prevent.
                 foreground = false
+                // Synchronously, for the same reason as the flag above and one more:
+                // stopping a scan needs nothing from the board, so it must not wait
+                // on a hop that iOS may suspend us before reaching. The stream's stop
+                // is a frame and takes the background assertion instead.
+                suspendScan()
                 Task { @MainActor in await suspendScreenStream() }
             },
             NotificationCenter.default.addObserver(
                 forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
             ) { [self] _ in
                 foreground = true
+                resumeScanIfWanted()
                 Task { @MainActor in await resumeScreenStreamIfWanted(.returnedToForeground) }
             },
         ]
@@ -595,6 +606,7 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// allowed in the background, and pairing is a thing the user is watching.
     func startScan() {
         wanted = true
+        scanWanted = true
         found = []
         if central == nil {
             central = CBCentralManager(delegate: self, queue: .main, options: [
@@ -605,13 +617,24 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// The user is done looking: Cancel, the sheet dismissing, or the board being
+    /// adopted. The DELIBERATE stop, so it also settles the debt — nothing is owed
+    /// a resume. `suspendScan()` is the other stop, and the difference between them
+    /// is the whole point of `scanWanted`.
     func stopScan() {
+        scanWanted = false
         scanning = false
         central?.stopScan()
     }
 
     private func beginScanIfPossible() {
-        guard let c = central, c.state == .poweredOn, !c.isScanning else { return }
+        // ⚠️ `foreground` is a requirement, not politeness, and this is the choke
+        // point that holds it so no caller can reintroduce a background scan: with
+        // no service UUIDs, iOS discovers **nothing** while the app is in the
+        // background (a background scan has to name the services it wants). So a
+        // scan armed there cannot succeed — it can only spend the radio, next to a
+        // BLE link and a relay poll that are the features actually running.
+        guard foreground, let c = central, c.state == .poweredOn, !c.isScanning else { return }
         // Scanned with nil rather than [flipperServiceUUID] on purpose: iOS only
         // matches a service filter against the ADVERTISEMENT, and whether the
         // serial service appears there varies by firmware. Filtering ourselves on
@@ -621,6 +644,41 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         c.scanForPeripherals(withServices: nil, options: [
             CBCentralManagerScanOptionAllowDuplicatesKey: false,
         ])
+    }
+
+    /// Stop scanning because nobody can see the result, without deciding the user
+    /// is finished.
+    ///
+    /// ⚠️⚠️ **`.onDisappear` is not "the app left the foreground"** — c9 established
+    /// that for the screen stream, and the pairing sheet had the identical hole with
+    /// no cover at all. A sheet still on screen when the phone auto-locks never
+    /// disappears, and neither does one the user switches away from, so `stopScan()`
+    /// — reachable only from Cancel and `.onDisappear` — was never called. The scan
+    /// then stayed armed for as long as the app was backgrounded, and with
+    /// `bluetooth-central` in `Info.plist` that is not bounded by anything: iOS keeps
+    /// scanning on a suspended app's behalf, which is the point of the mode.
+    ///
+    /// And it is the NORMAL case, not an edge: this sheet's own footer sends the user
+    /// to the Flipper's Settings → Bluetooth, and `subscribeFailureText` sends them
+    /// there again when a bond fails. Leaving the app with the sheet open is the
+    /// instruction. Auto-lock is 30 seconds.
+    ///
+    /// Called synchronously from the notification block rather than from the `Task`
+    /// hop beside it, and that is deliberate: unlike the stream's stop — a frame that
+    /// has to cross BLE behind flow control, which is why it holds a background task
+    /// assertion — this one is local to the phone. Nothing has to reach the board, so
+    /// there is no window in which iOS can suspend us first.
+    private func suspendScan() {
+        guard scanning else { return }
+        scanning = false
+        central?.stopScan()
+        // `scanWanted` deliberately survives: the sheet did not go anywhere.
+    }
+
+    /// Put the scan back for a sheet that never went away.
+    private func resumeScanIfWanted() {
+        guard scanWanted, foreground else { return }
+        beginScanIfPossible()
     }
 
     /// Adopt one of the scanned boards. The system pairing prompt (and the
@@ -1516,7 +1574,11 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
         switch central.state {
         case .poweredOn:
             if unit != nil { connectIfPossible() }
-            if scanning { beginScanIfPossible() }
+            // `scanWanted`, not `scanning`: a radio that was off is exactly when the
+            // flag the radio sets is false while a sheet is still asking. Reading it
+            // would make a Bluetooth toggle the one loss a scan could NOT recover
+            // from — the same shape of bug as the teardown below, one flag over.
+            if scanWanted { beginScanIfPossible() }
         case .poweredOff:
             linkLost()
             lastError = "Bluetooth is off — the phone can't reach the Flipper without it."
