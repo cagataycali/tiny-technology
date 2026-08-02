@@ -88,11 +88,39 @@ const swiftBody = (src: string, signature: string): string => {
  * delete the explanation, the wrong lesson. Only block comments and whole-line
  * `//` are cut: an inline `//` cannot be told apart from the one in `https://`.
  */
-const codeOnly = (src: string): string => {
+const codeOnly = (src: string, mustKeep?: RegExp): string => {
   const stripped = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+  if (mustKeep) {
+    // A few lines of code under a paragraph of comment is NORMAL in this file, and
+    // the ratio below is a whole-file heuristic: it failed on a correct 5-line
+    // error branch whose comment explains why the branch exists. Same purpose at
+    // the right scale — name a token that has to survive the strip.
+    expect(stripped, `codeOnly dropped ${mustKeep} — check the regexes`).toMatch(mustKeep)
+    return stripped
+  }
   expect(stripped.length, 'codeOnly stripped everything — check the regexes')
     .toBeGreaterThan(src.length / 3)
   return stripped
+}
+
+/**
+ * One `case X:` block out of a Swift switch, up to the next `case`/`default`.
+ *
+ * Structural on purpose. The byte-window version of this (`slice(at, at + 1600)`
+ * plus a `{0,320}` gap between the label and the statement) went red the moment a
+ * comment was added inside a case — the third time a fixed window has cost this
+ * file a false failure. A window that can red for nothing can also go green
+ * covering nothing.
+ */
+const swiftCase = (body: string, label: string): string => {
+  const needle = `case ${label}:`
+  const at = body.indexOf(needle)
+  expect(at, `${needle} not found — the switch was restructured`).toBeGreaterThan(-1)
+  const rest = body.slice(at + needle.length)
+  const next = rest.search(/\n\s*(?:case |default:)/)
+  const block = next === -1 ? rest : rest.slice(0, next)
+  expect(block.trim().length, `${needle} sliced empty`).toBeGreaterThan(0)
+  return block
 }
 
 const host = (over: Partial<FlipperHost> & Pick<FlipperHost, 'transport'>): FlipperHost => ({
@@ -119,19 +147,22 @@ describe('the BLE wire constants match what was measured on the device', () => {
     // Two characteristics on one service, and nothing in CoreBluetooth complains
     // if you take the wrong one: subscribing to RX just never delivers a frame,
     // and writing to TX fails silently. So the direction is pinned by hand.
-    const at = gateway.indexOf('didDiscoverCharacteristicsFor')
-    expect(at).toBeGreaterThan(0)
-    const disc = gateway.slice(at, at + 1600)
+    const disc = swiftBody(gateway, 'func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor')
     // TX → notify, RX → stashed for writing.
-    expect(disc).toMatch(/case flipperTxUUID:[\s\S]{0,320}?setNotifyValue\(true/)
-    expect(disc).toMatch(/case flipperRxUUID:[\s\S]{0,120}?rxChar = ch/)
+    expect(swiftCase(disc, 'flipperTxUUID')).toMatch(/setNotifyValue\(true/)
+    const rxCase = swiftCase(disc, 'flipperRxUUID')
+    expect(rxCase).toMatch(/rxChar = ch/)
+    // Stronger than the old byte-window form could be: RX is never subscribed.
+    // Subscribing to it delivers nothing, forever, with no error anywhere.
+    expect(rxCase, 'RX is the write handle, not a notify source').not.toMatch(/setNotifyValue/)
     // …and the only writer uses that stashed handle, never the notify one.
     const writer = swiftBody(gateway, 'private func writeFrame(')
     expect(writer).toContain('rxChar')
     expect(writer).toContain('writeValue(')
     expect(Array.from(gateway.matchAll(/writeValue\(/g)).length, 'one write path only').toBe(1)
     // Inbound frames are deframed from TX only.
-    expect(gateway).toMatch(/case flipperTxUUID:[\s\S]{0,80}?consume\(value\)/)
+    const inbound = swiftBody(gateway, 'func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor')
+    expect(swiftCase(inbound, 'flipperTxUUID')).toMatch(/consume\(value\)/)
   })
 
   it('the protobuf field numbers are the ones the firmware answers on', () => {
@@ -985,5 +1016,140 @@ describe('a background beat announces the board, it does not withdraw it', () =>
       .not.toBeNull()
     expect(statics![1]).not.toContain('flipper_ble')
     expect(session).toMatch(/linked \? capabilities \+ \["flipper_ble"\] : capabilities/)
+  })
+})
+
+/**
+ * The link is not proved until it CAN answer, and a failed bond has to say so.
+ *
+ * Bonding is the one step of this whole feature a person performs by hand: every
+ * characteristic on the serial service is ATTR_PERMISSION_AUTHEN_*, so iOS defers
+ * the TX subscription until the user has read a 6-digit code off a 1.4-inch screen
+ * and typed it into a prompt. Two failures hid in that gap:
+ *
+ *   - the proving ping was fired when the subscription was REQUESTED, not
+ *     confirmed, and its budget is 8 seconds. A human is routinely slower, so a
+ *     correct first pair timed out, nothing retried, and the board finished bonding
+ *     into a panel that had already given up.
+ *   - a declined prompt or a mistyped code arrives as an ATT authentication error
+ *     on `didUpdateNotificationStateFor` and nowhere else — the connection stays
+ *     up, discovery already succeeded, and RPC frames are written without waiting
+ *     on `didWriteValueFor`. With that callback unimplemented the only symptom was
+ *     the same ping timeout, whose message sends the user to the Flipper's screen
+ *     to close an app that is not the problem.
+ */
+describe('a link is proved only once it can answer, and a failed bond says so', () => {
+  // Sliced lazily, inside the tests. A slice taken in the describe body runs at
+  // COLLECTION time, so deleting the function under test crashes the whole file
+  // instead of reding the one pin that covers it — measured: removing
+  // `didUpdateNotificationStateFor` reported "no tests" rather than a failure with
+  // a name. A mutant that takes the suite down teaches nothing about which guard
+  // held.
+  const discover = () => swiftBody(gateway, 'func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor')
+  const notifyState = () => swiftBody(gateway, 'func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor')
+  const finish = () => swiftBody(gateway, 'private func finishLink()')
+  /// The `if let error { … }` block itself, brace-matched.
+  ///
+  /// ⚠️ Everything here is asserted against THIS, never against "the text before
+  /// `finishLink()`". That looser region swallowed the `guard characteristic.isNotifying
+  /// else { … return }` that follows, so a pin demanding a `return` in the error
+  /// path passed with the error path's own `return` deleted — the mutation ran and
+  /// nothing went red.
+  const errBlock = () => codeOnly(swiftBody(notifyState(), 'if let error'), /lastError = /)
+
+  it('discovery does not ping: subscribing is requested there, never confirmed', () => {
+    // The heart of it. `setNotifyValue` is a request; the CCCD write happens after
+    // bonding, which is a human typing. A finishLink() reachable from discovery
+    // without the already-notifying condition is the original race back again.
+    const code = codeOnly(discover())
+    expect(code, 'discovery must still ask for the subscription').toMatch(/setNotifyValue\(true, for: ch\)/)
+    const calls = code.match(/finishLink\(\)/g) ?? []
+    expect(calls.length, 'exactly one guarded finishLink() belongs in discovery').toBe(1)
+    expect(code, 'the only finishLink() in discovery is the already-notifying shortcut')
+      .toMatch(/if txAlreadyNotifying \{ finishLink\(\) \}/)
+  })
+
+  it('a confirmed TX subscription is what starts the ping', () => {
+    const body = notifyState()
+    expect(body, 'the state callback must prove the link').toMatch(/finishLink\(\)/)
+    // Only TX carries answers; flow control failing is survivable, and refusing a
+    // link over it would trade a working board for decoration.
+    expect(body).toMatch(/guard characteristic\.uuid == flipperTxUUID else \{ return \}/)
+  })
+
+  it('an error on the TX subscription never reaches the ping', () => {
+    const err = errBlock()
+    expect(err, 'a failed subscription is not a link').toMatch(/linked = false/)
+    // The early return IS the fix. Without it the error path falls through to the
+    // confirmation path and pings a characteristic that will never answer.
+    expect(err, 'the error path must leave before the link is proved').toMatch(/\breturn\b/)
+    expect(err, 'nothing in the error path may prove a link').not.toMatch(/finishLink\(\)/)
+    // And it must come first, so a future edit cannot reorder the two.
+    const body = notifyState()
+    expect(body.indexOf('if let error'), 'the error branch must precede the ping')
+      .toBeLessThan(body.indexOf('finishLink()'))
+  })
+
+  it('a declined prompt or mistyped code is named as pairing, not as an operation', () => {
+    const text = swiftBody(gateway, 'static func subscribeFailureText(')
+    for (const code of ['insufficientAuthentication', 'insufficientEncryption', 'insufficientAuthorization']) {
+      expect(text, `${code} is a pairing failure and must be treated as one`).toContain(code)
+    }
+    expect(text, 'the user needs the actual next action').toMatch(/6-digit code/)
+    expect(text).toMatch(/Pairing didn't complete/)
+    // A bond the board dropped is the other half: same symptom, different cause,
+    // and "pair again" is still the fix.
+    expect(text).toContain('peerRemovedPairingInformation')
+  })
+
+  it('a failed bond releases the board, and does not re-prompt in a loop', () => {
+    // The Flipper takes ONE central. Holding a connection that can never carry a
+    // frame is how it looks broken to the user's laptop. But re-dialling raises
+    // the pairing prompt again, so the release must be the kind that stops
+    // wanting: stop() clears `wanted`, which is what scheduleReconnect() guards on.
+    // codeOnly, because the comment right above it has to name `stop()` in order
+    // to explain why the release is the kind that stops wanting — and a raw
+    // `toMatch` then passes on the explanation with the call itself deleted.
+    // Measured: that mutation survived until this line read code only.
+    expect(errBlock(), 'the single central slot has to go back').toMatch(/stop\(\)/)
+    expect(codeOnly(swiftBody(gateway, 'func stop()'))).toMatch(/wanted = false/)
+    expect(codeOnly(swiftBody(gateway, 'private func scheduleReconnect()')))
+      .toMatch(/guard wanted else \{ return \}/)
+  })
+
+  it('a missing TX characteristic is reported, not waited on forever', () => {
+    // Now that nothing pings from discovery, a service without TX issues no
+    // subscription, so no state callback is ever coming. Silence would be
+    // permanent.
+    expect(discover()).toMatch(/guard sawTx else \{/)
+    expect(discover()).toMatch(/missing the characteristic it answers on/)
+  })
+
+  it('a restored central that is already subscribed still links', () => {
+    // iOS can hand back a characteristic with notifications already on, and
+    // re-requesting that is not guaranteed to produce another state callback.
+    // Without this branch a restored session could never prove itself.
+    expect(discover()).toMatch(/if ch\.isNotifying \{/)
+    expect(codeOnly(read('ios/Tiny/Sources/FlipperGateway.swift')))
+      .toMatch(/willRestoreState/)
+  })
+
+  it('a second confirmation does not start a second ping', () => {
+    expect(finish()).toMatch(/guard !linking else \{ return \}/)
+    expect(finish()).toMatch(/linking = true/)
+    // And the flag has to clear on both teardown paths, or a stale `linking`
+    // makes the next confirmed subscription a no-op — a link that cannot be
+    // proved at all, which is worse than the bug being fixed.
+    for (const fn of ['func stop()', 'func centralManager(_ central: CBCentralManager, didDisconnectPeripheral']) {
+      expect(codeOnly(swiftBody(gateway, fn)), `${fn} must clear linking`).toMatch(/linking = false/)
+    }
+  })
+
+  it('the ping budget is what made the race bite, and it is still small', () => {
+    // 8 seconds. Pinned because the fix is only interesting relative to it: if
+    // someone "fixes" a slow first pair by growing this instead, the ping starts
+    // racing the human again with a longer stopwatch.
+    expect(codeOnly(swiftBody(gateway, 'func ping()')))
+      .toMatch(/timeout: 8/)
   })
 })

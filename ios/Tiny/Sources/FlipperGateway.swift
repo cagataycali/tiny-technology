@@ -393,6 +393,12 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// referenced from a stored property initializer.
     private var reconnectDelay: TimeInterval = 1
     private var linkedAt: Date?
+    /// True from the moment the TX subscription is confirmed until the proving
+    /// ping resolves. iOS re-writes the CCCD on a state restore, so
+    /// `didUpdateNotificationStateFor` can fire for a characteristic that is
+    /// already notifying — without this, that second callback starts a second
+    /// ping against a link the first one is still proving.
+    private var linking = false
     /// Guards the permission prompt: merely instantiating CBCentralManager asks
     /// for Bluetooth, and a user with no Flipper should never be asked because of
     /// this file.
@@ -614,6 +620,10 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         peripheral = nil
         rxChar = nil
         linked = false
+        // Cleared here as well as in the ping's own catch: that runs a hop later,
+        // and a `linking` left standing would make the NEXT confirmed
+        // subscription a no-op — a link that can never be proved.
+        linking = false
         linkedAt = nil
         // The board's stream dies with the RPC session, so the flag and the last
         // picture have to go too — a mirror that keeps showing its final frame
@@ -663,21 +673,36 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Called once the characteristics are in hand. Proves the link with a ping
-    /// before claiming it, then fills in `info` so the panel has something true
-    /// to show without the user pressing anything.
+    /// Called once the TX subscription is CONFIRMED — never merely requested.
+    /// Proves the link with a ping before claiming it, then fills in `info` so the
+    /// panel has something true to show without the user pressing anything.
+    ///
+    /// ⚠️ The caller matters as much as the body. This used to run at the end of
+    /// `didDiscoverCharacteristicsFor`, i.e. immediately after `setNotifyValue` was
+    /// *issued*, and the ping's 8-second timeout then raced the one step of this
+    /// whole feature that a human performs by hand: iOS defers the CCCD write until
+    /// bonding completes, so on a first pair the ping was in flight while the user
+    /// was still reading six digits off a 1.4-inch screen and typing them. Nothing
+    /// retries afterwards, so the board finished bonding into a panel that had
+    /// already given up — and the message it left blamed an app on the Flipper's
+    /// screen. Answers only arrive on TX, so there is no link to prove until TX is
+    /// actually notifying.
     private func finishLink() {
+        guard !linking else { return }
+        linking = true
         Task {
             do {
                 try await ping()
             } catch {
                 await MainActor.run {
+                    self.linking = false
                     self.linked = false
-                    self.lastError = "Bluetooth connected, but the Flipper's RPC didn't answer. If its screen is showing an app, close it."
+                    self.lastError = "Bluetooth connected and paired, but the Flipper's RPC didn't answer. If its screen is showing an app, close it."
                 }
                 return
             }
             await MainActor.run {
+                self.linking = false
                 self.linked = true
                 self.linkedAt = Date()
                 self.lastError = nil
@@ -1297,6 +1322,7 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral, error: Error?) {
         linked = false
+        linking = false
         rxChar = nil
         inbox = []
         // The firmware closes the RPC session on disconnect, which takes the
@@ -1325,17 +1351,35 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
+        var txAlreadyNotifying = false
+        var sawTx = false
         for ch in service.characteristics ?? [] {
             switch ch.uuid {
             case flipperTxUUID:
+                sawTx = true
                 // This subscribe is what raises the pairing prompt: the
                 // characteristic is authenticated-read/write in the firmware, so
-                // iOS bonds here and the Flipper shows its 6-digit code.
-                peripheral.setNotifyValue(true, for: ch)
+                // iOS bonds here and the Flipper shows its 6-digit code. It is
+                // therefore the slowest step in the link, and the only one whose
+                // duration is a person's — so nothing may assume it succeeded.
+                // `didUpdateNotificationStateFor` carries the answer.
+                if ch.isNotifying {
+                    // A restored central can hand back a characteristic already
+                    // subscribed. Re-requesting it is not guaranteed to produce
+                    // another state callback, so treat the existing subscription
+                    // as the confirmation it is.
+                    txAlreadyNotifying = true
+                } else {
+                    peripheral.setNotifyValue(true, for: ch)
+                }
             case flipperRxUUID:
                 rxChar = ch
                 rxWriteType = ch.properties.contains(.write) ? .withResponse : .withoutResponse
             case flipperFlowUUID:
+                // Deliberately NOT gated on: credits absent means `waitForRoom`
+                // sends anyway, which is the documented fail-open. A link that
+                // works without flow control is worth more than a link refused
+                // over decoration.
                 peripheral.setNotifyValue(true, for: ch)
             default:
                 break
@@ -1345,11 +1389,78 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
             lastError = "The Flipper's serial service is missing its write characteristic."
             return
         }
+        // Without this the wait below is silent and permanent: no subscription
+        // request was issued, so no state callback is coming, and the panel would
+        // sit on "connecting" with nothing to read.
+        guard sawTx else {
+            lastError = "The Flipper's serial service is missing the characteristic it answers on."
+            return
+        }
         // RPC is already open: the firmware calls rpc_session_open(RpcOwnerBle)
         // from its own GapEventTypeConnected handler (bt.c). There is no
         // start_rpc_session over BLE — sending one would be a protobuf frame of
-        // ASCII text. So the next thing to do is simply ask it something.
+        // ASCII text. But asking it something is still premature until TX is
+        // notifying, because that is the only path an answer can take.
+        if txAlreadyNotifying { finishLink() }
+    }
+
+    /// The TX subscription's verdict — and the only place a failed bond is
+    /// visible.
+    ///
+    /// Every characteristic on this service is `ATTR_PERMISSION_AUTHEN_*`, so a
+    /// declined pairing prompt or a mistyped 6-digit code surfaces here as an ATT
+    /// authentication error and NOWHERE else: the connection stays up, discovery
+    /// already succeeded, and no write reports back (this file writes RPC frames
+    /// without waiting on `didWriteValueFor`). Unobserved, the sole symptom was a
+    /// ping timeout, and the sentence it produced sent the user to the Flipper's
+    /// screen to close an app that was not the problem.
+    func peripheral(_ peripheral: CBPeripheral, didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                    error: Error?) {
+        // Flow control failing is survivable; only TX decides whether there is a
+        // link at all.
+        guard characteristic.uuid == flipperTxUUID else { return }
+        if let error {
+            linked = false
+            lastError = Self.subscribeFailureText(error)
+            // Release the board's single central slot rather than hold a
+            // connection that can never carry a frame — an occupied slot is how
+            // the Flipper looks broken to the user's laptop and to the official
+            // app. `stop()` also clears `wanted`, so `scheduleReconnect()` returns
+            // immediately: re-dialling here would re-raise the pairing prompt every
+            // couple of seconds at a user who just declined one.
+            stop()
+            return
+        }
+        guard characteristic.isNotifying else {
+            // An unsubscribe we did not ask for. Nothing can answer now, and
+            // claiming a link would be a lie about a one-way pipe.
+            linked = false
+            return
+        }
         finishLink()
+    }
+
+    /// Why a subscription failed, in the user's terms. Pairing is the likely
+    /// cause and the only one they can act on, so it gets named explicitly instead
+    /// of arriving as "The operation couldn't be completed."
+    static func subscribeFailureText(_ error: Error) -> String {
+        let pairing: String
+        if let att = error as? CBATTError {
+            switch att.code {
+            case .insufficientAuthentication, .insufficientEncryption, .insufficientAuthorization:
+                pairing = "Pairing didn't complete"
+            default:
+                pairing = ""
+            }
+        } else if let cb = error as? CBError, cb.code == .peerRemovedPairingInformation {
+            pairing = "The Flipper no longer recognises this phone"
+        } else {
+            pairing = ""
+        }
+        guard pairing.isEmpty else {
+            return "\(pairing), so the Flipper won't talk over Bluetooth. Tap Pair again and enter the 6-digit code the Flipper shows — if it shows none, turn Bluetooth off and on in the Flipper's own settings first."
+        }
+        return "Couldn't subscribe to the Flipper's serial service: \(error.localizedDescription)"
     }
 
     func peripheral(_ peripheral: CBPeripheral, didUpdateValueFor characteristic: CBCharacteristic, error: Error?) {
