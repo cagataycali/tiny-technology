@@ -1358,9 +1358,18 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         do {
             try await startScreenStream()
         } catch {
-            // Not silent: otherwise the panel just says "Not streaming." about a
-            // mirror the user left running, and the stop we sent looks like the
-            // board's fault.
+            // Not silent: otherwise FlipperScreenSheet just says "Not streaming."
+            // about a mirror the user left running, and the stop we sent looks like
+            // the board's fault.
+            //
+            // ⚠️ That sheet, and nothing else, is what this sentence has to reach —
+            // the guard above requires `streamWanted, foreground`, which IS "a
+            // screen sheet is open on this phone right now". This comment said "the
+            // panel" for a while, and it was wrong in a load-bearing way: the panel
+            // ROW was the only reader `lastError` had, the sheet covers it, and so
+            // the one diagnosis written to replace a bare "Not streaming." was the
+            // one sentence nobody could ever read. `FlipperLinkProblem` is the
+            // reader now, mounted by every surface that can be the one on screen.
             lastError = "\(cause.failureText): \(error.localizedDescription)"
         }
     }

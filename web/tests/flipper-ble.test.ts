@@ -1333,8 +1333,11 @@ describe('a screen stream does not outlive the foreground', () => {
   })
 
   it('a resume that fails says why, instead of leaving a dark mirror', () => {
-    // The panel would otherwise just read "Not streaming." about a mirror the user
-    // left running, and the stop this app sent would look like the board's fault.
+    // FlipperScreenSheet would otherwise just read "Not streaming." about a mirror
+    // the user left running, and the stop this app sent would look like the board's
+    // fault. (Named exactly: for two cycles this comment said "the panel", and c18
+    // found that the panel row was the only reader `lastError` had — behind that
+    // very sheet. Writing the sentence is half the guarantee; see the c18 block.)
     expect(resume()).toMatch(/lastError = /)
   })
 })
@@ -1427,7 +1430,12 @@ describe('a mirror comes back when the link does — but not into a pocket', () 
     // `applicationState` is ambiguous: at willEnterForeground the app has not become
     // active yet, so a guard written against `.active` would block the very resume
     // that notification exists to trigger.
-    expect(codeOnly(resume())).not.toMatch(/applicationState/)
+    //
+    // Named token rather than the whole-file ratio: this body is four lines of code
+    // under a paragraph explaining each of them, and c18 added another paragraph. The
+    // ratio guard exists so an over-aggressive strip cannot make the `not.toMatch`
+    // below vacuous, and `startScreenStream` surviving proves the same thing.
+    expect(codeOnly(resume(), /startScreenStream/)).not.toMatch(/applicationState/)
   })
 
   it('a failed resume names the cause it actually had', () => {
@@ -1934,5 +1942,138 @@ describe('a paired board is dialled by the launch, not by a tap', () => {
     // file has been red for a wording change before.
     expect(codeOnly(panel, /Reconnect/))
       .toMatch(/Button\("[^"]+"\) \{ flipper\.start\(\) \}/)
+  })
+})
+
+/**
+ * 🐬📶 c18 — the reason reaches whoever is actually looking.
+ *
+ * `FlipperGateway.lastError` had thirteen writers and exactly ONE reader: the row in
+ * `FlipperBlePanel`. Every other Flipper surface is a SHEET, and a sheet covers that
+ * row — so for three cycles the app wrote diagnoses to a place the person reading
+ * them could not be.
+ *
+ * `resumeScreenStreamIfWanted` is the proof rather than the edge case. Its guard is
+ * `streamWanted, foreground`, which is precisely "a screen sheet is open on this
+ * phone right now" — so c10's sentence, written specifically so nobody would be left
+ * with a bare "Not streaming." about a mirror they left running, was the one line in
+ * the file that could never be read. Its own comment is how it hid: it said "the
+ * panel just says 'Not streaming.'" while that string lives in FlipperScreenSheet,
+ * one surface over. A comment naming the wrong surface, again (c15, c16, c17).
+ *
+ * Two more paths, both reachable rather than theoretical: c12's Bluetooth-off from
+ * Control Centre with the mirror open, and the pairing sheet — which had no error
+ * channel at all, so a phone with its radio off sat spinning "Looking…" for as long
+ * as the user was willing to watch it, while the sentence explaining why sat behind
+ * the sheet. c13's footer then sent them to the FLIPPER's Bluetooth setting, which is
+ * the wrong device.
+ *
+ * So: one view renders the link's problem, every surface mounts it, and a claim about
+ * the radio is gated on the flag the radio sets. Same person, same phone, same words
+ * — the inverse of c17, where the two readers were genuinely different people and had
+ * to be told different things.
+ */
+describe('a link problem is rendered where the user is looking, not where it was written', () => {
+  const surface = (name: string) => swiftBody(panel, `struct ${name}: View {`)
+  const resume = () => swiftBody(gateway, 'func resumeScreenStreamIfWanted(')
+  const pairing = () => surface('FlipperPairingSheet')
+
+  /**
+   * Every `Flipper*: View` in the panel file, so a surface added later cannot
+   * quietly skip the shared line.
+   *
+   * The two exemptions are named, not pattern-matched, and that is the point: a
+   * fifth struct reds this list and forces a decision about it.
+   */
+  const SURFACES = () => {
+    const all = Array.from(panel.matchAll(/^(?:private )?struct (Flipper\w+): View \{/gm), m => m[1])
+    expect(all.length, 'no Flipper views found — the test is reading the wrong file')
+      .toBeGreaterThan(3)
+    // FlipperLinkProblem IS the shared line; FlipperKeyButton is one key, and a key
+    // is not somewhere a link failure can be reported.
+    const exempt = ['FlipperLinkProblem', 'FlipperKeyButton']
+    expect(all.filter(n => exempt.includes(n)).sort(), 'an exempt view was renamed or removed')
+      .toEqual([...exempt].sort())
+    return all.filter(n => !exempt.includes(n))
+  }
+
+  it('the link problem has exactly one reader in the whole app, and it is a view', () => {
+    // Counted, not spelled: the defect was not a missing `if let` somewhere, it was
+    // thirteen writers pointed at one row. A second private read would be the same
+    // bug growing back — a surface with its own opinion about when to show it.
+    const reads = codeOnly(panel, /lastError/).match(/lastError/g) ?? []
+    expect(reads.length, 'lastError is read in more than one place in this file').toBe(1)
+    // The location, not the binding's name: this pin bans a second reader, and a
+    // rename inside the shared view is not one.
+    expect(codeOnly(surface('FlipperLinkProblem'), /lastError/), 'the reader is not the shared view')
+      .toMatch(/flipper\.lastError/)
+  })
+
+  it('every surface that can be the one on screen mounts it', () => {
+    for (const name of SURFACES()) {
+      expect(codeOnly(surface(name), /FlipperLinkProblem/),
+             `${name} can be open with the link broken and says nothing about it`)
+        .toMatch(/FlipperLinkProblem\(\)/)
+    }
+  })
+
+  it("the resume's diagnosis is read by the only surface that can be open when it runs", () => {
+    // The two halves of one guarantee, in two files. c10 pinned the write; a write
+    // whose reader is behind a modal is not a diagnosis, it is a log line.
+    const guard = codeOnly(resume(), /guard/)
+    expect(guard).toMatch(/guard[^\n]*\bstreamWanted\b/)
+    expect(guard).toMatch(/guard[^\n]*\bforeground\b/)
+    expect(codeOnly(resume(), /lastError/)).toMatch(/lastError = /)
+    expect(codeOnly(surface('FlipperScreenSheet'), /FlipperLinkProblem/))
+      .toMatch(/FlipperLinkProblem\(\)/)
+  })
+
+  it('the write site names the surface that reads it, not the row behind it', () => {
+    // A prose pin, because a stale comment is exactly the class no behavioural test
+    // can see — and this one was load-bearing: it is why three cycles of eyes read
+    // past a sentence with no reader. Deliberately NOT codeOnly: the comment is the
+    // subject here.
+    const body = resume()
+    expect(body, 'the resume no longer names the surface its sentence has to reach')
+      .toMatch(/FlipperScreenSheet/)
+    expect(body, 'the comment is back to naming the panel for a string in the sheet')
+      .not.toMatch(/the panel just says/)
+  })
+
+  it('a spinner and the word "Looking" are claims about the radio, so they read its flag', () => {
+    // With Bluetooth off, `startScan()` builds the central and `beginScanIfPossible()`
+    // returns at its `.poweredOn` guard: nothing is scanning, and this row used to
+    // insist otherwise. Every line that makes the claim is checked, not the one
+    // spelling that was there when this was written.
+    const body = codeOnly(pairing(), /Looking/)
+    const claims = body.split('\n').filter(l => /Looking|ProgressView/.test(l))
+    expect(claims.length, 'the pairing sheet no longer claims a scan — re-read this test')
+      .toBeGreaterThan(1)
+    for (const line of claims) {
+      expect(line, `"${line.trim()}" claims the radio is scanning without asking it`)
+        .toMatch(/flipper\.scanning/)
+    }
+  })
+
+  it('and that flag is the radio\'s own, set past the power and foreground guards', () => {
+    // What makes the UI claim mean anything, and it is a fact in a different file
+    // from the view that leans on it. Set before the guard, `scanning` would be a
+    // synonym for "a sheet is open" — which is what "Looking…" already was.
+    const begin = codeOnly(swiftBody(gateway, 'private func beginScanIfPossible() {'), /scanning = true/)
+    expect(begin).toMatch(/guard foreground[^\n]*poweredOn[^\n]*else \{ return \}/)
+    expect(begin.indexOf('else { return }'), 'scanning is set before the guard that justifies it')
+      .toBeLessThan(begin.indexOf('scanning = true'))
+  })
+
+  it('no surface keeps its own copy of a sentence the gateway owns', () => {
+    // Hazard 21/22, one rail over: share the STORE, never the words. A copy in a
+    // view drifts from the gateway's silently, and the drift shows up as two
+    // different explanations of one radio.
+    const sentences = Array.from(gateway.matchAll(/lastError = "([^"\\]{16,})"/g), m => m[1])
+    expect(sentences.length, 'no gateway sentences found — the extraction is broken')
+      .toBeGreaterThan(2)
+    for (const s of sentences) {
+      expect(panel, `a view hardcodes the gateway's "${s.slice(0, 32)}…"`).not.toContain(s)
+    }
   })
 })

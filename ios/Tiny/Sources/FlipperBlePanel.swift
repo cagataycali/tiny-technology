@@ -50,10 +50,9 @@ struct FlipperBlePanel: View {
                 Text(n).font(.caption2).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let e = flipper.lastError {
-                Text(e).font(.caption2).foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            // `note` is what the button this row owns just did; the link's own
+            // problem belongs to every surface, so it comes from the shared view.
+            FlipperLinkProblem()
         }
         .devicePanel()
         .sheet(isPresented: $showPairing) { FlipperPairingSheet() }
@@ -141,6 +140,35 @@ struct FlipperBlePanel: View {
     }
 }
 
+/// Why the Flipper link is unhappy, wherever the user happens to be looking.
+///
+/// ⚠️ `FlipperGateway.lastError` has thirteen writers and used to have exactly ONE
+/// reader: the row in `FlipperBlePanel` above. Every other Flipper surface is a
+/// SHEET that covers that row — so a sentence written while one was open could not
+/// be read by the person it was written for.
+///
+/// `resumeScreenStreamIfWanted` is the proof, not the edge case. Its guard is
+/// `streamWanted, foreground`, which is precisely "a screen sheet is open on this
+/// phone right now" — so the one diagnosis in the gateway written specifically to
+/// stop the user being left with a bare "Not streaming." was the one sentence in
+/// the app that could never be seen. Bluetooth switched off from Control Centre
+/// with the mirror open, and a pairing scan that cannot start, are the same shape.
+///
+/// So the sentence lives in a view rather than in a row, and each surface mounts
+/// it. All of these readers are the same person holding the same phone, so they get
+/// the same words — unlike the relay, whose reader is somewhere else entirely and
+/// which keeps its own thrown-error channel for that reason.
+struct FlipperLinkProblem: View {
+    @ObservedObject private var flipper = FlipperGateway.shared
+
+    var body: some View {
+        if let e = flipper.lastError {
+            Text(e).font(.caption2).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
 /// The scan list. Foreground-only and short-lived by design.
 struct FlipperPairingSheet: View {
     @ObservedObject private var flipper = FlipperGateway.shared
@@ -164,11 +192,24 @@ struct FlipperPairingSheet: View {
                         }
                     }
                     if flipper.found.isEmpty {
+                        // ⚠️ A spinner and the word "Looking…" are a claim about the
+                        // RADIO, so they are gated on the flag the radio itself sets.
+                        // With Bluetooth off this row used to spin "Looking…" for as
+                        // long as the user was willing to watch: `startScan()` builds
+                        // the central, `beginScanIfPossible()` returns at its
+                        // `.poweredOn` guard, and nothing here ever looked at anything.
+                        // The reason was already written down — to the panel row behind
+                        // this sheet, which is why the line below is here too.
                         HStack(spacing: 8) {
-                            ProgressView().controlSize(.mini)
-                            Text("Looking…").foregroundStyle(.secondary)
+                            if flipper.scanning { ProgressView().controlSize(.mini) }
+                            Text(flipper.scanning ? "Looking…" : "Not scanning.")
+                                .foregroundStyle(.secondary)
                         }
                     }
+                    // Outside the isEmpty branch: a board found before Bluetooth went
+                    // away leaves a stale row standing, and that is when the reason
+                    // matters most.
+                    FlipperLinkProblem()
                 } header: {
                     Text("Flippers nearby")
                 } footer: {
@@ -236,6 +277,9 @@ struct FlipperFilesSheet: View {
                 if let e = error {
                     Text(e).font(.caption).foregroundStyle(.orange)
                 }
+                // Both, not either: the thrown error says the listing failed, this
+                // says the link is down and which switch turned it off.
+                FlipperLinkProblem()
                 if let p = preview {
                     Section(p.name) {
                         Text(p.body).font(.caption2.monospaced())
@@ -328,6 +372,11 @@ struct FlipperScreenSheet: View {
         NavigationStack {
             VStack(spacing: 16) {
                 screen
+                // Directly under the mirror, because that is what it explains — and
+                // above the d-pad, because a link that cannot carry frames cannot
+                // carry a keypress either. `error` below is the other channel: what
+                // THIS sheet's last request did, rather than what the link is doing.
+                FlipperLinkProblem()
                 dpad
                 Text("A press here is a press on the board — including the ones that transmit.")
                     .font(.caption2).foregroundStyle(.secondary)
