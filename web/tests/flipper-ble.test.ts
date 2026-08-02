@@ -4,7 +4,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   FLIPPER_CAP, FLIPPER_BLE_CAP, pickFlipperHost, parseCaps, type FlipperHost,
-  listenBudget, filesWait, FILES_WAIT_S, STATUS_WAIT_S, BLE_ROUND_TRIP_S,
+  listenBudget, filesWait, statusWait, makeFlipperStatusTool,
+  FILES_WAIT_S, STATUS_WAIT_S, BLE_ROUND_TRIP_S,
 } from '../lib/chat/tools/flipper'
 import { DEVICE_LABELS, capabilitySummary } from '../lib/chat/prompt'
 
@@ -877,7 +878,10 @@ describe('a status reading never claims to be newer than it is', () => {
     const budget = Number(gateway.match(/relayStatusBudgetS: TimeInterval = (\d+)/)![1])
     const wait = Number(backend.match(/export const STATUS_WAIT_S = (\d+)/)![1])
     // The backend names its own number now, and the tool uses that name — a 45
-    // edited to 20 there must not leave this pin passing against a literal.
+    // edited to 20 there must not leave this pin passing against a literal. The
+    // call site reaches it through `statusWait`, which clamps it to a scheduled
+    // job's deadline; the ceiling itself is still what the wait is derived from.
+    expect(backend).toMatch(/^\s+statusWait\(budgetS\),$/m)
     expect(backend).toMatch(/^\s+STATUS_WAIT_S,$/m)
     expect(backend).not.toMatch(/flipperInvoke\([\s\S]{0,400}?\n\s+45,/)
     // Two relay hops of up to ~5s each, plus the phone's own poll interval:
@@ -987,6 +991,145 @@ describe('a listing answers inside the wait, and a timeout admits how long it wa
     // A clamped job budget can still fall under it — that is the case the honest
     // message exists for, so prove it is reachable rather than theoretical.
     expect(filesWait(25)).toBeLessThan(BLE_ROUND_TRIP_S)
+  })
+})
+
+/**
+ * 🐬🌙 The rail this feature was built for: 3am, nobody watching.
+ *
+ * A scheduled job is the one caller that CANNOT have a cable — the whole reason
+ * the BLE rail exists is that the machine the Flipper was last plugged into is
+ * asleep while the board sits in a bag next to the phone that is bonded to it.
+ * Two things were wrong about that caller, and neither failed a test:
+ *
+ *   1. flipper_status took no job budget. It reads like a cheap lookup and is
+ *      not — it posts a relay envelope and polls — so it sat for a flat 45s of
+ *      the job's 50 and `agent.cancel()` fired before the job could report the
+ *      unreachable it had just established. Every other hardware-waiting tool in
+ *      that roster takes JOB_DEADLINE_S, including `makeNiclaStatusTool`, the
+ *      same role on the other board; the roster even writes the rule down two
+ *      lines above ("read-only, so no budget to clamp — both tools hit the
+ *      registry and the event ring, never the board"). This was the exception.
+ *   2. the job's system prompt said the Flipper is "reachable only while plugged
+ *      into a machine running the tiny CLI". Chat learns the truth from data —
+ *      the live device roster turns a `flipper_ble` heartbeat into a prompt line
+ *      — but a job builds no roster, so that sentence is ALL it is told about the
+ *      topology, and it outranks flipper_status's own schema, which has said "or
+ *      which phone holds it over Bluetooth" since the day the rail shipped.
+ */
+describe('a scheduled job can reach the Flipper it was built to reach, and survive asking', () => {
+  const jobRun = read('app/api/job-run/route.ts')
+  // Scraped, not imported: importing the route drags in the whole Agent SDK. The
+  // `!` is the point — a renamed constant throws here rather than reading as 0.
+  const JOB_DEADLINE_S = Number(jobRun.match(/JOB_DEADLINE_S = (\d+)/)![1])
+
+  it('every flipper tool that waits on hardware takes the job deadline', () => {
+    for (const f of ['makeFlipperStatusTool', 'makeFlipperListenTool', 'makeFlipperFilesTool']) {
+      expect(jobRun, `${f} polls a relay and must be clamped to the job`)
+        .toMatch(new RegExp(`${f}\\(userId \\|\\| null, JOB_DEADLINE_S\\)`))
+    }
+    // And the un-budgeted form must be gone, not merely joined: a second call
+    // without the deadline is how this drifts back.
+    expect(codeOnly(jobRun, /makeFlipperStatusTool/), 'a flipper factory with no budget')
+      .not.toMatch(/makeFlipper\w+Tool\(userId \|\| null\)/)
+    // The deadline is real: it cancels the agent, so overrunning it loses the
+    // answer entirely rather than returning it late.
+    expect(jobRun).toMatch(/JOB_DEADLINE_S \* 1000/)
+    expect(jobRun).toMatch(/agent\.cancel\(\)/)
+  })
+
+  it('the clamp is one function, and it bites on a real job', () => {
+    // Interactively, nothing is taken away.
+    expect(statusWait()).toBe(STATUS_WAIT_S)
+    expect(statusWait(300)).toBe(STATUS_WAIT_S)
+    // In a job it must actually shorten the wait, or passing the budget is theatre.
+    expect(statusWait(JOB_DEADLINE_S)).toBeLessThan(STATUS_WAIT_S)
+    // Same clamp for both rails — one expression, parameterised by the ceiling.
+    // Two copies are two things to keep in step, and the forgotten one is the one
+    // nobody is looking at.
+    const clamps = codeOnly(backend, /clampToJob/).match(/Math\.max\(15, budgetS - 8\)/g) ?? []
+    expect(clamps.length, 'the clamp arithmetic is written more than once').toBe(1)
+    expect(statusWait(25)).toBe(filesWait(25))
+    // …and a clamped status read CAN fall under the round trip, which is the case
+    // the honest "I left early" message exists for.
+    expect(statusWait(25)).toBeLessThan(BLE_ROUND_TRIP_S)
+  })
+
+  it('the short-timeout message names the caller\'s own ceiling, not a listing\'s', () => {
+    // `flipperInvoke` is shared by three tools and used to end this sentence with
+    // FILES_WAIT_S — a listing's number, printed to whoever timed out. Both
+    // ceilings are 45 today, so it was right by coincidence; a coincidence is not
+    // a construction, and the next edit to either constant is the bug report.
+    const short = backend.slice(backend.indexOf('not long enough to conclude anything'))
+    expect(short.slice(0, 500)).toMatch(/\$\{fullS\}s is available/)
+    expect(codeOnly(backend, /fullS/), 'a shared sentence naming one tool\'s constant')
+      .not.toMatch(/\$\{FILES_WAIT_S\}s is available/)
+    // Each call site hands over its clamped wait and its OWN unclamped ceiling,
+    // adjacent, so a swap is visible at the one place it could happen.
+    const at = backend.indexOf('makeFlipperListenTool')
+    const status = backend.slice(backend.indexOf('makeFlipperStatusTool'), at)
+    const files = backend.slice(backend.indexOf('makeFlipperFilesTool'))
+    expect(status).toMatch(/statusWait\(budgetS\),\n\s+STATUS_WAIT_S,/)
+    expect(files).toMatch(/filesWait\(budgetS\),\n\s+FILES_WAIT_S,/)
+    expect(status, 'the status tool must not name a listing ceiling').not.toMatch(/FILES_WAIT_S/)
+    expect(files, 'the listing must not name a status ceiling').not.toMatch(/STATUS_WAIT_S/)
+  })
+
+  it('the job prompt names BOTH routes to the board, and what Bluetooth cannot do', () => {
+    const note = jobRun.slice(
+      jobRun.indexOf('const capabilityNote'), jobRun.indexOf('const agent = new Agent'))
+    expect(note.length, 'the capability note was restructured').toBeGreaterThan(200)
+    // codeOnly first: the comment above the line QUOTES the old wording to explain
+    // why it was wrong, and both a `find` and a `not.toMatch` on the raw note
+    // would read that confession as the crime.
+    const lines = codeOnly(note, /flipper_status/).split('\n').filter(l => l.includes('flipper_status'))
+    expect(lines.length, 'the flipper sentence must be one line to assert about').toBe(1)
+    const line = lines[0]
+    expect(line, 'the cable is not the only route, and a job runs when it is asleep')
+      .not.toMatch(/reachable only while plugged/)
+    expect(line).toMatch(/Bluetooth/)
+    expect(line).toMatch(/phone/)
+    // It must also say what BLE cannot do, or an unattended job will schedule a
+    // capture the phone can never perform and read the refusal as a dead board.
+    expect(line).toMatch(/needs the cable/)
+    // "Unreachable" must still be licensed as an outcome — a job that treats it
+    // as a failure retries a sleeping mac forever.
+    expect(line).toMatch(/not a failure/)
+    // ⚠️ `/needs the cable/` above is a PREFIX of the opposite claim: "Everything
+    // needs the cable." satisfies it, and satisfies every assertion in this test,
+    // while telling an unattended job the phone is useless for the two reads it is
+    // actually good at. Measured — that mutant survived this whole suite. So pin
+    // the caveat's SCOPE (which actions it covers) and the capability it leaves,
+    // rather than the existence of a caveat.
+    for (const capture of ['IR', 'Sub-GHz', 'RFID', 'iButton']) {
+      expect(line, `${capture} is unnamed, so the cable caveat has no scope`).toContain(capture)
+    }
+    expect(line, 'nothing tells the job the reads it actually does work over Bluetooth')
+      .toMatch(/Bluetooth[^.]*(status|browsing|reading)[^.]*work/i)
+    // And the instruction, not only the topology: a job that ASSUMES the cable
+    // never asks, which is the same denial as the old sentence reached by telling
+    // rather than by omitting. Both halves are asserted because either alone is
+    // walk-past-able — "the cable is the route to assume" keeps the word ask out
+    // of it, and an added "ask flipper_status" does not remove an assume.
+    // The real sentence RULES OUT assuming ("rather than assuming the cable"), so a
+    // flat ban on the phrase reds the correct text — the clause has to be read, not
+    // just found. Every assume-the-cable clause must carry its negation.
+    for (const clause of line.match(/[^.]*assum\w*\s+(?:the\s+)?cable[^.]*/gi) ?? []) {
+      expect(clause, 'the prompt instructs assuming the cable instead of ruling it out')
+        .toMatch(/rather than|instead of|\bnot\b|never/i)
+    }
+    expect(line.toLowerCase(), 'nothing tells the job to ASK which route answered')
+      .toMatch(/ask flipper_status/)
+  })
+
+  it('the prompt and the tool schema agree, in the one context window that holds both', () => {
+    // A system prompt outranks a tool description. When they disagree the model
+    // believes the prompt, so a schema that has always been right is no defence.
+    const desc = (makeFlipperStatusTool('u1') as any).toolSpec.description
+    expect(desc).toMatch(/which phone holds it over Bluetooth/)
+    const note = jobRun.slice(
+      jobRun.indexOf('const capabilityNote'), jobRun.indexOf('const agent = new Agent'))
+    expect(codeOnly(note, /flipper_status/)).toMatch(/Bluetooth/)
   })
 })
 

@@ -93,7 +93,7 @@ export type FlipperHost = {
 export const MAX_LISTEN_S = 30
 
 /**
- * How long flipper_status waits for the host's answer.
+ * How long flipper_status waits for the host's answer, with all the time it can get.
  *
  * Named because the other side has to fit inside it. A phone answering over BLE
  * reads firmware, battery and free space, and those three requests' own ceilings
@@ -101,6 +101,10 @@ export const MAX_LISTEN_S = 30
  * whole read well under this number. Left unbounded, a slow board produced an
  * answer nobody was still waiting for: this tool reported "no answer within 45s"
  * while the phone was mid-request, which reads as a dead Flipper.
+ *
+ * ⚠️ A CEILING, not the wait — see `statusWait`. This is the interactive number;
+ * a scheduled job gets less, because a job that spends 45 of its 50 seconds here
+ * is killed before it can report what it learned.
  */
 export const STATUS_WAIT_S = 45
 
@@ -132,16 +136,46 @@ export const FILES_WAIT_S = 45
 export const BLE_ROUND_TRIP_S = 35
 
 /**
- * The wait a listing actually gets, clamped by a scheduled job's remaining time.
+ * A tool's ceiling, clamped by a scheduled job's remaining time.
  *
  * Jobs die at JOB_DEADLINE_S, so a job with 25s left must not sit for 45. But the
  * clamp is now visible to the caller: `flipperInvoke` compares the wait it was
  * given against `BLE_ROUND_TRIP_S` and says which of the two things happened,
  * instead of asserting a cause it cannot see from here.
+ *
+ * ONE clamp, parameterised by the ceiling, rather than a copy per tool: two
+ * copies of `Math.max(15, budgetS - 8)` are two things to keep in step, and the
+ * one that gets forgotten is the one nobody is looking at.
  */
+function clampToJob(ceilingS: number, budgetS?: number): number {
+  if (!budgetS) return ceilingS
+  return Math.min(ceilingS, Math.max(15, budgetS - 8))
+}
+
+/** The wait a listing actually gets. */
 export function filesWait(budgetS?: number): number {
-  if (!budgetS) return FILES_WAIT_S
-  return Math.min(FILES_WAIT_S, Math.max(15, budgetS - 8))
+  return clampToJob(FILES_WAIT_S, budgetS)
+}
+
+/**
+ * The wait a status read actually gets.
+ *
+ * This tool had NO budget parameter at all, alone among the flipper and nicla
+ * tools that wait on hardware — `makeNiclaStatusTool` takes one, and the two
+ * nicla_voice reads skip it for the stated reason that they "hit the registry
+ * and the event ring, never the board". flipper_status is not that: it posts a
+ * relay envelope and polls for an answer, so it was the exception to a rule the
+ * job roster writes down one line above it.
+ *
+ * What that cost: its own description says "use this before any other flipper_*
+ * tool", so a scheduled job does exactly that, and a status read against a phone
+ * that is not answering sat for a flat 45s out of the job's 50 — past the point
+ * where `agent.cancel()` fires. The job then reported NOTHING, not even the
+ * unreachable it had established, and the clamped flipper_files call that would
+ * have worked never ran.
+ */
+export function statusWait(budgetS?: number): number {
+  return clampToJob(STATUS_WAIT_S, budgetS)
 }
 
 /** Parse the worker's capabilities column: JSON array string, array, or null. */
@@ -221,11 +255,18 @@ export function pickFlipperHost(
  *
  * Pass `ble: null` for an action the BLE transport genuinely cannot perform; the
  * routing then refuses in words instead of asking a phone to fake it.
+ *
+ * `fullS` is the caller's UNCLAMPED ceiling, and it exists so the short-timeout
+ * message can name the wait the user would get elsewhere. It used to name
+ * `FILES_WAIT_S` — a listing's ceiling, in a sentence three tools print. Both
+ * ceilings are 45 today, so the number was right by coincidence rather than by
+ * construction, which is the same bug as a wrong number with better luck.
  */
 async function flipperInvoke(
   userId: string,
   instruction: string,
   waitS: number,
+  fullS: number,
   ble: { action: string; args?: Record<string, unknown> } | null,
 ): Promise<{ result?: string; error?: string; offline?: boolean; transport?: 'cable' | 'ble'; host?: string }> {
   const hosts = await resolveFlipperHosts(userId)
@@ -291,7 +332,7 @@ async function flipperInvoke(
     host: host.name,
     error: host.transport === 'ble'
       ? (waitS < BLE_ROUND_TRIP_S
-        ? `Stopped waiting after ${waitS}s, which is not long enough to conclude anything: an answer over Bluetooth needs up to ${BLE_ROUND_TRIP_S}s, because "${host.name}" polls for work every 5s (15s in Low Power Mode) and only then starts asking the Flipper. This turn didn't have the time. Ask again from an interactive chat, where the full ${FILES_WAIT_S}s is available.`
+        ? `Stopped waiting after ${waitS}s, which is not long enough to conclude anything: an answer over Bluetooth needs up to ${BLE_ROUND_TRIP_S}s, because "${host.name}" polls for work every 5s (15s in Low Power Mode) and only then starts asking the Flipper. This turn didn't have the time. Ask again from an interactive chat, where the full ${fullS}s is available.`
         : `No answer within ${waitS}s from "${host.name}". The phone is heartbeating and had time to reply, so the Flipper itself is the quiet one — it may have moved out of Bluetooth range of the phone, its Bluetooth may be switched off in its own settings, or an app open on its screen may be holding the hardware.`)
       : `No answer within ${waitS}s. A capture holds the device for its whole window, so the host may still be listening — ask again, or read the outcome with use_device.`,
   }
@@ -304,12 +345,10 @@ async function flipperInvoke(
  * listen alone would outlive the budget the tool says so instead of timing out.
  */
 export function listenBudget(listenS: number, budgetS?: number): number {
-  const need = listenS + 20
-  if (!budgetS) return need
-  return Math.min(need, Math.max(15, budgetS - 8))
+  return clampToJob(listenS + 20, budgetS)
 }
 
-export const makeFlipperStatusTool = (userId: string | null | undefined) => tool({
+export const makeFlipperStatusTool = (userId: string | null | undefined, budgetS?: number) => tool({
   name: 'flipper_status',
   description: "Check whether the user's Flipper Zero is reachable: which machine it is plugged into (or which phone holds it over Bluetooth), whether that host is online right now, and the Flipper's firmware and battery. Use this before any other flipper_* tool, and to answer 'is my Flipper connected?'. Cheap and fast.",
   inputSchema: z.object({}),
@@ -335,6 +374,7 @@ export const makeFlipperStatusTool = (userId: string | null | undefined) => tool
     const r = await flipperInvoke(
       userId,
       'Run use_flipper with action "info", then use_flipper with action "power_info". Report the firmware version, hardware model, battery charge level and charge state. Do not run any other action.',
+      statusWait(budgetS),
       STATUS_WAIT_S,
       { action: 'status' },
     )
@@ -393,6 +433,7 @@ This BLOCKS for the whole listen window and needs a human to present the card or
       userId,
       `Run use_flipper with ${action}. Report its output verbatim, including the case where nothing was received. Do not run any other action and do not transmit anything.`,
       wait,
+      listenBudget(secs),
       // 🚫 CABLE ONLY, forever. Not an unimplemented feature — the Flipper's BLE
       // RPC has no receive command of any kind, so a phone asked to capture
       // could only ever answer "nothing received", which is exactly what a
@@ -419,6 +460,7 @@ export const makeFlipperFilesTool = (userId: string | null | undefined, budgetS?
       userId,
       `Run use_flipper with action "ls" and path "${folder}". Report the listing verbatim. Do not read, send, receive or delete any file, and do not run any other action.`,
       filesWait(budgetS),
+      FILES_WAIT_S,
       // Storage.List is the one place BLE is genuinely nicer than the CLI: sizes
       // and md5s arrive as protobuf fields, so nothing has to be parsed out of a
       // text table.

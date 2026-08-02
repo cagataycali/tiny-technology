@@ -316,6 +316,24 @@ describe('roster wiring', () => {
     // say so, a "check my Flipper hourly" job burns its deadline on empty captures.
     expect(note).toMatch(/flipper_listen/)
     expect(note).toMatch(/unattended/i)
+    // ⚠️ This test is named for the tools' "catch" and asserted only that they
+    // were mentioned, so it passed for the whole life of a sentence claiming the
+    // board is "reachable only while plugged into a machine running the tiny
+    // CLI". A job has no device roster — that sentence is all it is told about
+    // the topology — and an unattended run is precisely when the cabled machine
+    // is asleep and the phone is the route that works. The BLE rail's own reason
+    // to exist was denied in the prompt of its most important caller.
+    // Full treatment in tests/flipper-ble.test.ts; here so the roster suite can
+    // never again call this covered.
+    //
+    // Whole-line comments stripped first: the comment above that sentence quotes
+    // the old wording in order to explain why it was wrong, and a raw match reads
+    // the confession as the crime — which teaches you to delete the explanation.
+    const prose = note.replace(/^[ \t]*\/\/.*$/gm, '')
+    expect(prose, 'the strip ate the sentence — check the regex').toMatch(/flipper_status/)
+    expect(prose, 'the Flipper has two routes and a job runs when the cable is asleep')
+      .not.toMatch(/reachable only while plugged/)
+    expect(prose).toMatch(/Bluetooth/)
   })
 
   it('each device roster still filters on its OWN identity', () => {
