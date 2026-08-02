@@ -40,7 +40,7 @@ object Screenshot {
                     "error",
                     "Screen capture started but no frame arrived — try again.",
                 ))
-                app.emitScreenshot(toolUseId, "")
+                app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.FAILED)
                 return
             }
             val jpeg = encode(bitmap, maxSide = 1600, quality = 80)
@@ -48,7 +48,7 @@ object Screenshot {
                 postResult(app, toolUseId, JSONObject().put("ok", false).put(
                     "error", "Captured the screen but couldn't encode the image.",
                 ))
-                app.emitScreenshot(toolUseId, "")
+                app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.FAILED)
                 return
             }
             val b64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
@@ -61,7 +61,7 @@ object Screenshot {
                 postResult(app, toolUseId, JSONObject().put("ok", false).put(
                     "error", "Screen was captured but the upload failed: ${e.message}",
                 ))
-                app.emitScreenshot(toolUseId, "")
+                app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.FAILED)
                 return
             }
             val url = up.optString("url").takeIf { it.isNotEmpty() }
@@ -70,7 +70,7 @@ object Screenshot {
                 postResult(app, toolUseId, JSONObject().put("ok", false).put(
                     "error", "Screen was captured but the upload failed: $why",
                 ))
-                app.emitScreenshot(toolUseId, "")
+                app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.FAILED)
                 return
             }
             postResult(app, toolUseId, JSONObject().put("ok", true).put("url", url).put("format", "jpeg"))
@@ -82,7 +82,7 @@ object Screenshot {
             postResult(app, toolUseId, JSONObject().put("ok", false).put(
                 "error", t.message ?: "screen capture failed on the device",
             ))
-            app.emitScreenshot(toolUseId, "")
+            app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.FAILED)
         }
     }
 
@@ -93,9 +93,10 @@ object Screenshot {
      */
     suspend fun postDenied(app: TinyApp, toolUseId: String) {
         postResult(app, toolUseId, JSONObject().put("denied", true))
-        // Signal in-process waiters too (voice bridge): "" = denied/failed —
-        // without this a declined capture left the call's tool turn hanging.
-        app.emitScreenshot(toolUseId, "")
+        // Signal in-process waiters too (voice bridge) — without this a declined
+        // capture left the call's tool turn hanging. The outcome is explicit: an
+        // empty url alone can't distinguish "no" from "expired" or "broke".
+        app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.DENIED)
     }
 
     /**
@@ -114,8 +115,10 @@ object Screenshot {
                 .put("error", "the capture request expired before the user answered — nothing was captured"),
         )
         // Same in-process release as a decline, or a voice call's tool turn hangs
-        // for the full timeout on a capture that is never coming.
-        app.emitScreenshot(toolUseId, "")
+        // for the full timeout on a capture that is never coming — but tagged
+        // EXPIRED, never DENIED. The voice bridge used to read the empty url as a
+        // decline and tell the model the user refused; they didn't.
+        app.emitScreenshot(toolUseId, "", TinyApp.ShotOutcome.EXPIRED)
     }
 
     private suspend fun postResult(app: TinyApp, toolUseId: String, payload: JSONObject) {

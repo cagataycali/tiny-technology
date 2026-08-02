@@ -94,11 +94,33 @@ class TinyApp : Application() {
      */
     var memoryHarness: Boolean = false
 
-    data class ScreenshotResult(val toolUseId: String, val url: String)
+    /**
+     * The outcome of one screenshot round-trip, for in-process waiters (the voice
+     * call's tool bridge).
+     *
+     * ⚠️ [outcome] exists because an empty [url] cannot say WHY. It used to be the
+     * only signal — "" meant denied-or-failed-or-expired — and the voice bridge
+     * read every empty url as `{denied:true}`, telling the model the user said no
+     * when they had declined nothing (a capture that failed to encode; a grant
+     * that arrived after its request expired). That is the confabulation the
+     * device audit exists to stop, so the reason travels WITH the signal now
+     * instead of being inferred from the absence of one.
+     */
+    enum class ShotOutcome { OK, DENIED, EXPIRED, FAILED }
+    data class ScreenshotResult(
+        val toolUseId: String,
+        val url: String,
+        val outcome: ShotOutcome = if (url.isEmpty()) ShotOutcome.FAILED else ShotOutcome.OK,
+    )
     private val _screenshots = MutableSharedFlow<ScreenshotResult>(replay = 1, extraBufferCapacity = 4)
     val screenshots: SharedFlow<ScreenshotResult> = _screenshots.asSharedFlow()
-    fun emitScreenshot(toolUseId: String, url: String) {
-        _screenshots.tryEmit(ScreenshotResult(toolUseId, url))
+    fun emitScreenshot(toolUseId: String, url: String, outcome: ShotOutcome? = null) {
+        _screenshots.tryEmit(
+            ScreenshotResult(
+                toolUseId, url,
+                outcome ?: if (url.isEmpty()) ShotOutcome.FAILED else ShotOutcome.OK,
+            ),
+        )
     }
 
     override fun onCreate() {

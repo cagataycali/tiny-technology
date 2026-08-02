@@ -238,6 +238,12 @@ final class Screenshot {
                     // so on the phone: silently doing nothing after an explicit
                     // "Allow" reads as the app being broken.
                     self.explainExpired(host: host, tiny: tiny)
+                    // …and tell the SERVER too, which this path used to skip
+                    // entirely: the poll may still have seconds left (this arm is
+                    // only reachable in the sliver where a tap races the deadline
+                    // below), and stranding it buys the user the 90s guess instead
+                    // of the actual reason. Invariant 3 — post on EVERY path.
+                    await self.postExpired(toolUseId: toolUseId, token: token)
                     return
                 }
                 _ = await self.run(toolUseId: toolUseId, token: token,
@@ -251,6 +257,26 @@ final class Screenshot {
                 await self.postDenied(toolUseId: toolUseId, token: token)
             }
         })
+        // ⏳ Close the window even if nobody touches the phone — the normal case
+        // for a remote ask. Until this existed the deadline was only read inside
+        // the Allow handler, so an unnoticed prompt posted NOTHING: the server
+        // polled its full 90s and then told the user, in one sentence, that they
+        // may have ignored the prompt or that capture may be unavailable or that
+        // the app may be backgrounded. It knew none of those. Now the phone says
+        // which one, while the poll is still listening (the window sits a
+        // deliveryGrace below it), and the prompt stops being live on screen.
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(Self.consentWindow))
+            // Still the same ask? A tap already dismissed it otherwise, and its
+            // outcome (allow/deny) is posted — re-posting would overwrite the truth.
+            guard alert.presentingViewController != nil else { return }
+            // Just dismiss — deliberately NO explainExpired here. That one answers
+            // "I tapped Allow and nothing happened"; for a prompt nobody touched
+            // there is nothing to explain, and a second modal on a pocketed phone
+            // would itself sit there forever, since IT has no deadline.
+            alert.dismiss(animated: true)
+            await self.postExpired(toolUseId: toolUseId, token: token)
+        }
         host.present(alert, animated: true)
         return true
     }
@@ -260,7 +286,11 @@ final class Screenshot {
     /// would be the same species of confabulation the device audit exists to
     /// stop. Nobody is listening by then either way — the distinction is about
     /// telling the truth locally, not about the wire.
-    enum ConsentOutcome { case allowed, denied, expired }
+    /// `abandoned` is the fourth: the requester went away before the user
+    /// answered (call hung up, tiny switched, turn stopped). Like `expired`
+    /// nothing was captured — but unlike `expired` the user never even got to
+    /// choose, so it must not be reported as a decision they made.
+    enum ConsentOutcome { case allowed, denied, expired, abandoned }
 
     /// How long the server callback waits for a result: `lib/chat/tools/platform.ts`
     /// loops 45× over `sleep(2s)` THEN check — so its checks land at t≈2,4,…,90,

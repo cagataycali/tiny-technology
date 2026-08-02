@@ -10,6 +10,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import technology.tiny.app.TinyApp
 
@@ -35,6 +37,10 @@ class ScreenshotConsentActivity : ComponentActivity() {
     private val launcher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        // The user answered, so the unattended-expiry timer must not also fire —
+        // it would post "expired" over a grant that is capturing, or over a
+        // decline, and the LAST write is what the poll reads.
+        deadline?.cancel()
         val toolUseId = intent?.getStringExtra(EXTRA_TOOL_USE_ID)
         if (toolUseId == null) { finish(); return@registerForActivityResult }
         val data = result.data
@@ -63,12 +69,16 @@ class ScreenshotConsentActivity : ComponentActivity() {
         finish()
     }
 
+    /** Fires when the window closes with the dialog still unanswered. */
+    private var deadline: Job? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val toolUseId = intent?.getStringExtra(EXTRA_TOOL_USE_ID)
         if (toolUseId == null) { finish(); return }
         val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         runCatching { launcher.launch(mgr.createScreenCaptureIntent()) }
+            .onSuccess { armDeadline(toolUseId) }
             .onFailure { t ->
                 Log.w(TAG, "couldn't open capture consent", t)
                 val app = applicationContext as TinyApp
@@ -79,6 +89,33 @@ class ScreenshotConsentActivity : ComponentActivity() {
                 }
                 finish()
             }
+    }
+
+    /**
+     * ⏳ Close the window without waiting for a finger.
+     *
+     * [isExpired] only ran INSIDE the result handler, i.e. only if the user ever
+     * answered. The system projection dialog survives a locked screen
+     * indefinitely, so the ordinary outcome of a relay ask — a phone in a pocket
+     * — posted nothing at all: the server polled its full 90s and then told the
+     * user it may have been ignored, or capture may be unavailable, or the app may
+     * have been backgrounded. It could not tell which. A voice call waited 120s
+     * and then said "capture timed out". Both are guesses about a thing the phone
+     * knew. Now the phone answers, in time to be heard.
+     *
+     * Deliberately NOT on `lifecycleScope`: this activity is transparent and
+     * finishes the moment the dialog is answered, and if the system destroys it
+     * while the dialog is still up then "expired, nothing captured" is precisely
+     * the truth to report — a lifecycle-bound timer would die exactly when it is
+     * most needed. The result handler cancels it, so a real answer always wins.
+     */
+    private fun armDeadline(toolUseId: String) {
+        val app = applicationContext as TinyApp
+        deadline = CoroutineScope(Dispatchers.IO).launch {
+            delay(CONSENT_WINDOW_MS)
+            runCatching { Screenshot.postExpired(app, toolUseId) }
+                .onFailure { Log.w(TAG, "deadline postExpired failed", it) }
+        }
     }
 
     /** True once the asking request can no longer receive a result. */

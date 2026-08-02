@@ -233,7 +233,15 @@ final class ChatModel: ObservableObject {
     /// to this and calls `resolveScreenshotConsent(_:)` on Allow/Don't allow.
     struct ScreenshotConsent: Identifiable { let id = UUID(); let reason: String }
     @Published var pendingScreenshot: ScreenshotConsent?
-    private var screenshotConsent: CheckedContinuation<Bool, Never>?
+    /// What the user tapped, or that the ask was called off before they did.
+    /// Not a Bool: "nobody is asking any more" must not arrive as "no", or it
+    /// gets reported as a decline the user never made.
+    private enum ConsentAnswer { case allow, deny, abandon, expire }
+    private var screenshotConsent: CheckedContinuation<ConsentAnswer, Never>?
+    /// Closes the window on its own (see `askScreenshotConsent`). Held so the
+    /// answered/abandoned paths can cancel it — otherwise it fires later and
+    /// dismisses the alert belonging to the NEXT capture.
+    private var screenshotDeadline: Task<Void, Never>?
 
     /// Publish the consent request and suspend until the user decides.
     ///
@@ -245,25 +253,91 @@ final class ChatModel: ObservableObject {
     /// was on screen at THAT moment for a request nobody was listening to any
     /// more, and stored it permanently. So the window is shared with the relay
     /// path rather than reasoned about twice.
+    ///
+    /// 🚪 A request also dies for reasons that have nothing to do with the clock:
+    /// the user hangs up the call, switches tiny, or hits ⏹ on the turn. The
+    /// alert survives all three (it is bound to `pendingScreenshot`, not to the
+    /// call or the stream), so an Allow tapped afterwards used to run ReplayKit,
+    /// upload the frame to R2 *permanently*, and answer a listener that was
+    /// already gone — the expiry bug with a different trigger. Cancelling the
+    /// ask is therefore explicit, and it is NOT a decline.
+    ///
+    /// ⏳ And the window CLOSES ITSELF. The deadline used to be read only inside
+    /// the Allow handler, i.e. only if a finger ever arrived — so the ordinary
+    /// case, a prompt nobody notices, expired on paper and hung in practice:
+    /// this continuation never resumed, the caller never returned, and NOTHING
+    /// was posted to the mailbox the server polls. The turn sat on "screenshot"
+    /// until the server gave up at 90s and guessed, out loud, between three
+    /// causes it couldn't tell apart. A deadline that requires a tap isn't a
+    /// deadline; the timer is what makes `expired` reachable at all.
     private func askScreenshotConsent(reason: String) async -> Screenshot.ConsentOutcome {
         // A stale continuation (shouldn't happen — captures are serialized by
-        // the round-trip) is declined so it can't leak.
-        screenshotConsent?.resume(returning: false)
-        screenshotConsent = nil
+        // the round-trip) is abandoned so it can't leak. Not `deny`: nobody
+        // refused it, and the old turn is the one being dropped. Routed through
+        // the same single resume path, or it re-enters via the alert binding.
+        abandonScreenshotConsent()
         let asked = Date()
-        let allowed = await withCheckedContinuation { cont in
-            screenshotConsent = cont
-            pendingScreenshot = ScreenshotConsent(reason: reason)
+        // ⏹ A cancelled stream task takes its consent prompt with it.
+        // withCheckedContinuation alone ignores cancellation, so stopping a turn
+        // left the alert up and armed — tapping Allow captured the screen for a
+        // turn the user had explicitly stopped.
+        let answer = await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                screenshotConsent = cont
+                pendingScreenshot = ScreenshotConsent(reason: reason)
+                // Same window the tap is judged against, so an unanswered prompt
+                // resolves at exactly the moment a late tap would stop counting.
+                screenshotDeadline = Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(Screenshot.consentWindow))
+                    guard !Task.isCancelled else { return }
+                    self.answerScreenshotConsent(.expire)
+                }
+            }
+        } onCancel: {
+            Task { @MainActor in self.abandonScreenshotConsent() }
         }
-        guard allowed else { return .denied }
-        return Screenshot.isConsentStillLive(asked) ? .allowed : .expired
+        switch answer {
+        case .deny: return .denied
+        case .abandon: return .abandoned
+        case .expire: return .expired
+        // Belt-and-braces: the timer resolves an unanswered prompt, but a tap
+        // racing it (or a suspended app whose Task.sleep ran long) is still
+        // judged against the clock rather than trusted for having arrived.
+        case .allow: return Screenshot.isConsentStillLive(asked) ? .allowed : .expired
+        }
     }
 
     /// The ChatView's alert calls this on Allow (true) / Don't Allow (false).
     func resolveScreenshotConsent(_ allow: Bool) {
-        pendingScreenshot = nil
-        screenshotConsent?.resume(returning: allow)
+        answerScreenshotConsent(allow ? .allow : .deny)
+    }
+
+    /// Call off a consent ask whose requester is gone (call ended, tiny
+    /// switched, turn stopped). Dismisses the alert so the user isn't left
+    /// answering a question nobody will hear, and unblocks the waiter with
+    /// `abandoned` — never `denied`.
+    func abandonScreenshotConsent() {
+        answerScreenshotConsent(.abandon)
+    }
+
+    /// The ONE place a consent continuation is resumed.
+    ///
+    /// ⚠️ Claim it BEFORE clearing `pendingScreenshot`, and never resume through
+    /// the stored property. Clearing it flips the alert's `isPresented` binding,
+    /// whose `set` calls `resolveScreenshotConsent(false)` on any dismissal —
+    /// including a programmatic one. Resuming first and reading the property
+    /// twice would either trap (a CheckedContinuation resumed twice is a runtime
+    /// crash) or turn an abandoned ask into a recorded decline, depending on when
+    /// SwiftUI happened to run. Claiming makes the second call a no-op.
+    private func answerScreenshotConsent(_ answer: ConsentAnswer) {
+        guard let cont = screenshotConsent else { return }
         screenshotConsent = nil
+        // The deadline outlives its own prompt otherwise, and fires into the NEXT
+        // capture's alert — dismissing a live question as expired.
+        screenshotDeadline?.cancel()
+        screenshotDeadline = nil
+        pendingScreenshot = nil
+        cont.resume(returning: answer)
     }
 
     /// In-flight streams keyed by their assistant bubble id (web
@@ -886,6 +960,12 @@ final class ChatModel: ObservableObject {
             // Allowed, but too late to be the screen that was asked about —
             // reported as its own outcome, never as a decline the user didn't make.
             return ["ok": false, "error": "the capture request expired before it was answered — nothing was captured"]
+        case .abandoned:
+            // The call ended (or switched tinys) while the prompt was up. This
+            // reply almost certainly goes nowhere — sendToolResult drops when the
+            // WS is closed — but it must still be honest for the case where the
+            // socket outlives the prompt.
+            return ["ok": false, "error": "the call ended before the user answered — nothing was captured"]
         case .allowed:
             break
         }
@@ -1138,6 +1218,13 @@ final class ChatModel: ObservableObject {
                             // moved on and the poll is over), and post the honest
                             // reason rather than a decline the user never gave.
                             await Screenshot.shared.postExpired(toolUseId: id, token: token)
+                        case .abandoned:
+                            // ⏹ The turn was stopped while the prompt was up.
+                            // Nothing to capture and nobody to tell: this task is
+                            // already cancelled, so posting would be work for a
+                            // reply the user cancelled. Capture nothing, say
+                            // nothing, and above all don't record a decline.
+                            break
                         }
                         activeTool = nil
                     case .metaTakePhoto(let id):
@@ -3439,6 +3526,10 @@ struct ChatView: View {
         call.onResponseDone = { [weak chat] in chat?.voiceAssistantDone() }
         call.onBargeIn = { [weak chat] in chat?.voiceAssistantDone() }
         call.onToolCall = { id, name, args in runVoiceTool(id: id, name: name, args: args) }
+        // Hanging up dismisses any consent prompt the call put up — the answer
+        // can no longer reach the model, and an Allow tapped after the WS closed
+        // would capture and permanently store a frame for nobody.
+        call.onEnded = { [weak chat] in chat?.abandonScreenshotConsent() }
         // Continuity rides into the session instructions — the voice agent
         // starts knowing what the chat agent knows (memories + recent turns).
         // Resolve the "tiny" default to the user's configured tiny the SAME

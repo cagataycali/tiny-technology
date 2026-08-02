@@ -454,6 +454,19 @@ export const makeGenerateImageTool = (userId: string | null | undefined) => tool
  * agent turn — getDisplayMedia needs a user gesture) would strand the
  * callback until timeout on every call.
  */
+/**
+ * The screenshot poll's budget, named rather than inlined — BOTH phones derive
+ * their consent window from this exact number (`Screenshot.serverPollBudget` /
+ * `SERVER_POLL_BUDGET_MS`), and a test pins them equal. It sleeps FIRST, so the
+ * checks land at t≈2,4,…,90 and a result must already be in the mailbox at 90.
+ *
+ * ⚠️ platform.ts holds SEVEN of these loops with different budgets — this pair
+ * belongs to `screenshot` alone. Moving it means moving the phones' window too.
+ */
+const SHOT_POLL_LOOPS = 45
+const SHOT_POLL_SLEEP_MS = 2000
+const SHOT_POLL_BUDGET_S = (SHOT_POLL_LOOPS * SHOT_POLL_SLEEP_MS) / 1000
+
 export const makeScreenshotTool = (userId: string | null | undefined) => tool({
   name: 'screenshot',
   description: "Capture what's currently on the user's device screen and receive it back as an image you can SEE (native apps only). The user is asked to allow the capture first, and the system shows a recording indicator — so use it when the user asks you to look at their screen, help with what they're seeing, read something on it, or troubleshoot a visible problem. Captures the whole screen (whatever app is in front); it can't see DRM-protected/secure content. Nothing leaves the user's account except one hosted still.",
@@ -467,11 +480,16 @@ export const makeScreenshotTool = (userId: string | null | undefined) => tool({
 
     // The executing device is the one holding THIS stream — it saw the
     // beforeToolCallEvent the moment we entered this callback and is now
-    // prompting for consent, capturing, and uploading. Poll the mailbox
-    // (2s × 45 = 90s: covers the consent tap + ReplayKit frame + upload; a
-    // user who ignores the prompt simply times out below).
-    for (let i = 0; i < 45; i++) {
-      await new Promise(r => setTimeout(r, 2000))
+    // prompting for consent, capturing, and uploading. Poll the mailbox for
+    // SHOT_POLL_BUDGET_S: enough for the consent tap + ReplayKit frame + upload.
+    //
+    // ⚠️ A user who ignores the prompt does NOT simply time out here — not since
+    // the phones' consent window closes itself and posts `expired` at
+    // budget − deliveryGrace, so the window shuts BEFORE this loop's last check.
+    // This budget is the number both phones derive their window from, so it is
+    // named once and read by the message below too.
+    for (let i = 0; i < SHOT_POLL_LOOPS; i++) {
+      await new Promise(r => setTimeout(r, SHOT_POLL_SLEEP_MS))
       const d = await fetch(
         `${WORKER}/device/tool-result?userId=${encodeURIComponent(userId)}&toolUseId=${encodeURIComponent(toolUseId)}`,
         { headers: ikey(), cache: 'no-store' },
@@ -501,7 +519,27 @@ export const makeScreenshotTool = (userId: string | null | undefined) => tool({
         note,
       ]
     }
-    return { ok: false, error: 'The device did not return a screenshot within 90s — the user may not have responded to the capture prompt, screen capture may be unavailable, or the app went to background.' }
+    // ⚠️ SILENCE IS NOT "THE USER IGNORED IT" ANY MORE — DON'T GUESS THAT.
+    //
+    // This message used to offer three causes: the prompt went unanswered, capture
+    // was unavailable, or the app was backgrounded. The phones now report ALL
+    // THREE themselves, each as its own payload, in time to be read:
+    //   • unanswered  → `expired` when the consent window closes itself, which is
+    //     deliberately deliveryGrace BEFORE this poll ends (P2.5 + P2.7)
+    //   • unavailable → {ok:false, error:…} from ReplayKit/Fail.unavailable
+    //   • backgrounded → a named failure posted before any prompt is attempted
+    // Declines, expiries, abandoned asks and broken captures all arrive tagged.
+    //
+    // So reaching this line means something ELSE happened: the device never saw
+    // the tool event (relay/stream dropped), or its own POST to the mailbox failed
+    // (best-effort by design, on both phones), or it went away mid-capture. Naming
+    // user inaction FIRST — the one cause now positively excluded — invited the
+    // model to tell the user they ignored a prompt they may never have seen. Same
+    // confabulation invariant 6 forbids on the wire, one layer up.
+    return {
+      ok: false,
+      error: `No answer from the device within ${SHOT_POLL_BUDGET_S}s, and no reason either — which rules out the ordinary ones (a declined or unanswered prompt, capture being unavailable, or the app being in the background all report themselves). Most likely the device never received the request or lost its connection before it could answer. Do NOT tell the user they ignored a prompt; say the device didn't answer and offer to try again.`,
+    }
   },
 })
 

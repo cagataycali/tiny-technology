@@ -788,22 +788,43 @@ fun ChatScreen(
     val runVoiceTool: (String, String, org.json.JSONObject) -> Unit = { id, name, args ->
         if (name == "screenshot") {
             // Round-trip: consent activity → MediaProjection one-frame capture →
-            // upload; Screenshot.deliver/postDenied emit on app.screenshots for
-            // EVERY outcome ("" = denied/failed), keyed by our unique voice id —
-            // replay=1 staleness can't match it. Timeout is the last resort.
+            // upload; Screenshot.deliver/postDenied/postExpired emit on
+            // app.screenshots for EVERY outcome, each TAGGED (never inferred from
+            // an empty url), keyed by our unique voice id — replay=1 staleness
+            // can't match it. Timeout is the last resort.
             callScope.launch {
                 val voiceId = "voice-" + java.util.UUID.randomUUID().toString()
                 val waiter = async {
-                    withTimeoutOrNull(120_000) { app.screenshots.first { it.toolUseId == voiceId } }
+                    // Derived, not a literal: consent expires at CONSENT_WINDOW_MS and
+                    // the capture it authorises needs DELIVERY_GRACE_MS after that, so
+                    // nothing can still be coming past their sum — the consent activity's
+                    // own deadline posts EXPIRED well before this. A bare 120_000 sat
+                    // here instead, unrelated to the window it was racing; it happened to
+                    // be safe (longer), and an edit to either number wouldn't have
+                    // noticed the other. This is the last resort it always claimed to be.
+                    withTimeoutOrNull(
+                        technology.tiny.app.tools.ScreenshotConsentActivity.CONSENT_WINDOW_MS +
+                            technology.tiny.app.tools.ScreenshotConsentActivity.DELIVERY_GRACE_MS
+                    ) { app.screenshots.first { it.toolUseId == voiceId } }
                 }
                 technology.tiny.app.tools.ScreenshotConsentActivity.launch(app, voiceId)
                 val res = waiter.await()
-                val out = when {
-                    res == null -> org.json.JSONObject().put("ok", false)
+                // ⚠️ Branch on the OUTCOME, never on "is the url empty". Three
+                // different things arrive with no url — a decline, a grant that
+                // came after its request expired, and a capture that broke — and
+                // reporting the last two as `{denied:true}` tells the model the
+                // user refused something they never refused. Same reason the
+                // mailbox payloads distinguish them (Screenshot.postExpired).
+                val out = when (res?.outcome) {
+                    null -> org.json.JSONObject().put("ok", false)
                         .put("error", "capture timed out")
-                    res.url.isEmpty() -> org.json.JSONObject().put("denied", true)
+                    TinyApp.ShotOutcome.DENIED -> org.json.JSONObject().put("denied", true)
                         .put("note", "the user declined this capture")
-                    else -> org.json.JSONObject().put("ok", true).put("url", res.url)
+                    TinyApp.ShotOutcome.EXPIRED -> org.json.JSONObject().put("ok", false)
+                        .put("error", "the capture request expired before the user answered — nothing was captured")
+                    TinyApp.ShotOutcome.FAILED -> org.json.JSONObject().put("ok", false)
+                        .put("error", "screen capture failed on the device")
+                    TinyApp.ShotOutcome.OK -> org.json.JSONObject().put("ok", true).put("url", res.url)
                 }
                 runCatching { liveCall.sendToolResult(id, out) }
             }

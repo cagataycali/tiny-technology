@@ -54,6 +54,13 @@ final class VoiceCall: NSObject, ObservableObject {
     var onBargeIn: (() -> Void)?
     /// (callId, toolName, args) — reply via sendToolResult(id:output:).
     var onToolCall: ((String, String, [String: Any]) -> Void)?
+    /// Called by `stop()`: the call is over, so any device tool still waiting on
+    /// the USER (the screenshot consent alert) has to be called off — its answer
+    /// has nowhere to go now that the WS is closed, and a prompt left on screen
+    /// is one an Allow would still act on. Lives on `stop()` rather than on its
+    /// callers because there are four of them (End, hangup, tiny switch,
+    /// onDisappear) and a missed one is a silent capture.
+    var onEnded: (() -> Void)?
 
     private let sampleRate = 24_000.0
     private var ws: URLSessionWebSocketTask?
@@ -143,6 +150,9 @@ final class VoiceCall: NSObject, ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
         level = 0
         if status != .error { status = .ended }
+        // Last, after the WS is definitively down: nothing the user taps now can
+        // reach the model, so stop asking them.
+        onEnded?()
     }
 
     // ── Session mint (POST /api/voice/session) ────────────────────────────────
