@@ -86,6 +86,28 @@ object PhoneRecorder {
      */
     val level: StateFlow<Float> = _level
 
+    private val _partial = MutableStateFlow("")
+
+    /**
+     * What the take has heard SO FAR — the words, not just the level.
+     *
+     * [level] proves the mic hears SOMETHING; only words prove it hears YOU, which
+     * is what a person actually wants to know before trusting a screen with two
+     * minutes of speech. Until now the recognizer's partials lived in a local
+     * variable inside [listen] and died there, so both Record buttons on this phone
+     * showed ten bars and no text (iOS carried the identical gap, and its own
+     * comment admitted it: "partial recognition text is not shown anywhere else in
+     * this view" — fixed there in `e99e3c53`, which this ports).
+     *
+     * Empty until the first partial arrives, and it is the WHOLE take's text, not
+     * the live session's: [listen] rolls a fresh `SpeechRecognizer` every time
+     * Android ends a session on its own, so publishing only the current session
+     * would make the screen appear to forget the sentence the user just watched it
+     * type. Published from the take loop's existing 200ms tick rather than from
+     * `onPartialResults` — see [listen].
+     */
+    val partial: StateFlow<String> = _partial
+
     /**
      * Set by [stopEarly] to end the take in progress before its deadline.
      *
@@ -229,6 +251,10 @@ object PhoneRecorder {
         // Clear any stale early-stop HERE, where the mic is claimed — see
         // [stopRequested]. A stop that lands between takes must not kill the next.
         stopRequested = false
+        // The words too, and for the same reason the flag is cleared here: a take
+        // must never open showing the PREVIOUS take's sentence, which would read as
+        // words this microphone is hearing right now.
+        _partial.value = ""
         val startedAt = android.os.SystemClock.elapsedRealtime()
         try {
             val heard = listen(app, secs)
@@ -244,6 +270,10 @@ object PhoneRecorder {
         } finally {
             _isRecording.value = false
             _level.value = 0f
+            // Cleared with the claim: a failed take must leave nothing behind that
+            // looks like a recording in progress, and the finished take's words
+            // belong to the transcript store from here on, not to a live card.
+            _partial.value = ""
             stopRequested = false
             MicClaim.release(OWNER)
         }
@@ -351,6 +381,13 @@ object PhoneRecorder {
         val until = android.os.SystemClock.elapsedRealtime() + seconds * 1000L
         while (android.os.SystemClock.elapsedRealtime() < until) {
             if (stopRequested) break
+            // Republish on the tick this loop already runs, rather than from
+            // `onPartialResults`: that callback fires as fast as the recognition
+            // service produces hypotheses — many per second, each one a
+            // recomposition of every screen collecting this flow, for text no eye
+            // can follow at that rate. `snapshot()`, not `partial`, so a rolled
+            // session shows the whole take instead of only its latest utterance.
+            _partial.value = snapshot()
             delay(STOP_TICK_MS)
         }
         // stopListening (not destroy) so the session delivers the tail it already

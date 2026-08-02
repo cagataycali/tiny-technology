@@ -1572,6 +1572,7 @@ internal fun VoiceDevicePanel(app: TinyApp, deviceId: String) {
     var adoptError by remember { mutableStateOf<String?>(null) }
     val recording by PhoneRecorder.isRecording.collectAsState()
     val level by PhoneRecorder.level.collectAsState()
+    val heard by PhoneRecorder.partial.collectAsState()
     var recordError by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -1800,6 +1801,10 @@ internal fun VoiceDevicePanel(app: TinyApp, deviceId: String) {
                     }
                 }
             }
+            // The words, under the bars. The meter proves the mic is moving; only
+            // this proves it is hearing THIS person — and its caption is the one
+            // place the panel can tell "just started" apart from "hearing nothing".
+            if (recording) LiveTakeWords(heard)
             recordError?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
             }

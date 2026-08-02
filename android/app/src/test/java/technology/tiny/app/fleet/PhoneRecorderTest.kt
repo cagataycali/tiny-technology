@@ -2,6 +2,7 @@ package technology.tiny.app.fleet
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -219,5 +220,43 @@ class PhoneRecorderTest {
         val steps = listOf(-2f, 0f, 2f, 4f, 6f, 8f, 10f).map { PhoneRecorder.meterLevel(it) }
         assertEquals(steps.sorted(), steps)
         assertEquals("silence and speech must not read alike", 7, steps.toSet().size)
+    }
+
+    // ── The words: what a take has heard so far ──────────────────────────────
+
+    @Test fun `the take's words are published, not kept inside the recognizer`() {
+        // 🔴 THE GAP this closes: `partial` was a local `var` inside `listen()` and
+        // never escaped, so both Record buttons drew ten bars over no text. A meter
+        // proves the mic hears SOMETHING; only words prove it hears YOU. Reading the
+        // flow at all is the pin — the type is what makes a UI able to collect it.
+        val words: kotlinx.coroutines.flow.StateFlow<String> = PhoneRecorder.partial
+        assertNotNull("the take's words are unreachable from any screen", words.value)
+    }
+
+    @Test fun `no take running means no words on screen`() {
+        // ⚠️ Nothing may sit here between takes. The published text is what a card
+        // renders as "the mic is hearing this right now", so a leftover sentence
+        // would be the previous take's words presented as live ones — and after a
+        // FAILED take (mic busy, permission denied) it would look like a recording
+        // in progress that no button can stop.
+        assertFalse("a take is running in a unit test", PhoneRecorder.isRecording.value)
+        assertEquals("words left behind with no take running", "", PhoneRecorder.partial.value)
+        // The meter's own resting state, for the same reason and beside it.
+        assertEquals(0f, PhoneRecorder.level.value, 0.001f)
+    }
+
+    @Test fun `a refused take leaves no words behind`() {
+        // ⚠️ record() has three early returns BEFORE the mic is claimed (no
+        // recognizer, no permission, mic busy) and they bypass the `finally` that
+        // clears this. They must be harmless — which they are only because the
+        // clear ALSO happens where the claim succeeds. Held with the mic taken by
+        // someone else, which is the reachable one of the three in a JVM test.
+        assertTrue(MicClaim.claim("voice"))
+        try {
+            assertEquals("a refusal left words on screen", "", PhoneRecorder.partial.value)
+            assertFalse(PhoneRecorder.isRecording.value)
+        } finally {
+            MicClaim.release("voice")
+        }
     }
 }

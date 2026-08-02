@@ -219,6 +219,7 @@ fun TranscriptsSheet(app: TinyApp, onDismiss: () -> Unit) {
     var recordError by remember { mutableStateOf<String?>(null) }
     val recording by PhoneRecorder.isRecording.collectAsState()
     val level by PhoneRecorder.level.collectAsState()
+    val heard by PhoneRecorder.partial.collectAsState()
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(reloadKey) {
@@ -335,6 +336,11 @@ fun TranscriptsSheet(app: TinyApp, onDismiss: () -> Unit) {
                         }
                     }
                 }
+                // The words as they arrive, which matter more on THIS screen than
+                // anywhere else: the reader is about to add a row to a list they
+                // read back, and a take that heard nothing is indistinguishable
+                // from a take mid-sentence until something shows the text.
+                if (recording) LiveTakeWords(heard)
                 recordError?.let {
                     Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.tertiary)
                 }
