@@ -305,6 +305,47 @@ export const EVENT_ICONS: Record<string, string> = {
   nicla_wake: '🗣️', nicla_transcript: '🎙️', nicla_sentry: '👁️', device_note: '📝',
 }
 
+/**
+ * The events ring caps `detail` at 300 chars (events.ts emitEvent — the ONE
+ * writer, so 300 is the real budget every emitter is written against). This
+ * block used to re-slice to 140 from the head, which is where the trouble was:
+ * the emitters that carry a NEXT STEP put the id at the TAIL.
+ *
+ *   transcripts.ts:  `tiny voice: "<200 chars of speech>" (transcript <uuid>)`
+ *   relay.ts:        `💻 mbp finished: "<90>" — … envelope_id:'<uuid>'`
+ *
+ * Both budget the id explicitly against 300 ("the id is never the part that gets
+ * cut") and both exceed 140, so at 140 the id is the casualty. Measured against
+ * production D1 rather than assumed, because the two differ in status:
+ *
+ *   device_task_result — OBSERVED cut. The one row in the ring is 198 chars, so
+ *     its envelope_id was gone and `use_device action:'result'` had nothing.
+ *   nicla_transcript — LATENT. The only row so far is 131 chars (66 of speech)
+ *     and its id survived. Fixed overhead is 65 chars, so only 75 chars of
+ *     speech fit under 140 while the emitter allows 200 — the first ordinary
+ *     sentence longer than a phrase loses the id, and then the model sees that
+ *     words exist, cannot fetch them with nicla_voice_transcript, and quotes
+ *     the truncated preview as if it were the whole utterance.
+ *
+ * Not confined to the wearables: of 375 rows over 140 chars, 289 were being cut,
+ * including 39/39 job_result (max 300, the full cap) and 208/233 device_result.
+ *
+ * 15 events × 300 is ~4.5KB worst case, next to a prompt that already carries
+ * the memory block and device table, so the head-slice was not buying much.
+ * Keeping the trailing 60 chars on anything longer costs a line and cannot drop
+ * a uuid: an id lives in the last ~45 chars of every emitter above.
+ */
+export const EVENT_DETAIL_CHARS = 300
+const EVENT_DETAIL_TAIL = 60
+
+export function eventDetail(detail: unknown): string {
+  const s = String(detail ?? '')
+  if (s.length <= EVENT_DETAIL_CHARS) return s
+  // Elide the MIDDLE, never the end. A head-truncated detail loses exactly the
+  // actionable part while still reading as a complete sentence.
+  return s.slice(0, EVENT_DETAIL_CHARS - EVENT_DETAIL_TAIL - 1) + '…' + s.slice(-EVENT_DETAIL_TAIL)
+}
+
 export function buildSoulPrompt(inp: SoulPromptInputs): string {
   const {
     tinyName, tinyData, tinyStats, retrieveSummary, clientMetadata,
@@ -316,7 +357,7 @@ export function buildSoulPrompt(inp: SoulPromptInputs): string {
     ? `# 🔔 Recent Events (background activity since the user last looked — mention anything relevant)
 ${userEvents.map((e: any) => {
   const t = new Date((e.created || 0) * 1000).toISOString().slice(11, 16)
-  return `- [${t} UTC] ${EVENT_ICONS[e.kind] || 'ℹ'} ${e.kind}: ${String(e.detail || '').slice(0, 140)}`
+  return `- [${t} UTC] ${EVENT_ICONS[e.kind] || 'ℹ'} ${e.kind}: ${eventDetail(e.detail)}`
 }).join('\n')}
 `
     : ''

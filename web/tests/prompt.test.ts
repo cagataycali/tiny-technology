@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
-import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, type SoulPromptInputs } from '../lib/chat/prompt'
+import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, eventDetail, EVENT_DETAIL_CHARS, type SoulPromptInputs } from '../lib/chat/prompt'
 import { EMITTED_KINDS } from '../lib/chat/event-icons'
 
 const base: SoulPromptInputs = {
@@ -117,8 +117,119 @@ describe('buildSoulPrompt', () => {
     expect(p).toContain('🔔 Recent Events')
     expect(p).toContain('✅ job_result')
     expect(p).toContain('ℹ unknown_kind')
-    // detail clamped to 140
-    expect(p).not.toContain('x'.repeat(141))
+    // Still clamped — the ring's own cap (300), not a second, tighter one. This
+    // assertion said 141 while every emitter budgeted its trailing id against
+    // 300; see the middle-elision tests below for what that cost.
+    expect(p).not.toContain('x'.repeat(EVENT_DETAIL_CHARS + 1))
+  })
+
+  /**
+   * 🎙️ THE ACTIONABLE PART OF AN EVENT LIVES AT THE END OF IT.
+   *
+   * The events ring caps detail at 300 (events.ts emitEvent is the only writer),
+   * and the two emitters that hand the agent a NEXT STEP both put a uuid last:
+   *
+   *   transcripts.ts  `<name>: "<200 chars of speech>" (transcript <uuid>)`
+   *   relay.ts        `💻 <name> finished: "<90>" — … envelope_id:'<uuid>'`
+   *
+   * Both land at ~176-194 chars, both with a comment explaining that the id fits
+   * inside 300 — and this block then sliced 140 off the HEAD, so the id was
+   * always the casualty. A real transcript row reached the agent ending
+   * "(transcript 9". The failure is quiet and bad: the model can see that the
+   * user said something, cannot call nicla_voice_transcript for the full text,
+   * and quotes a truncated preview as the whole utterance.
+   *
+   * Fixtures below are built the way the emitters build them, so a change to
+   * either format is caught here rather than in production context.
+   */
+  const detailFor = (kind: string) => {
+    const p = buildSoulPrompt({ ...base, userEvents: [{ kind, detail: EMITTER_FIXTURES[kind], created: 1750000000 }] })
+    return p.slice(p.indexOf(`${kind}: `))
+  }
+  const UUID = '9f8c1e2a-3b4d-4c5e-8f70-a1b2c3d4e5f6'
+  const EMITTER_FIXTURES: Record<string, string> = {
+    // worker/src/transcripts.ts — the `(transcript <id>)` emit, at its own
+    // documented worst case (40-char device name + the full
+    // TRANSCRIPT_PREVIEW_CHARS preview + the id). Named by the symbol, not by a
+    // line number: the numbers differ between trees and rot on the next edit.
+    nicla_transcript: `${'d'.repeat(40)}: "${'the roof guy comes tuesday '.repeat(8).slice(0, 200)}" (transcript ${UUID})`,
+    // worker/src/relay.ts — the `envelope_id:'<id>'` emit, with its 90-char brief.
+    device_task_result: `💻 studio-mbp finished: "${'ran the migration and rows changed '.repeat(3).slice(0, 90)}" — read it with use_device action:'result' envelope_id:'${UUID}'`,
+  }
+
+  /**
+   * ⚠️ What makes the two fixtures above load-bearing, asserted rather than
+   * assumed: each must EXCEED the old 140 and fit inside the ring's real 300.
+   * A fixture shorter than 140 keeps its id under the defective slice too, so
+   * both `toContain(UUID)` tests below would stay green against the bug — they
+   * would be pinning nothing while reading as the proof of the whole increment.
+   *
+   * Not hypothetical: the device name in the relay fixture is scrubbed in this
+   * tree (the upstream fixture carries a real hostname), and a rename is exactly
+   * the edit that shortens a row without anyone re-measuring it. 294 and 209 as
+   * written, so there is room — but the margin is a measurement, not a promise.
+   */
+  it('both fixtures are in the window where the head-slice destroyed the id', () => {
+    for (const [kind, s] of Object.entries(EMITTER_FIXTURES)) {
+      expect(s.length, `${kind}: shorter than the old slice, so it cannot detect it`).toBeGreaterThan(140)
+      expect(s.length, `${kind}: over the ring's cap, so elision explains the pass`).toBeLessThanOrEqual(EVENT_DETAIL_CHARS)
+      expect(s.slice(0, 140), `${kind}: the old 140-slice kept the id — fixture proves nothing`).not.toContain(UUID)
+    }
+  })
+
+  it('a transcript event reaches the agent with its id, so the full text is fetchable', () => {
+    const row = detailFor('nicla_transcript')
+    expect(EMITTER_FIXTURES.nicla_transcript.length).toBeLessThanOrEqual(EVENT_DETAIL_CHARS)
+    expect(row, 'the transcript id was truncated away — nicla_voice_transcript has nothing to fetch')
+      .toContain(UUID)
+    expect(row).toContain('the roof guy comes tuesday')
+  })
+
+  it("a backgrounded task's envelope_id reaches the agent, so the result is readable", () => {
+    const row = detailFor('device_task_result')
+    expect(row, "use_device action:'result' needs this id and it was sliced off").toContain(UUID)
+  })
+
+  it('over-long detail elides the MIDDLE — the tail is what carries the id', () => {
+    const long = 'y'.repeat(400) + ` envelope_id:'${UUID}'`
+    const out = eventDetail(long)
+    expect(out.length).toBeLessThanOrEqual(EVENT_DETAIL_CHARS)
+    expect(out, 'a head-slice keeps the prose and drops the only actionable token').toContain(UUID)
+    expect(out).toContain('…')
+    expect(out.startsWith('yyy')).toBe(true)   // still recognisably the same event
+  })
+
+  it('detail at or under the ring cap is passed through untouched', () => {
+    expect(eventDetail('short')).toBe('short')
+    const exact = 'z'.repeat(EVENT_DETAIL_CHARS)
+    expect(eventDetail(exact)).toBe(exact)
+    expect(eventDetail(exact)).not.toContain('…')
+  })
+
+  it('a null or missing detail renders as empty, not "null"', () => {
+    expect(eventDetail(undefined)).toBe('')
+    expect(eventDetail(null)).toBe('')
+  })
+
+  /**
+   * The production row, verbatim from D1, and the reason the transcript half of
+   * this bug was LATENT rather than observed: at 131 chars it fit under the old
+   * 140 and its id survived. `device_task_result` (198 chars) did not.
+   *
+   * Kept as a test because "the one real row happened to fit" is the whole
+   * reason nobody noticed — the fixed overhead is 65 chars, so only 75 chars of
+   * speech fit under 140 while transcripts.ts allows 200. A test that only used
+   * this short row would have been green at 140 too.
+   */
+  it('even the one real transcript row is a phrase away from losing its id', () => {
+    const real = 'tiny vision: "deploy verification: the transcript store is reachable end to end." (transcript 0a5da49e-abae-4fe6-866f-8c0a2a41ebd3)'
+    expect(real.length).toBe(131)                       // fit under the old 140 — hence latent
+    expect(eventDetail(real)).toBe(real)
+    // One ordinary sentence longer, and the old slice took the id.
+    const longer = real.replace('end to end.', 'end to end, and the second pass agreed with the live take.')
+    expect(longer.length).toBeGreaterThan(140)
+    expect(longer.length).toBeLessThanOrEqual(EVENT_DETAIL_CHARS)
+    expect(eventDetail(longer)).toContain('0a5da49e-abae-4fe6-866f-8c0a2a41ebd3')
   })
 
   it('omits empty optional blocks', () => {
