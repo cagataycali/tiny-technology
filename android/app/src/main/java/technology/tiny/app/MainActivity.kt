@@ -1087,6 +1087,9 @@ fun ChatScreen(
     if (vm.openPanel == "calls") {
         technology.tiny.app.ui.CallRecordingsSheet(app) { vm.openPanel = null }
     }
+    if (vm.openPanel == "transcripts") {
+        technology.tiny.app.ui.TranscriptsSheet(app) { vm.openPanel = null }
+    }
     if (vm.openPanel == "nearby") {
         technology.tiny.app.ui.NearbySheet(app) { vm.openPanel = null }
     }
@@ -1353,6 +1356,14 @@ fun ChatScreen(
                                 item(Icons.Outlined.Sensors, "Nearby") { vm.openPanel = "nearby" }
                                 item(Icons.Outlined.Map, "Map") { vm.openPanel = "map" }
                                 item(Icons.Outlined.Podcasts, "Call recordings") { vm.openPanel = "calls" }
+                                // 🎙️ Directly under Call recordings, the same way
+                                // iOS groups them: both are "things this phone
+                                // recorded, read back". Takes were WRITE-ONLY until
+                                // this row existed — filed to the server by the
+                                // Record button, a wake word or the agent, and
+                                // readable by everything except the phone that made
+                                // them (iOS Views.swift:2406 parity).
+                                item(Icons.Outlined.GraphicEq, "Transcripts") { vm.openPanel = "transcripts" }
                                 // Owner-only: the live-call voice is a per-tiny
                                 // server field — everyone who calls hears it.
                                 if (vm.isOwner) {

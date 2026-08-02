@@ -56,8 +56,18 @@ export const TRANSCRIPT_PRUNE_SQL = `
     SELECT id FROM transcripts WHERE user_id = ?1
     ORDER BY created DESC, rowid DESC LIMIT ?2)`;
 
+// `chars` and `truncated` exist because a cut preview and a whole short
+// transcript are INDISTINGUISHABLE in the row otherwise, and both the app and
+// the agent were left to guess. The iOS list view showed a 120s memo's first
+// ~200 characters (≈12% of it) as if that were the take; the agent reading this
+// list has the same problem, and worse consequences — it can quote a "complete"
+// transcript and answer from a fragment, with nothing in the data to warn it.
+// `length()` on an already-selected row is free, and it says so exactly rather
+// than making the client infer truncation from `preview.length == 200`.
 export const TRANSCRIPT_LIST_SQL = `
   SELECT id, label, substr(text, 1, ${TRANSCRIPT_PREVIEW_CHARS}) AS preview,
+         length(text) AS chars,
+         length(text) > ${TRANSCRIPT_PREVIEW_CHARS} AS truncated,
          audio_url, duration_s, created
   FROM transcripts WHERE user_id = ?1
   ORDER BY created DESC, rowid DESC LIMIT ?2`;
@@ -153,7 +163,13 @@ export class TranscriptListCall extends OpenAPIRoute {
     if (!userId) return json({ error: "userId required" }, 400);
     const limit = Math.min(Math.max(Number(q.get("limit")) || 10, 1), 50);
     const { results } = await env.DB.prepare(TRANSCRIPT_LIST_SQL).bind(userId, limit).all();
-    return json({ ok: true, transcripts: results || [] });
+    // SQLite has no boolean: `length(text) > 200` comes back as 0/1, and 0 is
+    // truthy after JSON.stringify only if a client tests `if (row.truncated)`
+    // on the STRING — but a Swift `as? Bool` on the number 0 returns nil, so the
+    // flag would silently vanish rather than read false. Normalize here, once,
+    // where the shape is decided.
+    const transcripts = (results || []).map((r: any) => ({ ...r, truncated: !!r.truncated }));
+    return json({ ok: true, transcripts });
   }
 }
 
