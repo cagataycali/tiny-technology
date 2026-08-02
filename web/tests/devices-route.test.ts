@@ -135,4 +135,60 @@ describe('POST /api/devices/heartbeat — device token, no session', () => {
     expect(sentBody.token).toBe('tind_ok')
     expect(typeof sentBody.capabilities).toBe('string') // JSON string per itty rule
   })
+
+  /**
+   * 🏠 lanUrl — the same-WiFi fast path, which was dead in production because of
+   * this hop alone.
+   *
+   * The firmware sends it on every beat and the worker validates and stores it;
+   * both have tests. This route destructured `{deviceId, token, capabilities}`
+   * and dropped it silently, so every device row held lan_url='' and the app had
+   * no address to dial — "says connecting through the cloud but i'm at the same
+   * wifi". Nothing errors: the heartbeat is a perfectly good 200 either way,
+   * which is why the tests on both ENDS could pass while the feature never
+   * worked. A proxy field is only real if the proxy is asked about it.
+   */
+  it('forwards lanUrl — without this the LAN fast path is dead in production', async () => {
+    let sentBody: any = null
+    global.fetch = vi.fn(async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }) as any
+    const res = await heartbeat(req('POST', {
+      deviceId: 'd1', token: 'tind_ok', lanUrl: 'http://192.168.1.207:8080',
+    }))
+    expect(res.status).toBe(200)
+    expect(sentBody.lanUrl, 'the proxy dropped lanUrl, so lan_url stays empty forever')
+      .toBe('http://192.168.1.207:8080')
+  })
+
+  it('an absent lanUrl is OMITTED, not sent as empty — COALESCE must keep the stored one', async () => {
+    // The worker does `lan_url = COALESCE(?5, lan_url)`. Sending '' here would
+    // satisfy COALESCE and overwrite a good address with a blank, 2880 times a
+    // day — worse than never forwarding, because it erases what worked.
+    let sentBody: any = null
+    global.fetch = vi.fn(async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }) as any
+    for (const beat of [{}, { lanUrl: '' }, { lanUrl: '   ' }, { lanUrl: null }]) {
+      await heartbeat(req('POST', { deviceId: 'd1', token: 'tind_ok', ...beat }))
+      expect(sentBody, JSON.stringify(beat)).not.toHaveProperty('lanUrl')
+    }
+  })
+
+  it('a hostile lanUrl is forwarded UNVALIDATED — the worker is the single guard', async () => {
+    // Deliberate: validateLanUrl lives in the worker and refuses public IPs,
+    // hostnames and loopback. Re-implementing that check here would give the
+    // feature two definitions of "private" that can drift apart, and the worker
+    // drops a bad value without failing the beat. Pinned so a future "defensive"
+    // filter here is a conscious choice rather than a silent second gate.
+    let sentBody: any = null
+    global.fetch = vi.fn(async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }) as any
+    await heartbeat(req('POST', { deviceId: 'd1', token: 'tind_ok', lanUrl: 'http://8.8.8.8:8080' }))
+    expect(sentBody.lanUrl).toBe('http://8.8.8.8:8080')
+  })
 })
