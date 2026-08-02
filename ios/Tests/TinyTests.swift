@@ -1331,6 +1331,126 @@ import Foundation
     }
 }
 
+/// 🔴 The iPad sidebar answered `Couldn't load` — two words for four causes.
+///
+/// It was a hand copy of `UniverseView.load()`: same url, same 20s bound, same
+/// `users` → `UniverseUser` decode. `d71b1ff3` ("three panels stop naming a
+/// cause") fixed the panels it counted by hand and never reached this fourth
+/// one, which still discarded the HTTP response (`let (data, _)`) — so it could
+/// not have named a cause even if asked.
+///
+/// `CommunityFeed` is now the single read. These tests own the part that has
+/// never had any coverage: the two silent FILTERS (a builder or a trust score
+/// that just doesn't appear), and the line between "an empty universe" and "a
+/// body we couldn't read" — the distinction the sidebar used to collapse.
+@Suite struct CommunityFeedTests {
+    /// The sentence a human actually reads, from the error `decode` throws.
+    private func caption(_ body: [String: Any]) -> String? {
+        do { _ = try CommunityFeed.decode(body); return nil }
+        catch { return LoadFailure.contentMessage(error) }
+    }
+
+    @Test("no users key is unreadable, not empty")
+    func aMissingListIsNotAnEmptyList() {
+        // Both surfaces render "No tinys yet" for `.loaded` + empty. Reaching
+        // that from a body without `users` states the universe is empty on the
+        // strength of an answer nobody could read.
+        #expect(caption([:]) == ApiError.badResponse.localizedDescription)
+        #expect(caption(["users": "nope"]) == ApiError.badResponse.localizedDescription)
+        #expect(caption(["users": [String: Any]()]) == ApiError.badResponse.localizedDescription)
+    }
+
+    @Test("an empty list IS an answer")
+    func zeroBuildersIsNotAFailure() throws {
+        // The worker's own degraded shape: `{users:[], error:'…'}` with a 500.
+        // `load()` gates on the STATUS, so this body only reaches decode on a
+        // 2xx — and then it means what it says.
+        let feed = try CommunityFeed.decode(["users": [[String: Any]](), "error": "community query failed"])
+        #expect(feed.users.isEmpty)
+        #expect(caption(["users": [[String: Any]]()]) == nil)
+    }
+
+    @Test("a builder with no tinys is dropped, one with a capped list is kept")
+    func theBuilderFilter() throws {
+        let feed = try CommunityFeed.decode(["users": [
+            ["login": "empty", "tinys": [[String: Any]]()],
+            ["login": "nameless"],
+            ["tinys": [["name": "orphan"]]],
+            ["login": "capped", "name": "Cap", "avatar": "a.png",
+             "tinyCount": 40, "tinys": [["name": "one"], ["name": "two"]]],
+            ["login": "uncounted", "tinys": [["name": "solo"], ["nope": "x"]]],
+        ]])
+        #expect(feed.users.map(\.login) == ["capped", "uncounted"])
+        #expect(feed.users[0].tinyCount == 40)          // the wire's COUNT wins…
+        #expect(feed.users[0].tinys.count == 2)         // …over the capped list
+        #expect(feed.users[0].name == "Cap")
+        #expect(feed.users[1].tinyCount == 1)           // absent → what we can see
+        #expect(feed.users[1].tinys == ["solo"])        // a nameless entry is skipped
+        #expect(feed.users[1].name.isEmpty)             // never nil-crashes on absent
+        #expect(feed.users[1].avatar.isEmpty)
+    }
+
+    @Test("the trust map keeps only scores it can defend")
+    func theTrustFilter() throws {
+        let feed = try CommunityFeed.decode(["users": [[String: Any]](), "trust": [
+            "keep": 0.5, "one": 1.0, "tiny": 0.0001,
+            "asString": "0.25",
+            "zero": 0, "negative": -0.5, "over": 1.5,
+            "nan": Double.nan, "inf": Double.infinity,
+            "": 0.9,
+            "notANumber": "high",
+        ]])
+        #expect(feed.trust.keys.sorted() == ["asString", "keep", "one", "tiny"])
+        #expect(feed.trust["asString"] == 0.25)
+        #expect(feed.trust["one"] == 1.0)
+    }
+
+    @Test("headline totals default to zero rather than crashing or lying")
+    func theTotals() throws {
+        let absent = try CommunityFeed.decode(["users": [[String: Any]]()])
+        #expect(absent.totalMessages == 0)
+        #expect(absent.totalPublicTinys == 0)
+        let present = try CommunityFeed.decode(["users": [[String: Any]](),
+                                               "totalMessages": 1_880_100, "totalPublicTinys": 42])
+        #expect(present.totalMessages == 1_880_100)
+        #expect(present.totalPublicTinys == 42)
+        // What the sidebar's row and the drawer's card would show for a body
+        // that never arrived — CommunityFmt's never-NaN guard, one layer up.
+        #expect(CommunityFmt.compact(absent.totalMessages) == "0")
+    }
+
+    @Test("both surfaces get the same sentence because there is one read")
+    func oneReadOneVocabulary() {
+        // The four situations that all used to be "Couldn't load", each now a
+        // different sentence — which is the entire user-visible deliverable.
+        let five = LoadFailure.contentMessage(ApiError.http(500, "community query failed"))
+        let four = LoadFailure.contentMessage(ApiError.http(404, nil))
+        let dead = LoadFailure.contentMessage(URLError(.notConnectedToInternet))
+        let junk = LoadFailure.contentMessage(ApiError.badResponse)
+        #expect(Set([five, four, dead, junk]).count == 4)
+        for s in [five, four, dead, junk] { #expect(s != "Couldn't load") }
+
+        // ⚠️ A 5xx DROPS the worker's own reason on purpose: 500 is in
+        // `statusOwnsTheMessage`, and "community query failed" is a sentence
+        // about a SQL query, not something a reader of a builder list can act
+        // on. The status table's line is the honest one, and it says "try
+        // again", which is exactly what the Retry beside it does.
+        #expect(five == Api.friendlyHTTPError(500))
+        #expect(!five.contains("community query"))
+
+        // ⚠️ And the 404 must NOT reach the chat table — `friendlyHTTPError`
+        // words 404 as "That tiny doesn't exist", which on a community list is a
+        // confident answer about a thing that is not a tiny. `contentMessage`
+        // exists for that distinction; this fourth panel now has it too.
+        #expect(four.contains("404"))
+        #expect(!four.contains("doesn't exist"))
+
+        // The one surface where "check your connection" is a fact, not a guess:
+        // status 0 means nothing arrived at all.
+        #expect(dead == Api.friendlyHTTPError(0))
+    }
+}
+
 @Suite struct ProfileToolParamsTests {
     // Mirrors web ProfileToolCard: params arrive as a JSON object OR a
     // stringified JSON blob — both must normalize to [String:String].

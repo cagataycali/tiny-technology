@@ -88,12 +88,17 @@ struct SidebarView: View {
                 case .loading:
                     HStack { ProgressView().scaleEffect(0.7); Text("Loading…").font(.caption).foregroundStyle(.secondary) }
                 case .failed(let e):
-                    // Was a dead end — a grey "Couldn't load" with the only
-                    // recovery being undiscoverable pull-to-refresh on the
-                    // sidebar List. Give it the Retry the sibling panels
-                    // (UniverseView/MemoryView/JobsView) all have.
+                    // An earlier pass gave this row the Retry the sibling panels
+                    // (UniverseView/MemoryView/JobsView) have — the only recovery
+                    // before it was undiscoverable pull-to-refresh on a sidebar
+                    // List. It left the WORDS alone, so a grey two-word "Couldn't
+                    // load" kept its dead-end feel next to a button that fixes
+                    // some causes and not others. `e` now names one cause; see
+                    // `load()`. Wraps rather than truncates — a sentence in a
+                    // narrow sidebar is the point of this row.
                     VStack(alignment: .leading, spacing: 6) {
                         Text(e).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                         Button("Retry") { Task { state = .loading; await load() } }
                             .font(.caption).buttonStyle(.bordered)
                     }
@@ -166,27 +171,19 @@ struct SidebarView: View {
 
     private func load() async {
         do {
-            // Public endpoint — same one UniverseView + the web drawer fetch.
-            var req = URLRequest(url: URL(string: "https://plugin.tiny.technology/community?limit=50")!)
-            req.timeoutInterval = 20
-            let (data, _) = try await URLSession.shared.data(for: req)
-            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let rawUsers = obj["users"] as? [[String: Any]] else {
-                state = .failed("Couldn't load"); return
-            }
-            universe = rawUsers.compactMap { u in
-                guard let login = u["login"] as? String else { return nil }
-                let tinys = (u["tinys"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
-                guard !tinys.isEmpty else { return nil }
-                return UniverseUser(login: login,
-                                    name: u["name"] as? String ?? "",
-                                    avatar: u["avatar"] as? String ?? "",
-                                    tinyCount: (u["tinyCount"] as? NSNumber)?.intValue ?? tinys.count,
-                                    tinys: tinys)
-            }
+            // ⚠️ This was its own copy of UniverseView's read — down to the url
+            // and the 20s bound — but with `let (data, _)`: the HTTP response
+            // discarded, then `state = .failed("Couldn't load")` written twice,
+            // once for a body that wasn't the right shape and once for anything
+            // thrown. Four causes, two words, and a Retry offered to all of
+            // them. It couldn't say more because it had thrown the evidence
+            // away. `CommunityFeed` is now the only read; the error it throws
+            // carries the status and the worker's own reason, and
+            // `contentMessage` is the same table the sibling panels use.
+            universe = try await CommunityFeed.load().users
             state = .loaded
         } catch {
-            state = .failed("Couldn't load")
+            state = .failed(LoadFailure.contentMessage(error))
         }
     }
 }

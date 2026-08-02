@@ -26,6 +26,96 @@ struct UniverseUser: Identifiable {
     let tinys: [String]
 }
 
+/// The community read — **one** implementation for the two views that show it.
+///
+/// 🔴 The iPad sidebar said `Couldn't load`.
+///
+/// Two words, for four different situations, on the sidebar's only route to the
+/// universe. It had nothing better to say because it never asked: `let (data, _)
+/// = try await URLSession.shared.data(for: req)` threw the HTTP response away
+/// before anyone could read it. A worker 500 carrying `{error:'community query
+/// failed'}`, a stale build meeting the router's plain-text 404, an offline
+/// radio and a body that simply lacked `users` all arrived indistinguishable,
+/// and all four got that same string.
+///
+/// `UniverseView` reads the SAME url, decodes the SAME `users` into the SAME
+/// `UniverseUser`, and has told the truth since `d71b1ff3` — status → the house
+/// table, a wrong shape → `badResponse`, a throw → the transport's own words.
+/// The sidebar was a COPY that never got the lesson, and that is the actual
+/// defect here: `d71b1ff3`'s own subject line says "three panels", counted by
+/// hand, so it could only reach the sites someone remembered. One read now, and
+/// a second copy would have to retype this whole function to drift again.
+enum CommunityFeed {
+    /// Everything the two surfaces bind — the sidebar takes `users` alone.
+    struct Feed {
+        let users: [UniverseUser]
+        let trust: [String: Double]
+        let totalMessages: Double
+        let totalPublicTinys: Int
+    }
+
+    /// Public worker endpoint (no token) — the same one the web drawer fetches.
+    /// A `static let` so the pin suite can prove there is exactly one of it.
+    static let url = "https://plugin.tiny.technology/community?limit=50"
+
+    static func load() async throws -> Feed {
+        var req = URLRequest(url: URL(string: url)!)
+        // Bounded like every JSON verb (`Api.request`'s 30s, tighter for a
+        // public list) — without it a half-open connection leaves both surfaces
+        // spinning with no escape to .failed + Retry.
+        req.timeoutInterval = 20
+        let (data, resp) = try await URLSession.shared.data(for: req)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        // The gate the sidebar didn't have. `JSONSerialization` parses a 500's
+        // error body perfectly well, so without a status check an outage reads
+        // as an empty universe — the web's own `getCommunity` lesson.
+        //
+        // `Api.serverError` rather than a hand-rolled `obj["error"]` read (which
+        // is what this site did): it trims and bounds to 300 chars, and this
+        // string becomes a LABEL. A worker answering with a stack trace or an
+        // HTML error page must not be pasted into one.
+        guard (200...299).contains(code) else {
+            throw ApiError.http(code, Api.serverError(in: data))
+        }
+        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ApiError.badResponse
+        }
+        return try decode(obj)
+    }
+
+    /// Wire → model. Pure, so the two filters below can be unit-pinned: they are
+    /// the reason a builder or a trust score silently doesn't show up, and until
+    /// now nothing tested either of them.
+    static func decode(_ obj: [String: Any]) throws -> Feed {
+        // No `users` key at all is not an empty universe — it is a body we
+        // couldn't read, and saying which is the whole point.
+        guard let rawUsers = obj["users"] as? [[String: Any]] else { throw ApiError.badResponse }
+        let users: [UniverseUser] = rawUsers.compactMap { u in
+            guard let login = u["login"] as? String else { return nil }
+            let tinys = (u["tinys"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
+            // Keep builders even if the payload capped their names (count>0),
+            // but drop the genuinely tiny-less (web filters on tinys too).
+            guard !tinys.isEmpty else { return nil }
+            return UniverseUser(login: login,
+                                name: u["name"] as? String ?? "",
+                                avatar: u["avatar"] as? String ?? "",
+                                tinyCount: (u["tinyCount"] as? NSNumber)?.intValue ?? tinys.count,
+                                tinys: tinys)
+        }
+        // Trust map: keep only well-shaped finite 0<v≤1 entries (web guard)
+        var trust: [String: Double] = [:]
+        if let raw = obj["trust"] as? [String: Any] {
+            for (k, v) in raw {
+                let n = (v as? NSNumber)?.doubleValue ?? Double("\(v)") ?? 0
+                if !k.isEmpty, n.isFinite, n > 0, n <= 1 { trust[k] = n }
+            }
+        }
+        return Feed(users: users, trust: trust,
+                    totalMessages: (obj["totalMessages"] as? NSNumber)?.doubleValue ?? 0,
+                    totalPublicTinys: (obj["totalPublicTinys"] as? NSNumber)?.intValue ?? 0)
+    }
+}
+
 /// Headline-stat formatter — the byte-for-byte iOS twin of web lib/community
 /// `compact()`. 1_880_100 → "1.9M", 45_300 → "45K". Pure + testable: the
 /// tier thresholds sit where the tier BELOW would round up past its own
@@ -200,51 +290,16 @@ struct UniverseView: View {
 
     private func load() async {
         do {
-            // Public endpoint — same one the web drawer fetches. Throw on a
-            // non-2xx (worker 5xx carrying a JSON body): res.json() would parse
-            // an error body fine, so without the r.ok gate an outage reads as
-            // an empty universe (web getCommunity `failed` lesson).
-            var req = URLRequest(url: URL(string: "https://plugin.tiny.technology/community?limit=50")!)
-            req.timeoutInterval = 20
-            let (data, resp) = try await URLSession.shared.data(for: req)
-            let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-            // The worker answers 200 or `500 {users:[],error:'community query
-            // failed'}`; a stale build also meets the router's plain-text 404.
-            // "HTTP 500" was the whole sentence a reader got for the middle one.
-            guard (200...299).contains(code) else {
-                let msg = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
-                    .flatMap { $0["error"] as? String }
-                state = .failed(LoadFailure.contentMessage(status: code, serverMsg: msg))
-                return
-            }
-            guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let rawUsers = obj["users"] as? [[String: Any]] else {
-                // "Bad response" is the wire's word for it, not a human's.
-                state = .failed(ApiError.badResponse.localizedDescription); return
-            }
-            users = rawUsers.compactMap { u in
-                guard let login = u["login"] as? String else { return nil }
-                let tinys = (u["tinys"] as? [[String: Any]])?.compactMap { $0["name"] as? String } ?? []
-                let count = (u["tinyCount"] as? NSNumber)?.intValue ?? tinys.count
-                // Keep builders even if the payload capped their names (count>0),
-                // but drop the genuinely tiny-less (web filters on tinys too).
-                guard !tinys.isEmpty else { return nil }
-                return UniverseUser(login: login,
-                                    name: u["name"] as? String ?? "",
-                                    avatar: u["avatar"] as? String ?? "",
-                                    tinyCount: count, tinys: tinys)
-            }
-            // Trust map: keep only well-shaped finite 0<v≤1 entries (web guard)
-            var t: [String: Double] = [:]
-            if let raw = obj["trust"] as? [String: Any] {
-                for (k, v) in raw {
-                    let n = (v as? NSNumber)?.doubleValue ?? Double("\(v)") ?? 0
-                    if !k.isEmpty, n.isFinite, n > 0, n <= 1 { t[k] = n }
-                }
-            }
-            trust = t
-            totalMessages = (obj["totalMessages"] as? NSNumber)?.doubleValue ?? 0
-            totalPublicTinys = (obj["totalPublicTinys"] as? NSNumber)?.intValue ?? 0
+            // Every sentence this surface can say now comes from ONE place, and
+            // the sidebar reads the same one — see `CommunityFeed`. Behaviour is
+            // unchanged for all four outcomes (`badResponse` still worded by
+            // `LoadFailure`, which is a human's word for it, not the wire's);
+            // what moved is that a second view can no longer answer differently.
+            let feed = try await CommunityFeed.load()
+            users = feed.users
+            trust = feed.trust
+            totalMessages = feed.totalMessages
+            totalPublicTinys = feed.totalPublicTinys
             state = .loaded
         } catch { state = .failed(LoadFailure.contentMessage(error)) }
     }
