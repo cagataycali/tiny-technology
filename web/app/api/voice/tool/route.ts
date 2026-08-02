@@ -21,6 +21,35 @@ import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } fr
 
 export const runtime = 'edge'
 
+/**
+ * How long a tool on THIS bridge may wait on hardware.
+ *
+ * A live call is the tightest caller in the app, and it is the only one whose
+ * patience is not written in this repo's route: the browser aborts at
+ * `deadlineFor('/api/voice/tool')` and both phones at a flat 30s (Api.swift's
+ * `timeoutInterval`, TinyApi.kt's `callTimeout`). So a tool given its full
+ * interactive ceiling here cannot finish — 20s leaves every surface headroom,
+ * and `exceedsServerBudget` keeps that provable.
+ *
+ * Passed to the flipper tools for the same reason job-run passes JOB_DEADLINE_S:
+ * "a tool that waits longer than this can only ever produce a timeout, never a
+ * usable answer or a real explanation." flipper_status's own ceiling is 45s
+ * (STATUS_WAIT_S) — three times this bridge's patience — so unbudgeted it could
+ * only ever be killed by the client, and the model heard "the tool timed out"
+ * instead of the sentence flipper.ts writes for precisely this case: a wait
+ * shorter than BLE_ROUND_TRIP_S concludes nothing, and says so, and says where
+ * the full 45s is available.
+ *
+ * ⚠️ NOT passed to the nicla factories, and that is a real gap rather than a
+ * decision this rail gets to make: nicla_voice_record's ceiling is
+ * `seconds + 25` (145s at its 120s max), so a long recording still outlives
+ * every client here — recoverable, because nicla_voice_transcripts reads back
+ * what finished after the tool timed out. How long a live call may pause for a
+ * capture is a product call on those tools' own loop; c53 already recorded the
+ * server-side half of this as out of scope for a web-UI cycle.
+ */
+export const VOICE_TOOL_BUDGET_S = 20
+
 const json = (body: any, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
@@ -57,9 +86,15 @@ export async function POST(req: Request) {
     makeNiclaVoiceRecordTool(session.sub),
     makeNiclaVoiceTranscriptsTool(session.sub),
     makeNiclaVoiceTranscriptTool(session.sub),
-    makeFlipperStatusTool(session.sub),
-    makeFlipperListenTool(session.sub),
-    makeFlipperFilesTool(session.sub),
+    // 🐬 All three take this bridge's budget — see VOICE_TOOL_BUDGET_S. A
+    // spoken "is my Flipper reachable?" is the whole reason they are declared
+    // to a web session (lib/voice/tools.ts), and until the bridge forwarded
+    // unknown names (Chat.tsx runVoiceTool) it was answered "not available on
+    // this device". flipper_listen keeps its refusals: capture is cable-only,
+    // and a window this turn cannot host is declined in words.
+    makeFlipperStatusTool(session.sub, VOICE_TOOL_BUDGET_S),
+    makeFlipperListenTool(session.sub, VOICE_TOOL_BUDGET_S),
+    makeFlipperFilesTool(session.sub, VOICE_TOOL_BUDGET_S),
   ]
   const tool = roster.find((t: any) => t.toolSpec?.name === toolName)
   if (!tool) return json({ ok: false, error: `'${toolName}' is not available on the voice bridge` }, 404)

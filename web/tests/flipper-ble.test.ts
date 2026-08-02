@@ -5,9 +5,11 @@ import { join } from 'node:path'
 import {
   FLIPPER_CAP, FLIPPER_BLE_CAP, pickFlipperHost, parseCaps, type FlipperHost,
   listenBudget, filesWait, statusWait, makeFlipperStatusTool,
-  FILES_WAIT_S, STATUS_WAIT_S, BLE_ROUND_TRIP_S,
+  FILES_WAIT_S, STATUS_WAIT_S, BLE_ROUND_TRIP_S, MAX_LISTEN_S,
 } from '../lib/chat/tools/flipper'
 import { DEVICE_LABELS, capabilitySummary } from '../lib/chat/prompt'
+import { deadlineFor, exceedsServerBudget } from '../lib/deadlines'
+import { buildVoiceTools } from '../lib/voice/tools'
 
 /**
  * 🐬📶 The Flipper over Bluetooth: the phone holds the link when no cable does.
@@ -1130,6 +1132,203 @@ describe('a scheduled job can reach the Flipper it was built to reach, and survi
     const note = jobRun.slice(
       jobRun.indexOf('const capabilityNote'), jobRun.indexOf('const agent = new Agent'))
     expect(codeOnly(note, /flipper_status/)).toMatch(/Bluetooth/)
+  })
+})
+
+/**
+ * 🐬🗣️ The other caller nobody demos: a live voice call.
+ *
+ * The same shape as the job above — a surface that reaches this rail without a
+ * cable, wrong in two ways at once, and neither failed a test:
+ *
+ *   1. UNREACHABLE. `lib/voice/tools.ts` declares flipper_status/files/listen to
+ *      EVERY voice session including the browser, and `/api/voice/tool` mounts
+ *      all three for execution — but the web bridge (`Chat.tsx runVoiceTool`)
+ *      listed the SERVER tools by name and answered everything else "not
+ *      available on this device". So a spoken "is my Flipper reachable?" got a
+ *      sentence about the BROWSER, for a board that is not on any device a
+ *      browser could have, while the same words typed into the same box worked.
+ *      Both phones already enumerate what they run LOCALLY and forward the rest,
+ *      and both wrote down why: "server-roster additions then work on STALE
+ *      builds". Only the surface with no build to go stale got it wrong.
+ *   2. UNTIMED. `/api/voice/tool` was absent from `ROUTE_DEADLINE_MS`, so
+ *      `deadlineFor` returned `QUICK_MS` — 15s, below every hardware tool the
+ *      bridge mounts, and below `BLE_ROUND_TRIP_S`. That is the exact trap
+ *      lib/deadlines.ts exists to prevent ("a deadline SHORTER than the server's
+ *      own budget doesn't fail fast, it LIES"): the client aborted with "the tool
+ *      timed out" while the server was still legitimately waiting, replacing the
+ *      one sentence that names the cause and the remedy. The route also handed
+ *      its flipper tools no budget at all, alone among this rail's callers —
+ *      job-run passes JOB_DEADLINE_S for the stated reason that a tool waiting
+ *      longer than the turn "can only ever produce a timeout, never a usable
+ *      answer or a real explanation", and voice is the tightest turn in the app.
+ *
+ * The pin at the scene was `tests/flipper-tools.test.ts`'s `roster wiring`: it
+ * names lib/voice/tools.ts AND app/api/voice/tool/route.ts — declaration and
+ * execution — so it read as a complete census while the third leg, the CLIENT
+ * that has to forward the tool_call, went unchecked on all three surfaces.
+ */
+describe('a spoken question reaches the board, and is told what it waited', () => {
+  const voiceRoute = read('app/api/voice/tool/route.ts')
+  const chat = read('components/chat/Chat.tsx')
+  const views = read('ios/Tiny/Sources/Views.swift')
+  const mainActivity = read('android/app/src/main/java/technology/tiny/app/MainActivity.kt')
+  // Scraped, not imported: the route drags in the whole tool stack. The `!` is
+  // the point — a renamed constant throws here rather than reading as 0.
+  const VOICE_TOOL_BUDGET_S = Number(voiceRoute.match(/VOICE_TOOL_BUDGET_S = (\d+)/)![1])
+
+  /** The web bridge's dispatcher, brace-matched from its own declaration. */
+  const webBridge = (() => {
+    const at = chat.indexOf('const runVoiceTool')
+    expect(at, 'runVoiceTool is gone — the web bridge was restructured').toBeGreaterThan(-1)
+    const end = chat.indexOf('const startLiveCall', at)
+    expect(end, 'the slicer has no end marker').toBeGreaterThan(at)
+    const body = chat.slice(at, end)
+    // A scraper that silently returns a fragment is a test that passes forever.
+    expect(body, 'the web bridge sliced empty').toMatch(/case "remember"/)
+    return body
+  })()
+
+  it('every flipper tool on the voice bridge takes the bridge budget', () => {
+    for (const f of ['makeFlipperStatusTool', 'makeFlipperListenTool', 'makeFlipperFilesTool']) {
+      expect(voiceRoute, `${f} polls a relay and must be clamped to the call`)
+        .toMatch(new RegExp(`${f}\\(session\\.sub, VOICE_TOOL_BUDGET_S\\)`))
+    }
+    // The un-budgeted form must be GONE, not merely joined — a second call
+    // without the budget is how this drifts back.
+    expect(codeOnly(voiceRoute, /makeFlipperStatusTool/), 'a flipper factory with no budget')
+      .not.toMatch(/makeFlipper\w+Tool\(session\.sub\)/)
+    // Named, not a literal at the call site: the number has to be greppable from
+    // the deadline that must sit above it.
+    expect(voiceRoute).toMatch(/export const VOICE_TOOL_BUDGET_S/)
+    expect(VOICE_TOOL_BUDGET_S).toBeGreaterThan(0)
+  })
+
+  it('the fall-through FORWARDS on all three clients — it never refuses locally', () => {
+    // THE property, stated once for every surface: a tool this client does not
+    // run locally is the SERVER's, not a missing feature. Enumerating the server
+    // tools by name is what made the browser lie, so the assertion is about the
+    // fall-through, not about any list of names.
+    const webDefault = webBridge.slice(webBridge.lastIndexOf('default:'))
+    expect(webDefault, 'the web bridge has no default arm').toMatch(/default:/)
+    expect(webDefault, 'the fall-through must reach the bridge, not dead-end')
+      .toMatch(/fetch\("\/api\/voice\/tool"/)
+    // ...and the sentence that made a board's absence a fact about the browser
+    // must not come back, in any arm.
+    expect(codeOnly(webBridge, /voice\/tool/), 'a device-shaped refusal for a server tool')
+      .not.toMatch(/not available on this device/)
+
+    // iOS: the local device tools are cased, the default forwards.
+    const iosBridge = swiftBody(views, 'private func runVoiceTool(')
+    const iosDefault = iosBridge.slice(iosBridge.lastIndexOf('default:'))
+    expect(iosDefault).toMatch(/\/api\/voice\/tool/)
+    // Android: the local set is NAMED, and everything outside it forwards.
+    expect(mainActivity).toMatch(/LOCAL_VOICE_TOOLS = setOf\(/)
+    expect(mainActivity).toMatch(/name !in LOCAL_VOICE_TOOLS/)
+    const localSet = mainActivity.slice(
+      mainActivity.indexOf('LOCAL_VOICE_TOOLS = setOf('),
+      mainActivity.indexOf(')', mainActivity.indexOf('LOCAL_VOICE_TOOLS = setOf(')))
+    // A server tool inside the LOCAL set is the same defect wearing Android's
+    // spelling: it would stop forwarding and answer from a stale build.
+    for (const t of buildVoiceTools('tiny-android').map((x) => x.name)) {
+      if (!/^(flipper|nicla)_/.test(t)) continue
+      expect(localSet, `${t} runs on the SERVER — Android must forward it`).not.toContain(`"${t}"`)
+    }
+    expect(localSet, 'the Android set sliced empty').toMatch(/vibrate/)
+  })
+
+  it('the roster declares these tools to a browser, so the browser must reach them', () => {
+    // The declaration is what makes the bridge load-bearing: the model plans
+    // against this list, on a surface that cannot hold the board.
+    const web = buildVoiceTools('web').map((t) => t.name)
+    for (const t of ['flipper_status', 'flipper_files', 'flipper_listen']) {
+      expect(web, `${t} must be declared to a web voice session`).toContain(t)
+      // Declared AND executable: the 404 arm of /api/voice/tool is for names
+      // nobody declared, not for the roster's own.
+      expect(voiceRoute, `${t} must be mounted where the bridge forwards it`)
+        .toMatch(new RegExp(`make${t.split('_').map((s) => s[0].toUpperCase() + s.slice(1)).join('')}Tool`))
+    }
+  })
+
+  it('no client on this rail aborts a wait the server is still allowed to be in', () => {
+    const clientMs = deadlineFor('/api/voice/tool')
+    const serverMs = VOICE_TOOL_BUDGET_S * 1000
+    // The web number must come from the table, not the QUICK_MS default — that
+    // fallback (15s) was the whole bug, and it is a silent one: an absent key
+    // reads as a deliberate choice.
+    expect(clientMs, 'the route fell back to QUICK_MS again').toBeGreaterThan(15_000)
+    expect(exceedsServerBudget(clientMs, serverMs), `web ${clientMs}ms vs server ${serverMs}ms`)
+      .toBe(false)
+
+    // The phones' ceilings are MEASURED out of their own sources, not copied from
+    // a sibling client — the tightest JSON ceiling each app applies, so whichever
+    // helper the bridge uses is covered.
+    const iosCaps = Array.from(read('ios/Tiny/Sources/Api.swift')
+      .matchAll(/timeoutInterval = (\d+)/g)).map((m) => Number(m[1]))
+    expect(iosCaps.length, 'Api.swift declares no timeoutInterval — this guard is vacuous')
+      .toBeGreaterThan(0)
+    const androidCaps = Array.from(read('android/app/src/main/java/technology/tiny/app/net/TinyApi.kt')
+      .matchAll(/callTimeout\((\d+),/g)).map((m) => Number(m[1]))
+    expect(androidCaps.length, 'TinyApi.kt declares no callTimeout — this guard is vacuous')
+      .toBeGreaterThan(0)
+    for (const [what, s] of [['iOS', Math.min(...iosCaps)], ['Android', Math.min(...androidCaps)]] as const) {
+      expect(exceedsServerBudget(s * 1000, serverMs), `${what}'s tightest ceiling is ${s}s`)
+        .toBe(false)
+    }
+  })
+
+  it('a voice turn hears the honest short-wait sentence, not a client abort', () => {
+    // The point of clamping at all. At this budget the wait falls UNDER the
+    // Bluetooth round trip, which is the case flipperInvoke's honest branch
+    // exists for: it refuses to diagnose the board, says how long it actually
+    // waited, and names where the full ceiling is available. Written in c6,
+    // unreachable from voice until the budget arrived.
+    const wait = statusWait(VOICE_TOOL_BUDGET_S)
+    expect(wait).toBeLessThan(STATUS_WAIT_S)
+    expect(wait).toBeLessThan(BLE_ROUND_TRIP_S)
+    expect(filesWait(VOICE_TOOL_BUDGET_S)).toBeLessThan(BLE_ROUND_TRIP_S)
+    // And it must still fit inside the turn, or the clamp only moved the abort.
+    expect(wait * 1000).toBeLessThan(deadlineFor('/api/voice/tool'))
+    // A capture longer than the turn can host is declined in words rather than
+    // started and abandoned — the host would go on holding the radio.
+    expect(listenBudget(MAX_LISTEN_S, VOICE_TOOL_BUDGET_S)).toBeLessThan(MAX_LISTEN_S + 5)
+  })
+
+  it('the budget is big enough to hold the shortest wait the clamp can produce', () => {
+    // The clamp has a FLOOR, and a floor makes a small budget silently vacuous:
+    // `Math.max(FLOOR, budgetS - MARGIN)` returns FLOOR for every budget under
+    // FLOOR + MARGIN, so the tool waits longer than the caller said it had and
+    // the caller's own deadline fires mid-wait. That is the same defect this
+    // block is about (a wait killed instead of answered) one layer in — and it
+    // is invisible from the tool's side, which reports a clamp it honoured.
+    //
+    // The floor and margin are SCRAPED, not copied: retuning clampToJob is
+    // exactly the edit that would put this budget under the floor, and it
+    // happens in flipper.ts where nothing mentions voice.
+    // codeOnly, because clampToJob's own docblock QUOTES the expression: scraped
+    // off the raw file this pin would keep reading a retired comment after the
+    // code moved under it.
+    const clamp = codeOnly(read('lib/chat/tools/flipper.ts'), /clampToJob/)
+      .match(/Math\.max\((\d+),\s*budgetS - (\d+)\)/)
+    expect(clamp, 'clampToJob no longer reads Math.max(FLOOR, budgetS - MARGIN) — re-derive this')
+      .toBeTruthy()
+    const [floorS, marginS] = [Number(clamp![1]), Number(clamp![2])]
+    expect(VOICE_TOOL_BUDGET_S, `a budget under the clamp's ${floorS}s floor buys nothing`)
+      .toBeGreaterThan(floorS)
+    // Stated as the relation as well as the value, since the floor is only the
+    // reason: every wait this bridge hands out has to END inside the bridge's
+    // patience, leaving something for the answer's own trip back. (Not the full
+    // `marginS` — the floor eats into it here by design; what must never happen
+    // is a wait that outlives the budget it was clamped to.)
+    for (const [what, w] of [
+      ['status', statusWait(VOICE_TOOL_BUDGET_S)],
+      ['files', filesWait(VOICE_TOOL_BUDGET_S)],
+      ['listen', listenBudget(MAX_LISTEN_S, VOICE_TOOL_BUDGET_S)],
+    ] as const) {
+      expect(w, `${what} waits ${w}s of a ${VOICE_TOOL_BUDGET_S}s budget`)
+        .toBeLessThan(VOICE_TOOL_BUDGET_S)
+    }
+    expect(marginS, 'the clamp stopped reserving anything for the trip back').toBeGreaterThan(0)
   })
 })
 

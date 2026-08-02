@@ -308,6 +308,47 @@ describe('roster wiring', () => {
     }
   })
 
+  it('the CLIENT that carries a voice tool_call forwards what it cannot run', () => {
+    // ⚠️ THE THIRD LEG. The list above names lib/voice/tools.ts (declaration) and
+    // app/api/voice/tool/route.ts (execution) and so read as a complete census of
+    // the voice rail — while the leg between them, the client that has to forward
+    // the tool_call, was asserted nowhere. All three flipper tools were declared
+    // to a web voice session and mounted for execution, and Chat.tsx's bridge
+    // still answered "not available on this device": it enumerated the SERVER
+    // tools by name, so every tool added to the roster afterwards fell into a
+    // refusal written about the browser. Full treatment in tests/flipper-ble.test.ts;
+    // here so the roster suite can never again call this covered.
+    //
+    // The property, not the spellings: each bridge's FALL-THROUGH must forward.
+    // A list of names is the thing that broke, so no list of names is asserted —
+    // and the assertion is scoped to the fall-through ARM, because a proxy call
+    // sitting inside a named case is exactly the shape that lied.
+    const bridges: [string, string, string][] = [
+      ['components/chat/Chat.tsx', 'const runVoiceTool', 'const startLiveCall'],
+      ['ios/Tiny/Sources/Views.swift', 'private func runVoiceTool(', 'private func unlockPrivate'],
+      ['android/app/src/main/java/technology/tiny/app/MainActivity.kt',
+        'name !in LOCAL_VOICE_TOOLS', '} else {'],
+    ]
+    for (const [file, from, to] of bridges) {
+      const text = src(file)
+      const at = text.indexOf(from)
+      expect(at, `${file}: ${from} is gone — the bridge was restructured`).toBeGreaterThan(-1)
+      const endAt = text.indexOf(to, at + from.length)
+      expect(endAt, `${file}: no end marker (${to}) — the slice would run to EOF`).toBeGreaterThan(at)
+      const body = text.slice(at, endAt)
+      // Android's marker IS its fall-through condition; the switch surfaces put
+      // theirs in the last `default:`. Whole-line comments stripped: the arms
+      // QUOTE the old refusal to explain why it was wrong, and a raw match reads
+      // the confession as the crime.
+      const arm = body.slice(Math.max(body.lastIndexOf('default:'), 0)).replace(/^[ \t]*\/\/.*$/gm, '')
+      expect(arm.trim().length, `${file}: the arm sliced empty`).toBeGreaterThan(40)
+      expect(arm, `${file} must forward an unknown tool to the voice bridge`)
+        .toMatch(/\/api\/voice\/tool/)
+      expect(arm, `${file} must not answer a server tool with a claim about the device`)
+        .not.toMatch(/not available on this device/)
+    }
+  })
+
   it('job-run tells the model the flipper tools exist, and their catch', () => {
     const text = src('app/api/job-run/route.ts')
     const note = text.slice(text.indexOf('const capabilityNote'), text.indexOf('const agent = new Agent'))

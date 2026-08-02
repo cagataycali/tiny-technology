@@ -80,6 +80,22 @@ export const ROUTE_DEADLINE_MS: Record<string, number> = {
   // The route gives the worker 20s for tx verification on `claim`; the other
   // actions are 10s reads. One budget for the endpoint = the widest of them.
   '/api/wallet': 35_000,
+  // ⚠️ The one entry whose route declares NO budget of its own — and therefore
+  // the one the guard below cannot check: `routeBudgets()` reads maxDuration and
+  // internal AbortSignal.timeout out of each route file and `continue`s on 0, so
+  // /api/voice/tool has always read as "nothing to outlive". Its real ceiling is
+  // the tools it MOUNTS and waits on: flipper_status/files poll a relay for
+  // `VOICE_TOOL_BUDGET_S` (20s, named in the route), the widest of them.
+  //
+  // Missing from this table, it fell through to QUICK_MS = 15s — below every
+  // hardware tool on that bridge, which is exactly the lie this module's header
+  // describes: the browser aborted with "the tool timed out" while the server was
+  // still legitimately waiting, replacing an answer that names the cause. 20s
+  // server → 35_000 is the same mapping /api/wallet's 20s uses, and it stays
+  // above the phones' own 30s ceiling on this route (Api.swift's
+  // timeoutInterval, TinyApi.kt's callTimeout) so all three surfaces let the
+  // SERVER decide the outcome.
+  '/api/voice/tool': 35_000,
   // 15s internal — exactly QUICK_MS, so these MUST be listed or they race.
   '/api/control': 25_000,
   '/api/telegram': 25_000,

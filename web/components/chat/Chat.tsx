@@ -2144,27 +2144,40 @@ export default function Chat({
           }
           return { ok: true, note: "rendered" };
         }
-        case "learn":
-        case "recall":
-        case "unlearn":
-        case "send_message":
-        case "read_messages":
-        case "nicla_take_photo":
-        case "nicla_take_video":
-        case "nicla_listen":
-        case "nicla_status": {
-          // Server tools (worker-backed memory + DMs + the 💎 necklace) —
-          // same session-bound tool objects chat mounts, executed by
-          // /api/voice/tool.
+        default: {
+          // Everything this surface does NOT run locally belongs to the server:
+          // forward it to /api/voice/tool, which executes the same
+          // session-bound tool objects chat mounts (worker-backed memory, DMs,
+          // the 💎 necklace, the 🎙️ voice necklace, the 🐬 Flipper).
+          //
+          // ⚠️ POLARITY — this arm used to REFUSE ("not available on this
+          // device") while the server tools were listed above it BY NAME, so
+          // every tool added to the roster after that list was written was
+          // answered with a sentence about the BROWSER. lib/voice/tools.ts
+          // declares nicla_voice_status/wakes/record/transcripts/transcript and
+          // flipper_status/files/listen to EVERY session type including this
+          // one, and /api/voice/tool mounts all eight for execution — so a
+          // spoken "is my Flipper reachable?" was told the board is not on this
+          // device, about hardware that is not on any device a browser could
+          // have, while the same question typed into this same box worked.
+          // Both phones already enumerate what they run LOCALLY and forward the
+          // rest, for exactly this reason (MainActivity's LOCAL_VOICE_TOOLS,
+          // Views.swift's default arm: "server-roster additions then work on
+          // STALE builds"). A name the bridge really has no executor for now
+          // gets its honest 404 instead of a claim about hardware — and the six
+          // device tools the roster offers a browser (vibrate / flashlight /
+          // set_brightness / play_sound / schedule_alert / cancel_alerts) get
+          // that same 404, which says what is true here: this bridge has no
+          // executor for them. Refusing them locally would mean writing a
+          // second name list, which is the thing that broke.
+          //
           // name: toolName — the bare `name` here is the TINY's slug (it
           // shadowed the tool name and 404'd every server tool on this
           // bridge); viaTiny stamps the sender surface for send_message.
           // Deadlined so a stalled tool call doesn't leave the VOICE agent
           // waiting on a promise that never settles (it can't narrate what it
-          // can't observe). ⚠️ /api/voice/tool declares no maxDuration and its
-          // lib/chat/tools/* worker fetches pass no signal, so before this the
-          // server had no ceiling either. The error text goes to the model, not
-          // a user, so String(e) stays — but a timeout must be legible to it.
+          // can't observe). The error text goes to the model, not a user, so
+          // String(e) stays — but a timeout must be legible to it.
           // isDeadlineError (not the tag): nothing else here can abort, so the
           // name is unambiguous at this one site.
           const r = await fetch("/api/voice/tool", {
@@ -2178,10 +2191,6 @@ export default function Chat({
           }));
           return r?.ok ? r.result : r;
         }
-        default:
-          // vibrate / flashlight / set_brightness / play_sound / screenshot /
-          // generate_image … — mobile-app device tools this surface lacks
-          return { ok: false, error: "not available on this device" };
       }
     } catch (e: any) {
       return { ok: false, error: String(e?.message || e) };
