@@ -32,6 +32,20 @@
  * prefix the second renders as the first — not a missing glyph, a confidently
  * WRONG one, on the only surface that reports the loss.
  *
+ * 🗣️🎙️👁️ The voice kinds are keyed IN FULL and NOT behind a shared `nicla`
+ * prefix, because they say three different things: the necklace heard its name,
+ * here is what was said, the camera saw motion. A prefix key would have been
+ * less typing and would have collapsed all three into one glyph.
+ *
+ * 📝 `device_note` is the sharpest case in this table, and the reason to read it
+ * carefully. `device` is a real prefix of it, so it inherited 💻 — "your laptop
+ * finished a task" — while actually carrying TRANSCRIBED SPEECH: it is
+ * NiclaRecorder's fallback rail for when /api/devices/transcript isn't deployed
+ * (postToServer), which is the state production is in, so it is the kind real
+ * transcripts arrive under today. Same shape as job_missed inheriting ⏰ from
+ * `job`: not a missing glyph but a confidently wrong one, which is worse,
+ * because nothing about the row invites you to doubt it.
+ *
  * A full key only beats a prefix key if the matcher prefers the more specific
  * one, which is why iconFor() sorts by key length rather than trusting the order
  * these are written in. Relying on literal order would make the correctness of
@@ -41,6 +55,7 @@
 export const KIND_ICONS: Record<string, string> = {
   job: "⏰", job_missed: "⛔", telegram: "✈️", tiny_visit: "👀", learn: "🧬", device: "💻",
   device_missed: "🚫", pay_alarm: "🚨",
+  nicla_wake: "🗣️", nicla_transcript: "🎙️", nicla_sentry: "👁️", device_note: "📝",
   pay_earned: "💵", pay_received: "💰", pay_withdrawn: "🏦", pay_refunded: "↩️",
   push: "🔔", share: "🔗", tool: "🔧", follow: "🤝", dm: "💬",
   // 🤖 `batch` covers `batch_result` — a spawn_agents wait:false fleet that
@@ -64,7 +79,7 @@ export const KIND_ICONS: Record<string, string> = {
  *
  * Hand-kept, because the worker is a separate deploy: `emitEvent` takes a free
  * `kind: string`, so there is no type to import and no exhaustive switch to
- * break. Derived by grepping `emitEvent(` across chatgpt-plugin-tinyai/src.
+ * break. Derived by grepping `emitEvent(` across worker/src.
  * When you add an emit site there, add its kind here — the test will tell you
  * what glyph is missing on which surface.
  */
@@ -97,6 +112,13 @@ export const EMITTED_KINDS = [
   // offloaded half of "trigger and forget on the Mac"). The `device` prefix
   // key already renders it 💻 on every surface.
   "device_task_result",
+  // 🗣️🎙️👁️📝 devices.ts DEVICE_EVENT_KINDS — the allowlist for POST
+  // /devices/event, written by the PHONES rather than by the worker: iOS
+  // NiclaVoiceGateway (nicla_wake) and NiclaRecorder (device_note), plus their
+  // Kotlin twins; nicla_transcript is the one with a real worker emit site
+  // (transcripts.ts, on every stored take). Grepping `emitEvent(` in the worker
+  // could never have found the other three — the test reads the allowlist.
+  "nicla_wake", "nicla_transcript", "nicla_sentry", "device_note",
 ] as const;
 
 /**

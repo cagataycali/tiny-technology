@@ -72,7 +72,9 @@ object Media {
         }.getOrDefault(false)
     }
 
-    private fun isForeground(context: Context): Boolean {
+    // internal: FleetManager's relay-path audit reports "backgrounded" honestly
+    // for open_url with the same check this module's own open() gates on.
+    internal fun isForeground(context: Context): Boolean {
         val am = context.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return false
         return am.runningAppProcesses?.any {
             it.processName == context.packageName &&

@@ -21,10 +21,17 @@ package technology.tiny.app.ui
  * ## What it fakes, and what it deliberately does NOT
  *
  * Only the ROWS. Everything that makes the screenshot a depiction of the product stays
- * on the real code path: [StatusDot]'s online colour, [deviceSubtitle]'s
- * "<kind> · online" / "<kind> · seen <relative>" text, [relativeSeen]'s buckets, the
- * `(this phone)` self-label, and the rule that the current device is offered no revoke
- * button. Those are read off the same fields the wire supplies.
+ * on the real code path: [PresenceDot]'s three-state tint, [presenceLine]'s
+ * "online · Mac" / "seen <relative> · iOS" text, [deviceLabel]'s platform table,
+ * [relativeSeen]'s buckets, the `(this phone)` self-label, and the rule that the
+ * current device is offered no revoke button. Those are read off the same fields the
+ * wire supplies.
+ *
+ * The third presence state — [DevicePresence.UNKNOWN], "reachable when called" — is
+ * absent for the same reason the endpoint row is (below): the worker only sends
+ * `online: null` for endpoint kinds, so a row that renders it honestly is a row that
+ * mounts [EndpointPanel]. Faking presence without faking the kind would draw a state
+ * the product never pairs with a `daemon`.
  *
  * ## Two things a fixed dataset gets WRONG here, which [GraphHarness] does not have
  *
@@ -96,20 +103,37 @@ object FleetHarness {
      * Names are generic device types, never hostnames: the real fleet's names embed the
      * account login (`FleetManager.enrollIfNeeded` builds `"${auth.login}-pixel"`), which
      * is exactly what leaked.
+     *
+     * Each row also carries the `platform` its real counterpart posts, because the
+     * second line names the HARDWARE now ("Mac", not "daemon · darwin-arm64").
+     * Without them every demo row fell back to its `kind` word and the fixture
+     * became the one place in the world where a fleet of seven devices claimed to
+     * be four "device"s and three "computer"s — a screenshot of a line the
+     * product doesn't draw. iOS hit the mirror image of this: its fixture posted
+     * `"platform": "bambu"` on a printer, making our own captures the only place
+     * a robot's row said what hardware it was.
      */
     private val DEMO = listOf(
-        Demo(name = "pixel", kind = "daemon", online = true, secondsAgo = 0L, self = true),
-        Demo(name = "macbook-pro", kind = "daemon", online = true, secondsAgo = 0L),
-        Demo(name = "ipad", kind = "daemon", online = false, secondsAgo = 30L),
-        Demo(name = "studio-mac", kind = "cli", online = false, secondsAgo = 8 * MIN),
-        Demo(name = "chrome-laptop", kind = "browser", online = false, secondsAgo = 5 * HOUR),
-        Demo(name = "watch", kind = "daemon", online = false, secondsAgo = 2 * DAY),
-        Demo(name = "old-thinkpad", kind = "cli", online = false, secondsAgo = -1L),
+        Demo(name = "pixel", kind = "daemon", platform = "android-arm64", online = true, secondsAgo = 0L, self = true),
+        Demo(name = "macbook-pro", kind = "daemon", platform = "darwin-arm64", online = true, secondsAgo = 0L),
+        // An iPad enrolls as "ios-arm64" — Session/FleetManager hard-code it for
+        // both idioms and make only the NAME idiom-aware. So this row reads "iOS",
+        // which is the strongest TRUE claim for that token; the `ipad` needle in
+        // DEVICE_PLATFORM_NAME is dead for anything this app enrolled. Recorded
+        // rather than fixed: correcting it means changing the wire, and
+        // lib/chat/tools/nicla-voice.ts matches `platform === 'ios-arm64'` exactly
+        // to pick the recorder phone for the Voice necklace.
+        Demo(name = "ipad", kind = "daemon", platform = "ios-arm64", online = false, secondsAgo = 30L),
+        Demo(name = "studio-mac", kind = "cli", platform = "darwin-arm64", online = false, secondsAgo = 8 * MIN),
+        Demo(name = "chrome-laptop", kind = "browser", platform = "", online = false, secondsAgo = 5 * HOUR),
+        Demo(name = "watch", kind = "daemon", platform = "linux-arm64", online = false, secondsAgo = 2 * DAY),
+        Demo(name = "old-thinkpad", kind = "cli", platform = "linux-x64", online = false, secondsAgo = -1L),
     )
 
     private data class Demo(
         val name: String,
         val kind: String,
+        val platform: String,
         val online: Boolean,
         val secondsAgo: Long,
         val self: Boolean = false,
@@ -134,6 +158,7 @@ object FleetHarness {
                 kind = d.kind,
                 online = d.online,
                 lastSeen = if (d.secondsAgo < 0L) 0L else nowSec - d.secondsAgo,
+                platform = d.platform,
                 // Empty on purpose: capabilities only drive the endpoint camera panel,
                 // and there is deliberately no endpoint row. See the class docblock.
                 capabilities = emptyList(),

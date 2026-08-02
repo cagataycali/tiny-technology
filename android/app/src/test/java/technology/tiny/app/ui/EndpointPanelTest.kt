@@ -214,10 +214,16 @@ class EndpointPanelTest {
 
     @Test fun `only an endpoint device gets a live panel`() {
         // Every other row must cost nothing extra — most people have no robots.
-        val printer = DeviceRow("d1", "3D printer", "endpoint", false, 0L, listOf("print"))
+        // `online = null` is what the wire really sends for an endpoint: it never
+        // heartbeats, so the worker declines to guess (devices.ts:294).
+        val printer = DeviceRow("d1", "3D printer", "endpoint", null, 0L, listOf("print"))
         val phone = DeviceRow("d2", "Pixel", "android", true, 1_784_808_000L)
         assertTrue(printer.isEndpoint)
         assertFalse(phone.isEndpoint)
+        // The row that mounts this panel is also the only one whose presence is
+        // unknowable, and it must not read as dead on the way in.
+        assertEquals(DevicePresence.UNKNOWN, printer.presence)
+        assertEquals(DevicePresence.ONLINE, phone.presence)
         // And a plain row defaults to no capabilities rather than null.
         assertTrue(phone.capabilities.isEmpty())
     }

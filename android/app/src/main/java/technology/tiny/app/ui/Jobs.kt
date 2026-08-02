@@ -123,19 +123,18 @@ fun JobsSheet(app: TinyApp, onDismiss: () -> Unit) {
         reloadAlerts()
         scope.launch {
             val res = runCatching { app.api.getJson("/api/jobs") }.getOrNull()
-            // getOrNull() → null is a transport failure; a non-null body carrying
-            // _status is an HTTP error. Either way we couldn't load the SERVER jobs —
-            // distinct from a clean empty list, so we don't lie "no jobs".
-            val status = res?.optInt("_status", 0) ?: 0
-            if (res == null || status >= 400) {
-                jobsFailed = status.takeIf { it >= 400 }
-                    ?.let { technology.tiny.app.net.friendlyHttpError(it) }
-                    ?: "couldn't reach the server"
+            // One rule for all six list sheets ([LoadFailure]), and it asks whether
+            // the `jobs` key ARRIVED — a 200 that wasn't JSON parses to an empty
+            // object carrying no `_status`, so the old `status >= 400` guard passed it
+            // and the sheet lied "no jobs" about a schedule that exists.
+            val body = LoadFailure.loaded(res, "jobs")
+            if (body == null) {
+                jobsFailed = LoadFailure.contentMessage(res, "jobs", "your jobs")
                 jobs = null
                 return@launch
             }
             jobsFailed = null
-            val arr = res.optJSONArray("jobs")
+            val arr = body.optJSONArray("jobs")
             jobs = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
                 arr?.optJSONObject(i)?.let { j ->
                     JobRow(
@@ -155,7 +154,7 @@ fun JobsSheet(app: TinyApp, onDismiss: () -> Unit) {
             // Run history was fetched-but-dropped before this — a loop the user
             // can't observe isn't a loop, it's a leap of faith (web JobsPanel
             // shows the same runs array; iOS shows none — matches web).
-            val runsArr = res.optJSONArray("runs")
+            val runsArr = body.optJSONArray("runs")
             runs = (0 until (runsArr?.length() ?: 0)).mapNotNull { i ->
                 runsArr?.optJSONObject(i)?.let { r ->
                     JobRun(

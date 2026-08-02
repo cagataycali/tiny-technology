@@ -10,6 +10,8 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -19,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
@@ -49,11 +52,33 @@ import technology.tiny.app.ui.theme.TinyGray
 @Composable
 fun MarkdownText(text: String) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        // Fences split FIRST, then media isolation runs on prose only: doing it
+        // the other way injected newlines into fenced code, so a shown command
+        // like `curl -o out.gif https://…/clip.gif` broke across two lines.
         splitFences(text).forEach { seg ->
-            if (seg.isCode) CodeCard(seg.text, seg.lang) else ProseText(seg.text)
+            if (seg.isCode) CodeCard(seg.text, seg.lang) else ProseText(isolateMediaLines(seg.text))
         }
     }
 }
+
+// The image branch below only fires for a WHOLE-line `![alt](url)` — but
+// agents butt media against prose (`…jpg)Anything else?`) and reply with bare
+// .wav/.mp4 links (the necklace's clips). Give every embedded image/media URL
+// its own line so the standalone branches render players instead of raw text.
+private val EMBEDDED_IMAGE = Regex("(!\\[[^\\]]*]\\(https?://[^)\\s]+\\))")
+private val BARE_MEDIA_URL = Regex(
+    "(?<![(\\[])(https?://[^\\s<>()\"]+\\.(?:wav|mp3|m4a|aac|mp4|mov|m4v|gif))\\b",
+    RegexOption.IGNORE_CASE,
+)
+
+/** Isolate media URLs onto their own lines, leaving `inline code` spans alone —
+ *  a URL the user is meant to copy must not gain a newline. Fenced blocks are
+ *  already excluded by MarkdownText, which splits fences before calling this. */
+internal fun isolateMediaLines(text: String): String =
+    text.split("`").mapIndexed { i, part ->
+        if (i % 2 == 1) part                       // odd index = inside backticks
+        else part.replace(EMBEDDED_IMAGE, "\n$1\n").replace(BARE_MEDIA_URL, "\n$1\n")
+    }.joinToString("`")
 
 data class Segment(val text: String, val isCode: Boolean, val lang: String? = null)
 
@@ -171,6 +196,19 @@ private fun ProseText(text: String) {
                 i++
                 continue
             }
+            // Bare media URL on its own line (isolateMediaLines puts it there):
+            // audio → play card, video → inline player, gif → MdImage (coil-gif
+            // animates it).
+            val mediaLine = mediaLineMatch(line)
+            if (mediaLine != null) {
+                when (mediaLine.second) {
+                    "audio" -> AudioClipCard(mediaLine.first)
+                    "video" -> VideoCard(mediaLine.first)
+                    else -> MdImage(alt = "clip", url = mediaLine.first, link = null)
+                }
+                i++
+                continue
+            }
             // A nested list item carries leading whitespace ("  - child"): peel it to
             // an indent depth and match the marker on the trimmed line, so the item
             // still lists (indented) instead of falling through to flat paragraph text.
@@ -260,6 +298,8 @@ private fun MdImage(alt: String, url: String, link: String?) {
     val context = LocalContext.current
     val open = link ?: url
     var menuOpen by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    var viewer by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    if (viewer) MediaViewerDialog(url, "image") { viewer = false }
     Column(Modifier.padding(vertical = 4.dp)) {
         Box {
             coil.compose.AsyncImage(
@@ -270,22 +310,37 @@ private fun MdImage(alt: String, url: String, link: String?) {
                     .heightIn(max = 320.dp)
                     .clip(RoundedCornerShape(12.dp))
                     .combinedClickable(
-                        onClick = {
-                            runCatching {
-                                context.startActivity(
-                                    android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(open)),
-                                )
-                            }
-                        },
+                        // Tap opens the in-app viewer (iOS ChatMediaCard parity);
+                        // "Open in browser" moved into the long-press menu.
+                        onClick = { viewer = true },
                         onLongClick = { menuOpen = true },
                         onLongClickLabel = "Image options",
                     ),
                 contentScale = androidx.compose.ui.layout.ContentScale.FillWidth,
             )
+            Box(Modifier.align(Alignment.TopEnd)) { MediaActionButtons(url) { viewer = true } }
             androidx.compose.material3.DropdownMenu(
                 expanded = menuOpen,
                 onDismissRequest = { menuOpen = false },
             ) {
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Download") },
+                    onClick = {
+                        menuOpen = false
+                        downloadMedia(context, url)
+                    },
+                )
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Open in browser") },
+                    onClick = {
+                        menuOpen = false
+                        runCatching {
+                            context.startActivity(
+                                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(open)),
+                            )
+                        }
+                    },
+                )
                 androidx.compose.material3.DropdownMenuItem(
                     text = { Text("Share image link") },
                     onClick = {
@@ -768,4 +823,107 @@ private fun findLink(line: String, from: Int): Int {
         open = line.indexOf('[', open + 1)
     }
     return Int.MAX_VALUE
+}
+
+// ── inline media players (necklace WAV clips, glasses MP4s) ──────────────────
+
+private val MEDIA_LINE = Regex(
+    "^(https?://\\S+\\.(wav|mp3|m4a|aac|mp4|mov|m4v|gif))$",
+    RegexOption.IGNORE_CASE,
+)
+
+/** (url, kind: audio|video|image) for a whole-line media URL, else null. */
+internal fun mediaLineMatch(line: String): Pair<String, String>? {
+    val m = MEDIA_LINE.matchEntire(line.trim()) ?: return null
+    val kind = when (m.groupValues[2].lowercase()) {
+        "wav", "mp3", "m4a", "aac" -> "audio"
+        "gif" -> "image"
+        else -> "video"
+    }
+    return m.groupValues[1] to kind
+}
+
+/** A hosted audio clip as a play/stop card — iOS AudioClipCard parity.
+ *  `internal` so MediaViewerDialog can reuse it for full-screen audio. */
+@Composable
+internal fun AudioClipCard(url: String) {
+    val context = LocalContext.current
+    var playing by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    val player = androidx.compose.runtime.remember { android.media.MediaPlayer() }
+    androidx.compose.runtime.DisposableEffect(Unit) { onDispose { player.release() } }
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Row(
+            Modifier.padding(12.dp).widthIn(max = 280.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.primary,
+                shape = androidx.compose.foundation.shape.CircleShape,
+                modifier = Modifier.size(36.dp).clickable {
+                    if (playing) {
+                        player.stop(); player.reset(); playing = false
+                    } else {
+                        runCatching {
+                            player.reset()
+                            player.setDataSource(url)
+                            player.setOnPreparedListener { it.start() }
+                            player.setOnCompletionListener { playing = false }
+                            player.prepareAsync()
+                            playing = true
+                        }.onFailure { playing = false }
+                    }
+                },
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(if (playing) "◼" else "▶", color = MaterialTheme.colorScheme.onPrimary)
+                }
+            }
+            Column(Modifier.weight(1f, fill = false)) {
+                Text(
+                    if (playing) "PLAYING" else "AUDIO CLIP",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    url.substringAfterLast('/'),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    maxLines = 1,
+                )
+            }
+            androidx.compose.material3.Icon(
+                Icons.Filled.Download,
+                contentDescription = "Download clip",
+                tint = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.size(20.dp).clickable { downloadMedia(context, url) },
+            )
+        }
+    }
+}
+
+/** Inline video via classic VideoView — dependency-free (no ExoPlayer). */
+@Composable
+private fun VideoCard(url: String) {
+    var viewer by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf(false) }
+    if (viewer) MediaViewerDialog(url, "video") { viewer = false }
+    Box {
+        Surface(shape = RoundedCornerShape(14.dp)) {
+            androidx.compose.ui.viewinterop.AndroidView(
+                factory = { ctx ->
+                    android.widget.VideoView(ctx).apply {
+                        setVideoURI(android.net.Uri.parse(url))
+                        setMediaController(android.widget.MediaController(ctx).also { it.setAnchorView(this) })
+                        setOnPreparedListener { it.isLooping = false }
+                        seekTo(1)   // show the first frame instead of black
+                    }
+                },
+                modifier = Modifier.widthIn(max = 280.dp).height(200.dp),
+            )
+        }
+        Box(Modifier.align(Alignment.TopEnd)) { MediaActionButtons(url) { viewer = true } }
+    }
 }

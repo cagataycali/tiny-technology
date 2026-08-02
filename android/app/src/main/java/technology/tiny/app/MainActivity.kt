@@ -40,10 +40,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.outlined.AccountCircle
 import androidx.compose.material.icons.outlined.Hub
 import androidx.compose.material.icons.outlined.AccountBalanceWallet
 import androidx.compose.material.icons.outlined.Bedtime
@@ -86,6 +88,10 @@ import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
+import technology.tiny.app.ui.GlassesLiveCard
+import technology.tiny.app.ui.TinyLiveCard
+import androidx.compose.material.icons.filled.Diamond
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -111,6 +117,9 @@ class MainActivity : ComponentActivity() {
     private var deepLinkDm by mutableStateOf<String?>(null)
     // Set from a widget tap: tinyapp://ask|voice|memory|messages → routes in ChatScreen.
     private var deepLinkRoute by mutableStateOf<String?>(null)
+    // Set from a TRUSTED (non-browsable) tinyapp://ask?q= — our own notification
+    // taps carrying a push's redeem turn → ChatScreen auto-sends it (askQuery).
+    private var deepLinkAskSend by mutableStateOf<String?>(null)
     // Set from a dynamic recent-tiny launcher shortcut: tinyapp://tiny?name=<slug>.
     private var deepLinkTiny by mutableStateOf<String?>(null)
     // Set when another app shares text to tiny (ACTION_SEND) or the text-selection
@@ -190,6 +199,8 @@ class MainActivity : ComponentActivity() {
                             onDmConsumed = { deepLinkDm = null },
                             widgetRoute = deepLinkRoute,
                             onRouteConsumed = { deepLinkRoute = null },
+                            askSend = deepLinkAskSend,
+                            onAskSendConsumed = { deepLinkAskSend = null },
                             tinyRoute = deepLinkTiny,
                             onTinyConsumed = { deepLinkTiny = null },
                             sharedText = sharedText,
@@ -298,7 +309,15 @@ class MainActivity : ComponentActivity() {
         // panel / focus a box) and stay as-is.
         val browsable = intent.categories?.contains(Intent.CATEGORY_BROWSABLE) == true
         when (uri.host) {
-            "ask", "voice", "memory", "messages" -> deepLinkRoute = safeWidgetRoute(uri.host, browsable)
+            "ask", "voice", "memory", "messages" -> {
+                deepLinkRoute = safeWidgetRoute(uri.host, browsable)
+                // ask?q=<text> (native tap→redeem): trusted taps auto-send,
+                // browser-originated links only seed the composer — the trust
+                // rule lives in askQuery() below, next to safeWidgetRoute's.
+                askQuery(uri.getQueryParameter("q"), browsable)?.let {
+                    if (it.autoSend) deepLinkAskSend = it.text else sharedText = it.text
+                }
+            }
             "tiny" -> uri.getQueryParameter("name")?.takeIf { it.isNotBlank() }?.let { deepLinkTiny = it }
         }
     }
@@ -361,6 +380,10 @@ class MainActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch { app.updater.checkSoon() }
+        // 🎙️ Nicla Voice gateway: hold the necklace's BLE link while the app
+        // is visible (iOS scenePhase .active parity). No-op with no paired
+        // Voice — a user without one never pays for this line.
+        technology.tiny.app.fleet.NiclaVoiceGateway.start(this)
         if (app.auth.isLoggedIn) {
             askNotificationsOnce()
             technology.tiny.app.fleet.DmPollWorker.schedule(this) // background DM polling
@@ -377,6 +400,18 @@ class MainActivity : ComponentActivity() {
         // When always-on is enabled the foreground RelayService owns the fleet
         // loops — leave them running so the phone stays reachable while locked.
         if (!app.config.alwaysOn) app.fleet.stop()
+        // 🎙️ The voice necklace: hand its link to the always-on service if one
+        // is running, and only drop it when nothing is left to gateway.
+        //
+        // This used to stop unconditionally, citing iOS's scenePhase parity —
+        // but that was iOS's CONSTRAINT, not a rule worth copying. The board has
+        // no WiFi and cannot report for itself, so a phone that stops gatewaying
+        // when it goes in a pocket makes the necklace offline exactly when it's
+        // being worn. A foreground service isn't suspended, so where always-on
+        // is enabled the link (and the wake path) simply keeps working; iOS
+        // reached the same place the hard way with bluetooth-central + state
+        // restoration (3c969817).
+        if (!app.config.alwaysOn) technology.tiny.app.fleet.NiclaVoiceGateway.stop()
     }
 
     private fun launchLogin() {
@@ -499,6 +534,21 @@ fun safeWidgetRoute(host: String?, browsable: Boolean): String? = when {
     else -> host
 }
 
+/**
+ * tinyapp://ask?q=<text> trust rule (native tap→redeem). OUR OWN notification
+ * taps (RelayNotifier — package-scoped PendingIntent, never CATEGORY_BROWSABLE)
+ * carry a push's redeem turn and AUTO-SEND, so the tap lands on the fetched
+ * result exactly like the web notification click. A BROWSABLE ask?q= reaches
+ * here from ANY web page's <a href> — auto-sending would let a drive-by link
+ * run an attacker-authored prompt with the user's full tool set, so it only
+ * SEEDS the composer (the sharedText behavior: user reviews, user sends).
+ * Same origin distinction that keeps a browser link off the mic above.
+ */
+data class AskQuery(val text: String, val autoSend: Boolean)
+
+fun askQuery(q: String?, browsable: Boolean): AskQuery? =
+    q?.takeIf { it.isNotBlank() }?.let { AskQuery(text = it, autoSend = !browsable) }
+
 @Composable
 fun LoginScreen(error: String?, onLogin: () -> Unit) {
     Surface(modifier = Modifier.fillMaxSize()) {
@@ -544,6 +594,10 @@ fun ChatScreen(
     onDmConsumed: () -> Unit = {},
     widgetRoute: String? = null,
     onRouteConsumed: () -> Unit = {},
+    // A TRUSTED tinyapp://ask?q= redeem turn (our own notification tap) —
+    // auto-sent below; browser-originated q rides sharedText (seed-only).
+    askSend: String? = null,
+    onAskSendConsumed: () -> Unit = {},
     tinyRoute: String? = null,
     onTinyConsumed: () -> Unit = {},
     sharedText: String? = null,
@@ -651,6 +705,23 @@ fun ChatScreen(
     // sidebar, so on a phone the tiny universe (users/tinys/tools) had no discoverable
     // entry (iOS Views.swift has a dedicated universe toolbar button).
     var showOverflow by remember { mutableStateOf(false) }
+    // 💎 Necklace live view (iOS sparkles.tv parity) — TinyLiveCard overlay.
+    var showTinyLive by remember { mutableStateOf(false) }
+    // 🕶 Glasses live HUD (iOS GlassesLiveOverlay parity) — the card owns the
+    // stream lifecycle; this flag only shows/hides it.
+    var showGlassesLive by remember { mutableStateOf(false) }
+    // The 🕶 toggle appears only once glasses are LINKED (iOS: isLinked gates
+    // the toolbar icon). ensureInitialized needs BLUETOOTH_CONNECT — granted
+    // in settings → meta glasses — so poll until it holds rather than
+    // requiring an app restart after the grant.
+    val glassesLinked by produceState(false) {
+        while (!technology.tiny.app.fleet.WearablesBridge.ensureInitialized(app)) {
+            kotlinx.coroutines.delay(3_000)
+        }
+        technology.tiny.app.fleet.WearablesBridge.registrationState.collect {
+            value = it == com.meta.wearable.dat.core.types.RegistrationState.REGISTERED
+        }
+    }
     // 📞 Real speech-to-speech call (voice/VoiceCall) — INLINE in this chat
     // (web/iOS inline-chat parity, replaces the old full-screen
     // VoiceCallScreen): transcripts land in the thread as real messages,
@@ -733,6 +804,26 @@ fun ChatScreen(
                     res.url.isEmpty() -> org.json.JSONObject().put("denied", true)
                         .put("note", "the user declined this capture")
                     else -> org.json.JSONObject().put("ok", true).put("url", res.url)
+                }
+                runCatching { liveCall.sendToolResult(id, out) }
+            }
+        } else if (name == "meta_take_photo" || name == "meta_record_video" || name == "meta_glasses_status") {
+            // 🕶 Glasses tools mid-call (iOS ChatModel.voiceMetaTakePhoto
+            // parity): the DAT session lives in THIS app — the server proxy
+            // can't reach the glasses, so these must run locally. Same shared
+            // cores the chat executors use; the payload goes up the WS
+            // instead of the chat mailbox. Every path answers — a dropped
+            // tool_result stalls the model's turn.
+            callScope.launch {
+                val out = runCatching {
+                    when (name) {
+                        "meta_take_photo" -> technology.tiny.app.fleet.WearablesBridge.photoPayload(app)
+                        "meta_record_video" -> technology.tiny.app.fleet.GlassesRecorderBridge.toggle(app)
+                        else -> technology.tiny.app.fleet.WearablesBridge.statusFacts(app)
+                    }
+                }.getOrElse { t ->
+                    org.json.JSONObject().put("ok", false)
+                        .put("error", t.message ?: "glasses tool failed on the device")
                 }
                 runCatching { liveCall.sendToolResult(id, out) }
             }
@@ -860,6 +951,17 @@ fun ChatScreen(
             "messages" -> vm.openPanel = "messages"
         }
         if (widgetRoute != null) onRouteConsumed()
+    }
+    // 🤖/💻 Native tap→redeem: the text is OUR OWN push's redeem turn (worker
+    // buildDeviceResultPush / web spawn.ts buildBatchPush), delivered via a
+    // package-scoped notification tap — so it auto-sends and the tap lands on
+    // the fetched result, web ?q= parity. Browser-originated ask?q= can never
+    // reach this channel (handleWidgetRoute routes it to seed-only sharedText).
+    LaunchedEffect(askSend) {
+        askSend?.let {
+            vm.send(it)
+            onAskSendConsumed()
+        }
     }
     // Dynamic recent-tiny launcher shortcut (tinyapp://tiny?name=<slug>).
     LaunchedEffect(tinyRoute) {
@@ -1115,33 +1217,58 @@ fun ChatScreen(
                     // match web Chat.tsx:2703 and iOS Views.swift:2428 — the cost now
                     // shows at the moment of commit, not up in the chrome.
                     Spacer(Modifier.weight(1f))
-                    login?.let {
-                        Text("@$it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    IconButton(onClick = { searching = true }) {
-                        Icon(Icons.Filled.Search, contentDescription = "search chat", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    val unread by app.fleet.unread.collectAsState()
-                    IconButton(onClick = { vm.openPanel = "messages" }) {
-                        BadgedBox(badge = {
-                            if (unread > 0) Badge(containerColor = MaterialTheme.colorScheme.primary) { Text("$unread") }
-                        }) {
-                            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = "messages", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // The bar slimmed to iOS's three trailing items (user ask
+                    // 2026-08-02: "the menu bar in android is too crowded…
+                    // ios is pretty clean"): 🕶 when linked, 💎, and ONE
+                    // account menu. @handle, search, messages and activity
+                    // all live in the menu now, exactly like iOS
+                    // Views.swift:2293's account Menu.
+                    // 🕶 Glasses live HUD — only when linked. Emoji glyphs
+                    // ignore tint, so the active state is a soft primary
+                    // circle behind the glyph instead.
+                    if (glassesLinked) {
+                        IconButton(onClick = { showGlassesLive = !showGlassesLive }) {
+                            Box(
+                                modifier = if (showGlassesLive) {
+                                    Modifier.background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                                        RoundedCornerShape(50),
+                                    ).padding(4.dp)
+                                } else Modifier.padding(4.dp),
+                            ) { Text("🕶") }
                         }
                     }
-                    val eventsUnread by app.fleet.eventsUnread.collectAsState()
-                    IconButton(onClick = { vm.openPanel = "activity" }) {
-                        BadgedBox(badge = {
-                            if (eventsUnread > 0) Badge(containerColor = MaterialTheme.colorScheme.primary) {
-                                Text(if (eventsUnread > 9) "9+" else "$eventsUnread")
-                            }
-                        }) {
-                            Icon(Icons.Filled.Bolt, contentDescription = "activity", tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
+                    // 💎 Necklace live view — glasses-style PiP (remote frames
+                    // anywhere; LAN MJPEG when the WiFi is shared).
+                    IconButton(onClick = {
+                        showTinyLive = !showTinyLive
+                        if (showTinyLive) technology.tiny.app.fleet.TinyLive.start(app.api, app)
+                        else technology.tiny.app.fleet.TinyLive.stop()
+                    }) {
+                        Icon(
+                            Icons.Filled.Diamond, contentDescription = "necklace live view",
+                            tint = if (showTinyLive) MaterialTheme.colorScheme.primary
+                                   else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
                     Box {
-                        IconButton(onClick = { showOverflow = true }) {
-                            Icon(Icons.Filled.MoreVert, contentDescription = "more", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        val unread by app.fleet.unread.collectAsState()
+                        val eventsUnread by app.fleet.eventsUnread.collectAsState()
+                        // Two-level menu (iOS parity): main = the five daily
+                        // surfaces + Settings; everything else one level down
+                        // in More. State resets on open so the menu never
+                        // reopens stranded on the More page.
+                        var menuMore by remember { mutableStateOf(false) }
+                        IconButton(onClick = { menuMore = false; showOverflow = true }) {
+                            // A dot (not a count) keeps the unread signal the
+                            // dedicated icons used to carry, without the crowd.
+                            BadgedBox(badge = {
+                                if (unread + eventsUnread > 0) {
+                                    Badge(containerColor = MaterialTheme.colorScheme.primary)
+                                }
+                            }) {
+                                Icon(Icons.Outlined.AccountCircle, contentDescription = "account menu", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                         DropdownMenu(expanded = showOverflow, onDismissRequest = { showOverflow = false }) {
                             // Browse/explore surfaces that lack a top-bar icon. Same
@@ -1162,62 +1289,75 @@ fun ChatScreen(
                             // Material equivalents (Psychology/Handyman/Schedule/Sensors)
                             // give the polished, monochrome-tinted look the emoji lacked.
                             @Composable
-                            fun item(icon: ImageVector, label: String, panel: String) = DropdownMenuItem(
+                            fun item(icon: ImageVector, label: String, onPick: () -> Unit) = DropdownMenuItem(
                                 text = { Text(label) },
                                 leadingIcon = { Icon(icon, contentDescription = null) },
                                 onClick = {
                                     overflowHaptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
-                                    showOverflow = false; vm.openPanel = panel
+                                    showOverflow = false; onPick()
                                 },
                             )
-                            item(Icons.Outlined.Hub, "Universe", "universe")
-                            item(Icons.Outlined.AccountBalanceWallet, "Wallet", "wallet")
-                            // ⛓️ Directly under Wallet, because it answers the other
-                            // half of the same question: the wallet says how much,
-                            // the chain says on WHAT — and on a self-hosted
-                            // deployment that's our own chain, which the phone had
-                            // no way to see (iOS puts it in Settings' wallet
-                            // section for the same reason).
-                            item(Icons.Outlined.Link, "Chain", "chain")
-                            item(Icons.Outlined.Handyman, "Toolbox", "toolbox")
-                            item(Icons.Outlined.Schedule, "Scheduled jobs", "jobs")
-                            item(Icons.Outlined.Podcasts, "Call recordings", "calls")
-                            item(Icons.Outlined.Psychology, "Memory", "memory")
-                            item(Icons.Outlined.Sensors, "Nearby", "nearby")
-                            item(Icons.Outlined.Map, "Map", "map")
-                            HorizontalDivider()
-                            // Devices + Settings moved out of the icon row: with the
-                            // overflow in place, SIX same-weight icons crowded the bar
-                            // (design audit #4) — the badged, high-frequency surfaces
-                            // (search / messages / activity) keep their icons, config
-                            // lives here.
-                            DropdownMenuItem(
-                                text = { Text("Devices") },
-                                leadingIcon = { Icon(Icons.Outlined.Devices, contentDescription = null) },
-                                onClick = {
-                                    overflowHaptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
-                                    showOverflow = false; showDevices = true
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text("Settings") },
-                                leadingIcon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
-                                onClick = {
-                                    overflowHaptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
-                                    showOverflow = false; showSettings = true
-                                },
-                            )
-                            // Owner-only: the live-call voice is a per-tiny server
-                            // field — everyone who calls this tiny hears it.
-                            if (vm.isOwner) {
+                            if (!menuMore) {
+                                // MAIN page — iOS's account-menu order verbatim
+                                // (Views.swift:2293, user ask 2026-08-02):
+                                // Messages first, then My devices, Memory,
+                                // Scheduled jobs, Toolbox, Settings.
+                                login?.let {
+                                    Text(
+                                        "@$it",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                    )
+                                }
+                                // Android-only: search has no pull-down drawer
+                                // like iOS's .searchable, so its entry lives at
+                                // the top of the menu instead of a bar icon.
+                                item(Icons.Filled.Search, "Search chat") { searching = true }
+                                val unread by app.fleet.unread.collectAsState()
+                                item(
+                                    Icons.AutoMirrored.Filled.Chat,
+                                    if (unread > 0) "Messages ($unread)" else "Messages",
+                                ) { vm.openPanel = "messages" }
+                                item(Icons.Outlined.Devices, "My devices") { showDevices = true }
+                                item(Icons.Outlined.Psychology, "Memory") { vm.openPanel = "memory" }
+                                item(Icons.Outlined.Schedule, "Scheduled jobs") { vm.openPanel = "jobs" }
+                                item(Icons.Outlined.Handyman, "Toolbox") { vm.openPanel = "toolbox" }
+                                item(Icons.Outlined.Settings, "Settings") { showSettings = true }
+                                HorizontalDivider()
                                 DropdownMenuItem(
-                                    text = { Text("Call voice") },
-                                    leadingIcon = { Icon(Icons.Outlined.GraphicEq, contentDescription = null) },
-                                    onClick = {
-                                        overflowHaptics.performHapticFeedback(androidx.compose.ui.hapticfeedback.HapticFeedbackType.TextHandleMove)
-                                        showOverflow = false; showVoicePicker = true
-                                    },
+                                    text = { Text("More") },
+                                    trailingIcon = { Icon(Icons.AutoMirrored.Outlined.ArrowForward, contentDescription = null) },
+                                    onClick = { menuMore = true }, // stays open — it's a page turn
                                 )
+                            } else {
+                                // MORE page — everything iOS tucks one level
+                                // down, plus the Android-only Wallet/Chain rows
+                                // (on iOS those live in Settings).
+                                DropdownMenuItem(
+                                    text = { Text("Back") },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = null) },
+                                    onClick = { menuMore = false },
+                                )
+                                HorizontalDivider()
+                                val eventsUnread by app.fleet.eventsUnread.collectAsState()
+                                item(
+                                    Icons.Filled.Bolt,
+                                    if (eventsUnread > 0) "Activity ($eventsUnread)" else "Activity",
+                                ) { vm.openPanel = "activity" }
+                                item(Icons.Outlined.Hub, "Universe") { vm.openPanel = "universe" }
+                                item(Icons.Outlined.AccountBalanceWallet, "Wallet") { vm.openPanel = "wallet" }
+                                // ⛓️ Directly under Wallet: the wallet says how
+                                // much, the chain says on WHAT.
+                                item(Icons.Outlined.Link, "Chain") { vm.openPanel = "chain" }
+                                item(Icons.Outlined.Sensors, "Nearby") { vm.openPanel = "nearby" }
+                                item(Icons.Outlined.Map, "Map") { vm.openPanel = "map" }
+                                item(Icons.Outlined.Podcasts, "Call recordings") { vm.openPanel = "calls" }
+                                // Owner-only: the live-call voice is a per-tiny
+                                // server field — everyone who calls hears it.
+                                if (vm.isOwner) {
+                                    item(Icons.Outlined.GraphicEq, "Call voice") { showVoicePicker = true }
+                                }
                             }
                         }
                     }
@@ -2323,6 +2463,16 @@ fun ChatScreen(
             }
         },
     ) { padding ->
+        // 💎/🕶 The live cards float top-end above the chat, glasses-style —
+        // stacked in one column when the necklace and the glasses are both up.
+        if (showTinyLive || showGlassesLive) {
+            Box(Modifier.fillMaxSize().padding(padding).zIndex(10f)) {
+                Column(Modifier.align(Alignment.TopEnd)) {
+                    if (showTinyLive) TinyLiveCard(app) { showTinyLive = false }
+                    if (showGlassesLive) GlassesLiveCard(app) { showGlassesLive = false }
+                }
+            }
+        }
         // iOS visibleMessages parity: trim query, empty → all; else case-insensitive
         // substring filter over message text only.
         val q = searchQuery.trim()

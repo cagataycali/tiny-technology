@@ -53,6 +53,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import technology.tiny.app.TinyApp
 import technology.tiny.app.ui.theme.TinyGray
+import technology.tiny.app.ui.theme.TinyWarn
 import technology.tiny.app.wallet.ChainCore
 import technology.tiny.app.wallet.WalletRepository
 
@@ -78,11 +79,6 @@ import technology.tiny.app.wallet.WalletRepository
  *    ([ChainCore.Status.showsActivity]) — "no recent activity" for a node that
  *    never answered is an absence of data presented as a fact about the chain.
  */
-
-/** Warning amber — iOS uses `.orange` for the same two signals (a mismatched chain
- *  id, a clamped amount). TinyDanger would over-state them: neither is an error,
- *  both are "don't trust this number as-is". Local to this screen on purpose. */
-private val ChainWarn = Color(0xFFFFB020)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -142,7 +138,7 @@ fun ChainSheet(app: TinyApp, onDismiss: () -> Unit) {
                             style = MaterialTheme.typography.bodyMedium,
                             // A mismatch is the one headline that changes what the
                             // numbers below MEAN, so it doesn't read as body copy.
-                            color = if (mismatch) ChainWarn else TinyGray,
+                            color = if (mismatch) TinyWarn else TinyGray,
                         )
                         Spacer(Modifier.height(12.dp))
                     }
@@ -244,7 +240,7 @@ private fun NetworkCard(s: ChainCore.Status, onCopy: (String, String) -> Unit) =
     }
     // Shown ONLY on a mismatch: on a match it's our own number under a second
     // label, which reads as a disagreement where there is none.
-    warn?.let { ChainRow("node reports", "eip155:${it.reported}", ChainWarn) }
+    warn?.let { ChainRow("node reports", "eip155:${it.reported}", TinyWarn) }
     ChainRow(
         "latest block",
         // null is "we don't know", never 0 — block 0 is a real height, and printing
@@ -298,7 +294,7 @@ private fun ActivityCard(s: ChainCore.Status, onCopyHash: (String) -> Unit) = Ch
                     fontFamily = FontFamily.Monospace,
                     // A clamped amount is not a number anyone can stand behind —
                     // mark it where it's read, not in a footnote.
-                    color = if (t.clamped) ChainWarn else MaterialTheme.colorScheme.onSurface,
+                    color = if (t.clamped) TinyWarn else MaterialTheme.colorScheme.onSurface,
                 )
             }
             Text(

@@ -29,6 +29,32 @@ class RelayNotifierTest {
         assertEquals("deploy-bot", route.tinySlug)
     }
 
+    @Test fun `device-result tags banner on the alerts channel — the user fired this work and is waiting`() {
+        val route = RelayNotifier.classify("device-result-env42", "/?q=fetch") as RelayNotifier.Route.Banner
+        assertEquals(AlertWorker.CHANNEL, route.channel)
+        assertNull(route.tinySlug) // "/" home url — banner opens the app
+        assertEquals("fetch", route.redeemQ) // tap → trusted ask?q= auto-send
+    }
+
+    @Test fun `batch tags banner on the alerts channel with the redeem turn`() {
+        val route = RelayNotifier.classify("batch-batch_abc12345", "/?q=redeem%20it") as RelayNotifier.Route.Banner
+        assertEquals(AlertWorker.CHANNEL, route.channel)
+        assertEquals("redeem it", route.redeemQ)
+    }
+
+    // -- redeemQuery: pure string parsing (JVM tests — no android.net.Uri) --
+
+    @Test fun `redeemQuery decodes the q param and ignores everything else`() {
+        assertEquals(
+            "My device finished — fetch it with use_device action:'result'",
+            RelayNotifier.redeemQuery("/?q=My%20device%20finished%20%E2%80%94%20fetch%20it%20with%20use_device%20action%3A'result'"),
+        )
+        assertEquals("x", RelayNotifier.redeemQuery("/tiny?from=push&q=x"))
+        assertNull(RelayNotifier.redeemQuery("/tiny?from=push"))
+        assertNull(RelayNotifier.redeemQuery("/"))
+        assertNull(RelayNotifier.redeemQuery("/?q="))
+    }
+
     @Test fun `visit tags banner on the quiet activity channel`() {
         val route = RelayNotifier.classify("tiny-visit-mytiny", "/mytiny") as RelayNotifier.Route.Banner
         assertEquals(RelayNotifier.CHANNEL_ACTIVITY, route.channel)

@@ -10,7 +10,7 @@
  *
  *  1. `Control.tsx` printed `{myTools.length}/20`. **There is no cap of 20
  *     anywhere.** The worker's real one is `MAX_TOOLS = 10000`
- *     (chatgpt-plugin-tinyai/src/tools.ts:15), and its list query has no LIMIT,
+ *     (worker/src/tools.ts:15), and its list query has no LIMIT,
  *     so the numerator was honest and the denominator was invented. A user with
  *     20 forged tools reads "20/20 — full" and stops forging, or forges a 21st
  *     and learns the UI was making it up. A fabricated limit is worse than no
@@ -18,7 +18,7 @@
  *
  *  2. `JobsPanel.tsx` printed `Scheduled jobs · {jobs.length}` with no cap at
  *     all — and there IS one: `MAX_JOBS_PER_USER = 10`
- *     (chatgpt-plugin-tinyai/src/scheduler.ts:23). The user only meets it as a
+ *     (worker/src/scheduler.ts:23). The user only meets it as a
  *     429 at schedule time, from the agent, mid-conversation.
  *
  * THE TRAP THAT MADE (2) MORE THAN A ONE-LINER, and the reason this is a tested

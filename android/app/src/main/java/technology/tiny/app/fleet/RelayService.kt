@@ -33,6 +33,15 @@ import technology.tiny.app.TinyApp
  *
  * The persistent notification is mandatory on O+ and doubles as a live status
  * chip (fleet online/offline). Tapping it opens the app.
+ *
+ * 🎙️ It also holds the Nicla Voice's BLE link. The necklace has no WiFi and
+ * cannot report for itself, so when the phone stops gatewaying, the board is
+ * offline however happily it is listening — and being in a pocket is the NORMAL
+ * state of a wearable. MainActivity can only own that link while it's visible,
+ * so a service that already outlives the Activity is where it belongs. iOS
+ * needed `bluetooth-central` + state restoration for the same reason
+ * (3c969817); this is the Android shape of that fix, and unlike iOS's it keeps
+ * working with the screen off.
  */
 class RelayService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -54,6 +63,10 @@ class RelayService : Service() {
         ensureChannel(this)
         startForegroundCompat(buildNotification(online = app.fleet.online.value))
         app.fleet.start()
+        // Take over the necklace's link from the Activity: a foreground service
+        // is not suspended, so the wake path and the board's proxy presence
+        // survive the screen going off. No-op without a paired Voice.
+        NiclaVoiceGateway.start(this)
 
         // Live-update the chip as presence flips (kept lightweight — text only).
         onlineJob?.cancel()
@@ -75,13 +88,25 @@ class RelayService : Service() {
         // if the OS killed us with START_STICKY we'll be recreated and re-start().
         val app = application as TinyApp
         if (!app.config.alwaysOn) app.fleet.stop()
+        // Hand the necklace back to the Activity if it's visible; drop the link
+        // only when nobody is left to gateway. Stopping unconditionally would
+        // kill the link on a service restart while the app is open on screen.
+        if (!app.fleet.foreground) NiclaVoiceGateway.stop()
         Log.i("TinyFleet", "RelayService destroyed (alwaysOn=${app.config.alwaysOn})")
         super.onDestroy()
     }
 
     private fun startForegroundCompat(notif: Notification) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(NOTIF_ID, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            // Both, because the service does both: relay/heartbeat traffic is
+            // dataSync, and holding the necklace's GATT link is connectedDevice.
+            // The manifest must declare every type passed here or this throws.
+            startForeground(
+                NOTIF_ID,
+                notif,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE,
+            )
         } else {
             startForeground(NOTIF_ID, notif)
         }

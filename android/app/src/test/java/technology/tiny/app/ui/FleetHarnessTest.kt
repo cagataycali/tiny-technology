@@ -119,16 +119,24 @@ class FleetHarnessTest {
         // while still captioning it — the same class of defect as GraphHarness's
         // recency-span trap.
         val rows = FleetHarness.rows("d1", NOW)
-        assertTrue("no online device", rows.any { it.online })
-        assertTrue("no offline device", rows.any { !it.online })
+        assertTrue("no online device", rows.any { it.presence == DevicePresence.ONLINE })
+        assertTrue("no offline device", rows.any { it.presence == DevicePresence.OFFLINE })
+        // No UNKNOWN row on purpose — the worker only sends `online: null` for
+        // endpoint kinds, and there is deliberately no endpoint row (below). A
+        // fabricated "reachable when called" daemon would draw a pairing the
+        // product never produces. Pinned so it stays a decision, not a drift.
+        assertTrue(
+            "a demo row claims unknown presence",
+            rows.none { it.presence == DevicePresence.UNKNOWN },
+        )
     }
 
     @Test fun `every relativeSeen bucket appears exactly once among offline rows`() {
-        // The subtitle is COMPUTED from lastSeen (deviceSubtitle → relativeSeen), so
+        // The second line is COMPUTED from lastSeen (presenceLine → relativeSeen), so
         // this is what proves the offline rows show a spread rather than seven
         // identical lines.
         val rows = FleetHarness.rows("d1", NOW)
-        val buckets = rows.filter { !it.online }.map {
+        val buckets = rows.filter { it.presence == DevicePresence.OFFLINE }.map {
             val s = relativeSeen(it.lastSeen, NOW)
             when {
                 s == "never" -> "never"
@@ -180,16 +188,71 @@ class FleetHarnessTest {
         }
     }
 
-    @Test fun `subtitles are the real computed strings, not placeholders`() {
+    @Test fun `second lines are the real computed strings, not placeholders`() {
         // End-to-end on the text the screenshot actually shows: an online row must say
-        // "online" and never a stale recency, and an offline row must say "seen …".
+        // "online" and never a stale recency, and an offline row must say "seen …" or
+        // "never seen".
         val rows = FleetHarness.rows("d1", NOW)
         for (r in rows) {
-            val s = deviceSubtitle(r.kind, r.online, r.lastSeen, NOW)
-            assertTrue("subtitle missing kind: $s", s.startsWith(r.kind))
-            if (r.online) assertEquals("${r.kind} · online", s)
-            else assertTrue("offline row lacks a seen line: $s", s.contains("· seen "))
+            val s = presenceLine(r, NOW)
+            if (r.presence == DevicePresence.ONLINE) {
+                assertTrue("an online row shows a recency: $s", s.startsWith("online"))
+            } else {
+                assertTrue(
+                    "offline row lacks a seen line: $s",
+                    s.startsWith("seen ") || s.startsWith("never seen"),
+                )
+            }
         }
+    }
+
+    @Test fun `the platform column is exercised, not left blank on every row`() {
+        // The whole point of seeding `platform`: without it every row fell through
+        // deviceLabel to its `kind` word and the capture showed seven devices calling
+        // themselves "device" and "computer" — a line the product doesn't draw.
+        // iOS's fixture had the mirror-image bug (a printer posting "bambu").
+        // Pinned against the HARDWARE table, not against "is it non-empty":
+        // blanking every platform still leaves the kind fallback emitting three
+        // distinct words ("device", "computer", "browser"), so a non-empty check
+        // passes on exactly the dataset this test exists to reject. Measured —
+        // that mutant survived the first version of this assertion.
+        val hardware = DEVICE_PLATFORM_NAME.map { it.second }.toSet()
+        val rows = FleetHarness.rows("d1", NOW)
+        val named = rows.map { deviceDescriptor(it) }
+        assertTrue(
+            "no row names real hardware — every one fell back to its kind: $named",
+            named.count { it in hardware } >= 6,
+        )
+        assertTrue("the hardware column is flat: $named", named.filter { it in hardware }.toSet().size >= 3)
+        // And no row may render a `kind` word, which is the line being replaced.
+        val kindWords = DEVICE_KIND_NAME.values.toSet()
+        for (r in rows) {
+            // The browser row is the exception ON PURPOSE: a browser enrols
+            // through the web form and posts no platform, so "browser" is both
+            // its kind word and the truest thing anyone can say about it.
+            if (r.kind == "browser") continue
+            assertFalse(
+                "row '${r.name}' fell back to a kind word: ${deviceDescriptor(r)}",
+                deviceDescriptor(r) in kindWords,
+            )
+        }
+    }
+
+    @Test fun `every platform is a token the product really enrols`() {
+        // Same rule as the `kind` check below, for the same reason: a seeded string can
+        // claim any hardware. Session/FleetManager build these from Build.* and the
+        // iOS/CLI daemons post the darwin/linux forms; "" is the browser row, which
+        // enrols through the web form and posts no platform at all.
+        val real = setOf("android-arm64", "darwin-arm64", "ios-arm64", "linux-arm64", "linux-x64", "")
+        for (r in FleetHarness.rows("d1", NOW)) {
+            assertTrue("platform '${r.platform}' is not one the app enrols", r.platform in real)
+        }
+    }
+
+    @Test fun `no row carries a url, because none of them is an endpoint`() {
+        // deviceDescriptor prefers `url` for endpoint rows. A demo row with a url but a
+        // non-endpoint kind would render a host the fake device does not serve.
+        assertTrue("a demo row carries a url", FleetHarness.rows("d1", NOW).all { it.url.isEmpty() })
     }
 
     // ── the wiring ───────────────────────────────────────────────────────────

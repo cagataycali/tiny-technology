@@ -32,6 +32,14 @@ class ResolveOpenUrlTest {
         assertEquals("geo:37.331,-122.031", resolveOpenUrl("maps", "maps:37.331,-122.031"))
     }
 
+    @Test fun `mailto opens the mail app's compose — the canonical confabulated success (use_device P4)`() {
+        // "Open the mail app on my phone" used to be silently dropped here while
+        // the proxied model claimed "Mail app opened 📬". ACTION_VIEW on mailto:
+        // opens the default mail app, which is exactly the ask.
+        assertEquals("mailto:", resolveOpenUrl("mailto", "mailto:"))
+        assertEquals("mailto:a@b.co?subject=hi", resolveOpenUrl("mailto", "mailto:a@b.co?subject=hi"))
+    }
+
     @Test fun `an iOS-only shortcuts scheme has no Android analog and is refused`() {
         // iOS allowlists `shortcuts:` (Shortcuts.app); there's no Android equivalent, so
         // it's correctly NOT in OPEN_URL_SCHEMES and must resolve to null.

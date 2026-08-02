@@ -34,7 +34,60 @@ import kotlinx.coroutines.launch
  * foreground service scan + different semantics — not this pass).
  */
 object Bluetooth {
-    data class BleDevice(val address: String, val name: String, val rssi: Int)
+    /**
+     * A tiny hardware beacon (e.g. the Nicla Vision necklace), recognized from
+     * manufacturer data 0xFFFF · 'TN' · version · provisioned flag — the
+     * counterpart of firmware tiny_ble.adv_payload (strands-nicla) and iOS
+     * TinyBeaconInfo. Android's getManufacturerSpecificData already strips the
+     * 2-byte company id, so the payload starts at 'T'.
+     */
+    data class TinyBeaconInfo(val version: Int, val provisioned: Boolean) {
+        /**
+         * Which board is advertising (iOS Bluetooth.swift Kind parity). The
+         * version byte doubles as a device-type marker so Nearby can tell a
+         * Vision from a Voice WITHOUT connecting — which matters because the
+         * two need different setup (the Voice has no WiFi, so asking for an
+         * SSID would be asking for something it cannot use).
+         */
+        enum class Kind { VISION, VOICE, UNKNOWN }
+
+        val kind: Kind
+            get() = when (version) {
+                1 -> Kind.VISION // firmware/tiny_ble.py
+                2 -> Kind.VOICE // firmware/voice/tiny_voice
+                else -> Kind.UNKNOWN
+            }
+
+        /** The platform string this board enrolls as (iOS `platform` parity). */
+        val platform: String
+            get() = when (kind) {
+                Kind.VOICE -> "nicla-voice"
+                else -> "nicla-vision"
+            }
+
+        /** Human name for the Nearby row (iOS niclaKindLabel parity). */
+        val kindLabel: String
+            get() = when (kind) {
+                Kind.VISION -> "Nicla Vision"
+                Kind.VOICE -> "Nicla Voice"
+                Kind.UNKNOWN -> "tiny hardware"
+            }
+
+        companion object {
+            fun parse(data: ByteArray?): TinyBeaconInfo? {
+                if (data == null || data.size < 4) return null
+                if (data[0] != 'T'.code.toByte() || data[1] != 'N'.code.toByte()) return null
+                return TinyBeaconInfo(data[2].toInt() and 0xFF, data[3].toInt() != 0)
+            }
+        }
+    }
+
+    data class BleDevice(
+        val address: String,
+        val name: String,
+        val rssi: Int,
+        val tiny: TinyBeaconInfo? = null,
+    )
 
     // ---- pure summary formatting (iOS Bluetooth.swift scanSummary parity) -------
     // The exact text a relay answer carries. Kept device-/coroutine-free so the
@@ -109,7 +162,10 @@ object Bluetooth {
                 // fall back to the advertised local name, else "Unnamed device".
                 val advName = result.scanRecord?.deviceName
                 val name = advName?.takeIf { it.isNotBlank() } ?: "Unnamed device"
-                found[addr] = BleDevice(addr, name, result.rssi)
+                val tiny = TinyBeaconInfo.parse(
+                    result.scanRecord?.getManufacturerSpecificData(0xFFFF),
+                ) ?: found[addr]?.tiny // adv frames without mfg data keep the badge
+                found[addr] = BleDevice(addr, name, result.rssi, tiny)
                 _devices.value = found.values.sortedByDescending { it.rssi }
             }
 

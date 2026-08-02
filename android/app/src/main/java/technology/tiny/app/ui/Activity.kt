@@ -41,8 +41,22 @@ data class TinyEvent(val id: Long, val kind: String, val detail: String, val cre
 private val KIND_ICONS = listOf(
     "job" to "⏰", "job_missed" to "⛔", "telegram" to "✈️", "tiny_visit" to "👀", "learn" to "🧬",
     "device" to "💻", "device_missed" to "🚫", "pay_alarm" to "🚨",
+    // 🗣️🎙️👁️ Keyed in full rather than behind a shared `nicla` prefix: a wake,
+    // the words that followed it, and the Vision seeing motion are three
+    // different rows to a reader.
+    //
+    // 📝 `device_note` is the job_missed case again — `device` IS a prefix of it,
+    // so it rendered 💻 ("your laptop finished a task") while carrying
+    // TRANSCRIBED SPEECH: it is PhoneRecorder's fallback rail for when
+    // /api/devices/transcript isn't deployed, which is the state production is
+    // in, so it is the kind real takes land under today.
+    "nicla_wake" to "🗣️", "nicla_transcript" to "🎙️", "nicla_sentry" to "👁️",
+    "device_note" to "📝",
     "pay_earned" to "💵", "pay_received" to "💰", "pay_withdrawn" to "🏦", "pay_refunded" to "↩️",
     "push" to "🔔", "share" to "🔗", "tool" to "🔧", "follow" to "🤝", "dm" to "💬",
+    // 🤖 `batch` covers `batch_result` — a spawn_agents wait:false fleet that
+    // finished after its stream closed (web lib/chat/tools/spawn.ts).
+    "batch" to "🤖",
 )
 
 /** Every kind the worker can emit — mirrors EMITTED_KINDS in
@@ -53,6 +67,12 @@ internal val EMITTED_KINDS = listOf(
     "tool-update", "telegram", "telegram_out", "telegram_button", "pay_alarm",
     "pay_earned", "pay_received", "pay_withdrawn", "pay_refunded",
     "job_missed", "device_missed",
+    "batch_result", // app-emitted via POST /events (spawn_agents wait:false)
+    // 🗣️🎙️👁️📝 devices.ts DEVICE_EVENT_KINDS — and THIS app writes two of them
+    // (NiclaVoiceGateway posts nicla_wake, PhoneRecorder posts device_note).
+    // Grepping `emitEvent(` in the worker cannot find a kind the PHONES emit,
+    // which is how all four stayed off every roster while three rendered ⚡.
+    "nicla_wake", "nicla_transcript", "nicla_sentry", "device_note",
 )
 
 private val KIND_KEYS_BY_SPECIFICITY = KIND_ICONS.sortedByDescending { it.first.length }
@@ -96,16 +116,23 @@ fun ActivitySheet(app: TinyApp, onDismiss: () -> Unit) {
         failed = null
         events = null
         val res = runCatching { app.api.getJson("/api/events") }.getOrNull()
-        // null = transport failure; the route 502s (ok:false) when the worker ring
-        // is unreachable — keep DISTINCT from a clean empty so an outage doesn't
-        // render as "nothing yet" (web ActivityHUD errored-vs-empty; iOS panel parity).
-        val status = res?.optInt("_status", 0) ?: 0
-        if (res == null || status >= 400 || !res.optBoolean("ok", status in 200..399)) {
-            failed = status.takeIf { it >= 400 }
-                ?.let { technology.tiny.app.net.friendlyHttpError(it) } ?: "couldn't load your activity"
+        // One rule for all six list sheets ([LoadFailure]) — keep DISTINCT from a
+        // clean empty so an outage doesn't render as "nothing yet" (web ActivityHUD
+        // errored-vs-empty; iOS panel parity). The rule asks whether `events`
+        // ARRIVED, which a 200 that wasn't JSON fails while satisfying `status < 400`.
+        //
+        // The `ok` gate stays, and stays SEPARATE: this route answers 502 with
+        // `ok:false` when the worker ring is unreachable, and a body that says so is
+        // a failure even when its shape is otherwise fine. iOS raises its house error
+        // at the same gate for the same reason.
+        val body = LoadFailure.loaded(res, "events")
+            ?.takeIf { it.optBoolean("ok") }
+        if (body == null) {
+            failed = LoadFailure.contentMessage(res, "events", "your activity")
+                ?: LoadFailure.unusableBody("your activity")
             return@LaunchedEffect
         }
-        val arr = res.optJSONArray("events")
+        val arr = body.optJSONArray("events")
         val loaded = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
             arr?.optJSONObject(i)?.let { e ->
                 TinyEvent(

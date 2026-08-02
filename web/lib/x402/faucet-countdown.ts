@@ -3,7 +3,7 @@
  *
  * `deposit_info.faucet.next_drip_in_seconds` is a SERVER DELTA: the worker
  * computes seconds-to-UTC-midnight at request time (`nextDripInSeconds`,
- * chatgpt-plugin-tinyai/src/deposits.ts:247) and hands it over as a plain
+ * worker/src/deposits.ts:247) and hands it over as a plain
  * number. A delta is only true at the instant it was measured, and neither
  * consumer refetches — `app/wallet/page.tsx:189-191` and
  * `components/chat/WalletSheet.tsx:112-115` both load once, with no interval and

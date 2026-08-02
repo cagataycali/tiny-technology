@@ -35,6 +35,7 @@ import com.meta.wearable.dat.core.session.DeviceSessionState
 import com.meta.wearable.dat.core.types.Permission
 import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.core.types.RegistrationState
+import com.meta.wearable.dat.core.types.ThermalLevel
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.Flow
@@ -45,6 +46,11 @@ class WearablesCaptureException(message: String) : Exception(message)
 
 object WearablesBridge {
     @Volatile private var initialized = false
+    // ONE selector, alive from initialize (iOS c6's lesson, ported): an
+    // AutoDeviceSelector discovers the active device by OBSERVING — one
+    // constructed at ask-time knows nothing and reads as "not ready" even
+    // with the glasses awake on your face.
+    @Volatile private var selector: AutoDeviceSelector? = null
 
     /** BLUETOOTH_CONNECT is the one Android runtime permission the SDK needs. */
     fun hasBtPermission(context: Context): Boolean =
@@ -61,11 +67,16 @@ object WearablesBridge {
         synchronized(this) {
             if (!initialized) {
                 Wearables.initialize(context.applicationContext)
+                selector = AutoDeviceSelector()
                 initialized = true
             }
         }
         return true
     }
+
+    /** iOS `selector?.activeDevice != nil` — the honest capture-readiness bit. */
+    private fun readyForCapture(): Boolean =
+        runCatching { selector?.activeDevice() != null }.getOrDefault(false)
 
     val isInitialized: Boolean get() = initialized
 
@@ -146,18 +157,77 @@ object WearablesBridge {
         }
     }
 
+    /** Per-device facts, everything DAT 0.8.0 exposes (iOS parity). */
+    internal data class DeviceFacts(
+        val name: String,
+        val link: String,
+        val type: String,
+        val hasDisplay: Boolean,
+        val thermal: String?,
+    )
+
+    private fun deviceFacts(): List<DeviceFacts> =
+        Wearables.devices.value.mapNotNull { id ->
+            val d = Wearables.devicesMetadata[id]?.value ?: return@mapNotNull null
+            val thermal = runCatching { Wearables.getDeviceState(id).value.thermalLevel }
+                .getOrNull()?.takeIf { it != ThermalLevel.UNKNOWN }?.name?.lowercase()
+            DeviceFacts(d.name, d.linkState.name.lowercase(), d.deviceType.name.lowercase(), d.isDisplayCapable(), thermal)
+        }
+
     /**
-     * One line of live context (null = not linked) — rides extraSystem
-     * beside the location block each send, iOS contextIfLinked() parity, so
-     * the agent knows the glasses exist before reaching for meta_take_photo.
+     * One device's context fragment — "Name (connected, rayban_meta, thermal
+     * light)". Pure so the assembly is JVM-testable; freshly-linked glasses
+     * can report an EMPTY name (iOS user QA 2026-07-28), hence the fallback.
+     */
+    internal fun deviceBits(f: DeviceFacts): String {
+        val bits = mutableListOf(f.link, f.type)
+        if (f.hasDisplay) bits.add("has a display")
+        f.thermal?.let { bits.add("thermal $it") }
+        return "${f.name.ifBlank { "Glasses connected" }} (${bits.joinToString(", ")})"
+    }
+
+    /**
+     * Live device context for the agent (null = not linked) — rides
+     * extraSystem beside the location block each send. iOS contextIfLinked()
+     * parity: per-device name/link/type/display/thermal, capture readiness,
+     * the open live HUD + its on-device transcript tail — deep context so the
+     * agent "just works" instead of guessing at the hardware. Android extra:
+     * derived tap events (iOS doesn't have these yet).
      */
     suspend fun contextIfLinked(context: Context): String? {
         if (!ensureInitialized(context)) return null
         return runCatching {
             if (Wearables.registrationState.first() != RegistrationState.REGISTERED) return null
-            val count = Wearables.devices.first().size
-            val state = if (count > 0) "$count device(s) known" else "linked, none nearby right now"
-            "🕶 Meta glasses: $state. meta_take_photo returns what the user is LOOKING AT (their first-person camera)."
+            val lines = mutableListOf<String>()
+            val devices = deviceFacts()
+            if (devices.isEmpty()) {
+                lines.add(
+                    "🕶 Meta glasses: linked to this phone, but none nearby right now — " +
+                        "the user may need to wear or wake them before camera asks.",
+                )
+            } else {
+                val ready = if (readyForCapture()) {
+                    "ready — meta_take_photo will capture what the user is LOOKING AT (their first-person camera)"
+                } else {
+                    "not reachable for capture right now (asleep/folded/out of range — tell the user to wear or wake them before you try)"
+                }
+                lines.add("🕶 Meta glasses: ${devices.joinToString("; ") { deviceBits(it) }} — $ready.")
+            }
+            // Live HUD: when the user is watching the feed, say so — and carry
+            // what the glasses just HEARD (on-device transcript) into context.
+            if (GlassesLive.running.value) {
+                lines.add("The user has the live glasses feed OPEN on their phone right now.")
+                val heard = GlassesLive.transcript.value
+                if (heard.isNotEmpty()) {
+                    lines.add("Heard through the glasses moments ago (on-device transcript): \"${heard.takeLast(400)}\"")
+                }
+            }
+            // Derived tap events (GlassesEvents) — "the user tapped the
+            // glasses" is a signal worth answering ("want a photo?"), and
+            // the SDK gives us no other channel for it.
+            val taps = GlassesEvents.recent()
+            if (taps.isNotEmpty()) lines.add("Recent glasses events: ${taps.joinToString("; ")}.")
+            lines.joinToString("\n")
         }.getOrNull()
     }
 
@@ -169,25 +239,31 @@ object WearablesBridge {
      * strands the server callback until its 90s timeout.
      */
     suspend fun runPhotoTool(app: technology.tiny.app.TinyApp, toolUseId: String) {
-        val payload = try {
-            val jpeg = capturePhoto(app)
-            val b64 = android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
-            val up = app.api.postJson(
-                "/api/media",
-                org.json.JSONObject().put("data", b64).put("contentType", "image/jpeg"),
-            )
-            val url = up.optString("url").takeIf { it.isNotEmpty() }
-            if (url == null) {
-                org.json.JSONObject().put("ok", false)
-                    .put("error", up.optString("error").ifEmpty { "photo upload failed (no url)" })
-            } else {
-                org.json.JSONObject().put("ok", true).put("url", url).put("format", "jpeg")
-            }
-        } catch (t: Throwable) {
+        postToolResult(app, toolUseId, photoPayload(app))
+    }
+
+    /**
+     * The shared capture core (iOS captureAndUpload parity): chat posts the
+     * payload to the mailbox above; the voice call answers over its own WS
+     * (MainActivity runVoiceTool). Never throws — errors become the payload.
+     */
+    suspend fun photoPayload(app: technology.tiny.app.TinyApp): org.json.JSONObject = try {
+        val jpeg = capturePhoto(app)
+        val b64 = android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
+        val up = app.api.postJson(
+            "/api/media",
+            org.json.JSONObject().put("data", b64).put("contentType", "image/jpeg"),
+        )
+        val url = up.optString("url").takeIf { it.isNotEmpty() }
+        if (url == null) {
             org.json.JSONObject().put("ok", false)
-                .put("error", t.message ?: "glasses capture failed on the device")
+                .put("error", up.optString("error").ifEmpty { "photo upload failed (no url)" })
+        } else {
+            org.json.JSONObject().put("ok", true).put("url", url).put("format", "jpeg")
         }
-        postToolResult(app, toolUseId, payload)
+    } catch (t: Throwable) {
+        org.json.JSONObject().put("ok", false)
+            .put("error", t.message ?: "glasses capture failed on the device")
     }
 
     /** meta_glasses_status: instant facts from state the app already holds. */
@@ -200,6 +276,12 @@ object WearablesBridge {
         postToolResult(app, toolUseId, payload)
     }
 
+    /**
+     * The meta_glasses_status payload — the same facts contextIfLinked()
+     * narrates, as JSON (iOS statusFacts() shape: linked / readyForCapture /
+     * devices[{name,type,link,hasDisplay,thermal?}] / liveHudOpen /
+     * recording; Android extras: btPermission + recentEvents).
+     */
     suspend fun statusFacts(context: Context): org.json.JSONObject {
         val facts = org.json.JSONObject().put("ok", true)
         facts.put("btPermission", hasBtPermission(context))
@@ -209,7 +291,25 @@ object WearablesBridge {
         }
         val linked = Wearables.registrationState.first() == RegistrationState.REGISTERED
         facts.put("linked", linked)
-        if (linked) facts.put("devices", Wearables.devices.first().size)
+        if (linked) {
+            val devices = org.json.JSONArray()
+            deviceFacts().forEach { f ->
+                devices.put(
+                    org.json.JSONObject()
+                        .put("name", f.name.ifBlank { "Glasses connected" })
+                        .put("type", f.type)
+                        .put("link", f.link)
+                        .put("hasDisplay", f.hasDisplay)
+                        .apply { f.thermal?.let { put("thermal", it) } },
+                )
+            }
+            facts.put("devices", devices)
+            facts.put("readyForCapture", readyForCapture())
+            facts.put("liveHudOpen", GlassesLive.running.value)
+            facts.put("recording", GlassesRecorderBridge.isRecording)
+            val taps = GlassesEvents.recent()
+            if (taps.isNotEmpty()) facts.put("recentEvents", org.json.JSONArray(taps))
+        }
         return facts
     }
 

@@ -108,7 +108,10 @@ internal fun vibrateWaveform(pattern: String, times: Int, intensity: Double): Pa
 // through; iOS also lists `maps` + `shortcuts`. `geo:` is Android's native map
 // scheme, so a `maps:` URL is TRANSLATED to `geo:` rather than dropped; `shortcuts:`
 // is an iOS-only scheme with no Android analog, so it's (correctly) not allowlisted.
-private val OPEN_URL_SCHEMES = setOf("https", "http", "geo", "spotify", "music")
+// `mailto:` (use_device P4): "open the mail app on my phone" was the canonical
+// confabulated success — the scheme was dropped here while the model claimed 📬.
+// ACTION_VIEW on mailto: opens the default mail app's compose, which IS the ask.
+private val OPEN_URL_SCHEMES = setOf("https", "http", "geo", "spotify", "music", "mailto")
 
 /**
  * Resolve an agent-supplied open_url into the URL string to actually launch, or

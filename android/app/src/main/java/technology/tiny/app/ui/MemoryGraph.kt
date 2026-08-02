@@ -96,16 +96,22 @@ fun GraphSheet(app: TinyApp, onDismiss: () -> Unit) {
         val res = runCatching {
             app.api.getJson("/api/graph?all=1" + if (history) "&include_closed=1" else "")
         }.getOrNull()
-        // null = transport failure; the route 503s {error} on a worker outage —
-        // keep DISTINCT from a clean empty graph so an outage doesn't tell a user
-        // with a rich graph they have none (route comment: NOT masked-empty).
-        val status = res?.optInt("_status", 0) ?: 0
-        if (res == null || status >= 400 || res.optString("error").isNotEmpty()) {
-            failed = status.takeIf { it >= 400 }
-                ?.let { technology.tiny.app.net.friendlyHttpError(it) } ?: "couldn't load your memory graph"
+        // One rule for all six list sheets ([LoadFailure]) — keep DISTINCT from a
+        // clean empty graph so an outage doesn't tell a user with a rich graph they
+        // have none (route comment: NOT masked-empty). The rule asks whether `nodes`
+        // ARRIVED, which a 200 that wasn't JSON fails while satisfying `status < 400`.
+        //
+        // The `error` gate stays, and stays SEPARATE: this route can answer a 2xx
+        // whose body carries an `error` string, which is the server declining inside
+        // a well-formed response — invisible to a shape check.
+        val body = LoadFailure.loaded(res, "nodes")
+            ?.takeIf { it.optString("error").isEmpty() }
+        if (body == null) {
+            failed = LoadFailure.contentMessage(res, "nodes", "your memory graph")
+                ?: LoadFailure.unusableBody("your memory graph")
             return@LaunchedEffect
         }
-        val nArr = res.optJSONArray("nodes")
+        val nArr = body.optJSONArray("nodes")
         nodes = (0 until (nArr?.length() ?: 0)).mapNotNull { i ->
             nArr?.optJSONObject(i)?.let { o ->
                 VizNode(
@@ -119,7 +125,7 @@ fun GraphSheet(app: TinyApp, onDismiss: () -> Unit) {
                 )
             }
         }
-        val eArr = res.optJSONArray("edges")
+        val eArr = body.optJSONArray("edges")
         edges = (0 until (eArr?.length() ?: 0)).mapNotNull { i ->
             eArr?.optJSONObject(i)?.let { o ->
                 VizEdge(

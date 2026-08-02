@@ -13,8 +13,8 @@ android {
         applicationId = "technology.tiny.app"
         minSdk = 29
         targetSdk = 35
-        versionCode = 27
-        versionName = "0.7.2"
+        versionCode = 31
+        versionName = "0.7.6"
 
         // 🕶️ Meta Wearables DAT creds (Wearables Developer Center; mirrored
         // in meta.md + the iOS MWDAT Info.plist dict). Placeholders like the
@@ -25,6 +25,13 @@ android {
             "AR|2131650944063872|37eb3769c581134efd954d22c4cdca50"
     }
 
+    lint {
+        // lintVitalAnalyzeRelease crashes with an internal detector error
+        // (IncompatibleClassChangeError in NonNullableMutableLiveDataDetector)
+        // on this AGP/JDK-21 combo — a toolchain bug, not app code. Debug
+        // builds still lint; remove when AGP updates past it.
+        checkReleaseBuilds = false
+    }
     buildTypes {
         release {
             isMinifyEnabled = true
@@ -36,6 +43,12 @@ android {
             // Sideload-distributed build; signed with the local tiny keystore so
             // OTA updates keep the same signature.
             signingConfig = signingConfigs.getByName("debug")
+            // The Meta Wearables SDK ships native libs for four ABIs; x86/
+            // x86_64 are emulator-only and cost ~18MB in a build that only
+            // ever reaches real phones (debug keeps all ABIs for emulators).
+            // Both ARM ABIs carry the full MWDAT .so set — verified in the
+            // first minified-with-SDK build, 2026-08-02.
+            ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
         }
     }
     compileOptions {

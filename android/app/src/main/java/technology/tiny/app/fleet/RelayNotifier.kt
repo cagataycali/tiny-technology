@@ -41,14 +41,40 @@ object RelayNotifier {
 
     sealed class Route {
         data object DmPoke : Route()
-        data class Banner(val channel: String, val notifId: Int, val tinySlug: String?) : Route()
+        data class Banner(
+            val channel: String,
+            val notifId: Int,
+            val tinySlug: String?,
+            // The push url's ?q= redeem turn (worker buildDeviceResultPush /
+            // web spawn.ts buildBatchPush) — a tap converts it to a TRUSTED
+            // tinyapp://ask?q= so the banner lands on the fetched result,
+            // exactly like the web notification click (native tap→redeem).
+            val redeemQ: String? = null,
+        ) : Route()
     }
 
     /** Pure tag→route decision (see class doc for the contract). */
     fun classify(tag: String, url: String): Route = when {
         tag.startsWith("dm-") || url.contains("?dm=") -> Route.DmPoke
-        tag.startsWith("tiny-job-") -> Route.Banner(AlertWorker.CHANNEL, tag.hashCode(), tinySlug(url))
-        else -> Route.Banner(CHANNEL_ACTIVITY, tag.hashCode(), tinySlug(url))
+        tag.startsWith("tiny-job-") -> Route.Banner(AlertWorker.CHANNEL, tag.hashCode(), tinySlug(url), redeemQuery(url))
+        // A finished use_device background task (worker relay.ts
+        // buildDeviceResultPush): the user explicitly fired this work and is
+        // waiting on it — a heads-up like a job result, not a silent chip.
+        tag.startsWith("device-result-") -> Route.Banner(AlertWorker.CHANNEL, tag.hashCode(), tinySlug(url), redeemQuery(url))
+        tag.startsWith("batch-") -> Route.Banner(AlertWorker.CHANNEL, tag.hashCode(), tinySlug(url), redeemQuery(url))
+        else -> Route.Banner(CHANNEL_ACTIVITY, tag.hashCode(), tinySlug(url), redeemQuery(url))
+    }
+
+    /**
+     * Pure: the auto-send text a push url carries (`/?q=<urlencoded turn>`).
+     * Manual string parsing, not android.net.Uri — this runs in JVM unit
+     * tests like tinySlug, and Uri is an Android framework class there.
+     */
+    fun redeemQuery(url: String): String? {
+        val raw = url.substringAfter('?', "").split('&')
+            .firstOrNull { it.startsWith("q=") }?.substringAfter('=') ?: return null
+        return runCatching { java.net.URLDecoder.decode(raw, "UTF-8") }
+            .getOrNull()?.takeIf { it.isNotBlank() }
     }
 
     /**
@@ -77,15 +103,21 @@ object RelayNotifier {
         ensureChannels(context)
         if (!canPost(context)) return
 
-        // Slug → the same tinyapp://tiny deep link the launcher shortcuts use
-        // (routed by MainActivity without any new plumbing); otherwise just
-        // open the app.
-        val tapIntent = if (route.tinySlug != null) {
-            Intent(Intent.ACTION_VIEW, Uri.parse("tinyapp://tiny?name=${route.tinySlug}"))
-                .setPackage(context.packageName)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        } else {
-            Intent(context, MainActivity::class.java).apply {
+        // Redeem turn → TRUSTED tinyapp://ask?q= (package-scoped, never
+        // BROWSABLE — MainActivity auto-sends only on this origin, so a tap
+        // lands on the fetched result like the web notification click);
+        // slug → the same tinyapp://tiny deep link the launcher shortcuts
+        // use; otherwise just open the app.
+        val tapIntent = when {
+            route.redeemQ != null ->
+                Intent(Intent.ACTION_VIEW, Uri.parse("tinyapp://ask?q=${Uri.encode(route.redeemQ)}"))
+                    .setPackage(context.packageName)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            route.tinySlug != null ->
+                Intent(Intent.ACTION_VIEW, Uri.parse("tinyapp://tiny?name=${route.tinySlug}"))
+                    .setPackage(context.packageName)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            else -> Intent(context, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
             }
         }

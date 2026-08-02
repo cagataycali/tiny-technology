@@ -80,6 +80,65 @@ internal fun dmSendRefusal(text: String): String? {
         "so nothing was sent. Trim it to $DM_MAX_CHARS or send it in parts."
 }
 
+/**
+ * A thread load that did not happen: is this person unreachable for good, or is
+ * this a bad minute? iOS `ThreadLoadFailure` / `DmModel.classify` (`c7314145`).
+ *
+ * [Gone] has no retry and names the PERSON; [Retryable] carries the shared
+ * caption and keeps its button. The distinction is worth a type because the two
+ * differ in what the screen OFFERS, not just in wording.
+ */
+internal sealed interface ThreadLoadFailure {
+    object Gone : ThreadLoadFailure
+    data class Retryable(val message: String) : ThreadLoadFailure
+}
+
+/**
+ * ⚠️⚠️ Keyed on the BODY, not the status — the whole point, and iOS's own reason
+ * verbatim: **two different things answer 404 on this path.**
+ *
+ *  · The worker's `{error:"peer not found"}` (`messages.ts:300`) is about the
+ *    PERSON: a login it cannot resolve. `/api/messages/route.ts:34` forwards it
+ *    verbatim (`new Response(await res.text(), { status: res.status })`), so it
+ *    arrives here intact.
+ *  · Its router's catch-all answers plain-text `404 Not Found.`
+ *    (`index.ts:228`) for a PATH — which a stale build of this app reaches, as
+ *    does a stale Next deploy for /api/messages itself.
+ *
+ * Keying on the bare status would render our own staleness as someone's absence,
+ * and that is an accusation against a healthy person we cannot take back.
+ *
+ * The line between them falls out of [technology.tiny.app.net.TinyApi]'s parse
+ * for free: `runCatching { JSONObject(text) }.getOrElse { JSONObject() }` turns
+ * the plain-text body into an EMPTY object, so `error` is blank — the same
+ * "did the server explain itself" test iOS spells with `Api.serverError(in:)`
+ * returning nil for a non-JSON body. No new plumbing on either phone.
+ *
+ * ⚠️ And this is what gives [LoadFailure.contentMessage] teeth here. A bare 404
+ * is the one answer where the two rules diverge: `contentMessage` falls back to
+ * "couldn't load this conversation — try again (HTTP 404)", while the chat table
+ * would say "that tiny doesn't exist" about a person who is fine. The retryable
+ * arm must keep asking `contentMessage` for that reason.
+ */
+internal fun classifyThreadLoad(res: JSONObject?): ThreadLoadFailure {
+    if (LoadFailure.status(res) == 404 &&
+        res?.optString("error")?.trim()?.isNotEmpty() == true
+    ) return ThreadLoadFailure.Gone
+    // Non-null by construction: this is only reached on a failed load, and
+    // `contentMessage` returns null only for a load that SUCCEEDED. The house
+    // line rather than `!!` so a future caller cannot crash a sheet.
+    return ThreadLoadFailure.Retryable(
+        LoadFailure.contentMessage(res, "messages", "this conversation") ?: LoadFailure.noResponse
+    )
+}
+
+/**
+ * The sentence for a peer who is gone. Names them, and never the wire's word:
+ * "peer not found" is a router's vocabulary for a person (iOS
+ * `Messages.swift:355`).
+ */
+internal fun peerGoneLine(login: String): String = "@$login isn't reachable any more."
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MessagesSheet(
@@ -107,16 +166,17 @@ fun MessagesSheet(
             threadsFailed = null
             threads = null
             val res = runCatching { app.api.getJson("/api/messages") }.getOrNull()
-            // null = transport failure; _status ≥ 400 = HTTP error. Either way we
-            // couldn't load — keep DISTINCT from a clean empty so we don't render
-            // "no messages yet" on an outage (iOS panel-state parity, cycle 56/57).
-            val status = res?.optInt("_status", 0) ?: 0
-            if (res == null || status >= 400) {
-                threadsFailed = status.takeIf { it >= 400 }
-                    ?.let { technology.tiny.app.net.friendlyHttpError(it) } ?: "couldn't reach the server"
+            // One rule for all six list sheets ([LoadFailure]) — keep DISTINCT from a
+            // clean empty so we don't render "no messages yet" on an outage (iOS
+            // panel-state parity, cycle 56/57). The rule asks whether `threads`
+            // ARRIVED, which a 200 that wasn't JSON fails while satisfying
+            // `status < 400`.
+            val body = LoadFailure.loaded(res, "threads")
+            if (body == null) {
+                threadsFailed = LoadFailure.contentMessage(res, "threads", "your messages")
                 return@LaunchedEffect
             }
-            val arr = res.optJSONArray("threads")
+            val arr = body.optJSONArray("threads")
             threads = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
                 arr?.optJSONObject(i)?.let { t ->
                     DmThread(
@@ -218,8 +278,17 @@ fun MessagesSheet(
 
 @Composable
 private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) -> Unit, onBack: () -> Unit) {
-    var msgs by remember { mutableStateOf<List<DmMessage>?>(null) }
-    var loadFailed by remember { mutableStateOf<String?>(null) }
+    // ⚠️ KEYED BY LOGIN, for the same reason `draft` is. A DM notification tapped
+    // while a thread is already open re-seeds `openWith` (see MessagesSheet), so
+    // this view survives a login→login jump — and an unkeyed `remember` would open
+    // B still holding A's messages and A's failure. iOS clears all four states
+    // explicitly when a thread is opened (Messages.swift:306); the key is Compose's
+    // way of saying the same thing, and it also covers the deep-link path that has
+    // no tap to hang the clearing off.
+    var msgs by remember(login) { mutableStateOf<List<DmMessage>?>(null) }
+    var loadFailed by remember(login) { mutableStateOf<String?>(null) }
+    // Distinct from `loadFailed`: this arm has no retry, so it cannot be a caption.
+    var peerGone by remember(login) { mutableStateOf(false) }
     // Saveable so the draft survives activity recreation (audit #1), but KEYED BY
     // LOGIN: saveable state restores by slot position, so an unkeyed draft typed to
     // thread A re-enters this same slot when thread B opens — and a message composed
@@ -238,17 +307,25 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
     fun reload() {
         scope.launch {
             val res = runCatching { app.api.getJson("/api/messages?with=$login") }.getOrNull()
-            val status = res?.optInt("_status", 0) ?: 0
-            if (res == null || status >= 400) {
-                // Couldn't load. Only surface it when we have nothing to show — a
-                // failed refresh AFTER a good load keeps the existing thread rather
-                // than blanking it (iOS: a retry-fails-after-load mustn't drop contents).
-                loadFailed = status.takeIf { it >= 400 }
-                    ?.let { technology.tiny.app.net.friendlyHttpError(it) } ?: "couldn't reach the server"
+            // One rule for all six list sheets ([LoadFailure]), asking whether
+            // `messages` ARRIVED — a 200 that wasn't JSON fails that while satisfying
+            // `status < 400`, and this is the sheet where the collapse reads worst: an
+            // existing conversation would look emptied.
+            val body = LoadFailure.loaded(res, "messages")
+            if (body == null) {
+                // Only surface it when we have nothing to show — a failed refresh AFTER
+                // a good load keeps the existing thread rather than blanking it (iOS: a
+                // retry-fails-after-load mustn't drop contents).
+                when (val why = classifyThreadLoad(res)) {
+                    is ThreadLoadFailure.Gone -> { peerGone = true; loadFailed = null }
+                    is ThreadLoadFailure.Retryable -> { loadFailed = why.message; peerGone = false }
+                }
                 return@launch
             }
+            // A success clears BOTH, or a peer who came back would keep their epitaph.
             loadFailed = null
-            val arr = res.optJSONArray("messages")
+            peerGone = false
+            val arr = body.optJSONArray("messages")
             msgs = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
                 arr?.optJSONObject(i)?.let { m ->
                     DmMessage(
@@ -312,7 +389,13 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
         // 400dp thread viewport left a third of it dead on tall phones. Still a cap,
         // not a fill — weight(fill=false) keeps short threads wrap-height.
         LazyColumn(state = listState, modifier = Modifier.weight(1f, fill = false).heightIn(max = 560.dp), contentPadding = PaddingValues(vertical = 8.dp)) {
-            if (msgs == null && loadFailed != null) item {
+            // The permanent verdict, and NO retry: retrying a resolved-and-absent peer
+            // ends the same way every time, so offering the button invites a loop the
+            // app already knows cannot finish (iOS Messages.swift:353).
+            if (msgs == null && peerGone) item {
+                Text(peerGoneLine(login), color = TinyGray, style = MaterialTheme.typography.bodyMedium,
+                     modifier = Modifier.padding(vertical = 4.dp))
+            } else if (msgs == null && loadFailed != null) item {
                 Column(Modifier.padding(vertical = 4.dp)) {
                     Text(loadFailed!!, color = TinyGray, style = MaterialTheme.typography.bodyMedium)
                     TextButton(onClick = { reload() }, contentPadding = PaddingValues(0.dp)) {

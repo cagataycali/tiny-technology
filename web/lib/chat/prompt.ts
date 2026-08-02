@@ -279,6 +279,21 @@ export const EVENT_ICONS: Record<string, string> = {
   // covers nothing else, and the roster grew twice without it.
   batch_result: '🤖',
   device_task_result: '💻',
+  // 🗣️🎙️👁️📝 The wearables (devices.ts DEVICE_EVENT_KINDS). Three distinct
+  // glyphs because the agent's next sentence differs completely: a WAKE is "your
+  // necklace heard its name" (an event with no content yet), a TRANSCRIPT is
+  // words the user actually said — quotable, and carrying a transcript id to
+  // fetch the untruncated text with nicla_voice_transcript — and a SENTRY row is
+  // the Vision's camera reporting motion.
+  //
+  // 📝 `device_note` is the one that was actively misleading rather than merely
+  // ℹ: it is NiclaRecorder's fallback rail while /api/devices/transcript is
+  // undeployed (the current production state), so it carries transcript text,
+  // and on the HUD the `device` prefix key rendered it as a finished laptop task.
+  // Of every row in this block these are the ones most likely to be worth
+  // raising unprompted — they are the user's own voice — and they arrived tagged
+  // "informational".
+  nicla_wake: '🗣️', nicla_transcript: '🎙️', nicla_sentry: '👁️', device_note: '📝',
 }
 
 export function buildSoulPrompt(inp: SoulPromptInputs): string {

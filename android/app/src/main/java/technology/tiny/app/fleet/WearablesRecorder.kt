@@ -77,7 +77,12 @@ object GlassesRecorderBridge {
         }
     }
 
-    private suspend fun toggle(app: TinyApp): JSONObject = mutex.withLock {
+    /**
+     * The shared toggle core (iOS GlassesRecorder.toggle(token:) parity):
+     * chat's runTool posts the result to the mailbox; the voice call answers
+     * over its own WS (MainActivity runVoiceTool). Caller handles throws.
+     */
+    internal suspend fun toggle(app: TinyApp): JSONObject = mutex.withLock {
         pending?.let { done -> pending = null; return done }
         active?.let { rec -> active = null; return rec.stopAndUpload(app) }
         start(app)
@@ -148,6 +153,15 @@ object GlassesRecorderBridge {
             collectJob = scope.launch {
                 st.videoStream.collect { frame -> encode(frame) }
             }
+            scope.launch {
+                // A recording is an active stream too — a capture-button tap
+                // mid-clip must reach the agent's context (GlassesEvents).
+                var prev: StreamState? = null
+                st.state.collect { state ->
+                    GlassesEvents.onStreamTransition(prev, state)
+                    prev = state
+                }
+            }
             st.start()
             withTimeout(25_000) { st.state.first { it == StreamState.STREAMING } }
             scope.launch {
@@ -178,7 +192,15 @@ object GlassesRecorderBridge {
                     muxer = MediaMuxer(file.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
                 }
             }
-            val ptsUs = frame.presentationTimeUs
+            // ⚠️ MONOTONIC pts is on US, not the source: a stream's timestamps
+            // can go BACKWARDS (measured: the mock device loops its feed file
+            // and restarts pts each loop — the muxed clip came out 697 frames
+            // in a 7.7s timeline at "90fps" and no player would touch it).
+            // Real glasses shouldn't loop, but a recorder that trusts source
+            // pts produces an unplayable file the day one does. Rewind →
+            // synthesize one nominal frame step past the last stamp.
+            val raw = frame.presentationTimeUs
+            val ptsUs = if (lastPtsUs < 0 || raw > lastPtsUs) raw else lastPtsUs + 41_666 // 1/24s
             if (firstPtsUs < 0) firstPtsUs = ptsUs
             lastPtsUs = ptsUs
 
@@ -229,7 +251,19 @@ object GlassesRecorderBridge {
             }
         }
 
-        suspend fun stopAndUpload(app: TinyApp): JSONObject {
+        /**
+         * ⚠️ NonCancellable is load-bearing: this tears down `scope` — and the
+         * AUTO-STOP path runs INSIDE `scope`, so without it scope.cancel()
+         * cancels the very coroutine doing the upload; the suspend postJson
+         * throws CancellationException, `pending` never assigns, and the
+         * auto-stopped clip is silently LOST (the agent's next toggle then
+         * starts a fresh recording instead of returning the clip — observed
+         * live on the Pixel, 2026-08-02).
+         */
+        suspend fun stopAndUpload(app: TinyApp): JSONObject =
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { stopAndUploadInner(app) }
+
+        private suspend fun stopAndUploadInner(app: TinyApp): JSONObject {
             collectJob?.cancel()
             runCatching { stream?.stop() }
             runCatching { session?.stop() }
@@ -316,8 +350,12 @@ object GlassesRecorderBridge {
         }
     }
 
-    /** I420 → NV21 (Y + interleaved VU) → JPEG, for the sampled stills. */
-    private fun i420ToJpeg(i420: ByteBuffer, width: Int, height: Int): ByteArray? = runCatching {
+    /**
+     * I420 → NV21 (Y + interleaved VU) → JPEG, for the sampled stills.
+     * Internal: GlassesLive decodes its HUD frames through this too — one
+     * conversion, two consumers.
+     */
+    internal fun i420ToJpeg(i420: ByteBuffer, width: Int, height: Int): ByteArray? = runCatching {
         val src = i420.duplicate().apply { rewind() }
         val ySize = width * height
         val cSize = ySize / 4

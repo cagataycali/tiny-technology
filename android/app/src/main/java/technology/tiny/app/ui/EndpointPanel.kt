@@ -218,6 +218,62 @@ internal suspend fun fetchEndpointFrame(base: String, deviceId: String, token: S
     }
 
 /**
+ * 🔴 A frozen frame is not a live view. iOS `FrameLiveness`
+ * (EndpointPanel.swift:203) and web's `STALE_AFTER_MS` ported.
+ *
+ * The camera poll keeps the last good frame when a tick fails, deliberately —
+ * flashing an empty box over a working webcam is worse than a frame two seconds
+ * old. But the badge over that frame said `live` from the first successful decode
+ * and had no way left to be withdrawn: `cameraFailed` is only ever assigned while
+ * `frame == null`, so after one success this panel could not report a failure at
+ * all. A chamber camera that died at 3am showed a still picture of a finished
+ * print, labelled live, in an accent tint, for as long as the sheet stayed open.
+ *
+ * Three claims said it independently — the word, its accent, and the
+ * contentDescription — each on its own terms. All three now read ONE boolean.
+ *
+ * FRESHNESS decides the word, not the last tick's outcome: one dropped frame is
+ * ordinary on a robot's own webcam and must not flicker the badge.
+ */
+internal object FrameLiveness {
+    /**
+     * Three ticks of the camera loop's 2s delay. One tick may be lost to a slow
+     * frame or a busy printer; three in a row is a stall, not a hiccup. ⚠️ Shared
+     * with iOS (`staleAfter: TimeInterval = 6`) and web (`STALE_AFTER_MS = 6_000`)
+     * — two independently-chosen windows would mean the same dead camera reads live
+     * on one device and stale on the next.
+     */
+    const val staleAfter = 6_000L
+
+    /**
+     * The one decision, so the badge, its tint and TalkBack cannot disagree.
+     *
+     * `now` is a parameter for the tests' sake — every caller passes the default.
+     */
+    fun isLive(frameAt: Long?, now: Long = System.currentTimeMillis()): Boolean {
+        if (frameAt == null) return false
+        return now - frameAt < staleAfter
+    }
+
+    /**
+     * The badge, and deliberately not a diagnosis: [fetchEndpointFrame] answers
+     * null for every failure alike and keeps no reason, so the only honest thing
+     * left to say is WHICH frame this is. The instant it was taken goes beneath the
+     * image in the sheet's one voice for that, [ReadingAge].
+     */
+    fun badge(live: Boolean): String = if (live) "live" else "last frame"
+
+    /**
+     * What TalkBack hears. The contentDescription said "Live camera view from X"
+     * unconditionally — the same false claim with the volume up, and worse, because
+     * someone using a screen reader has no frozen picture to notice.
+     */
+    fun spoken(deviceName: String, live: Boolean): String =
+        if (live) "Live camera view from $deviceName"
+        else "Last camera frame from $deviceName"
+}
+
+/**
  * The panel. Always visible for an endpoint device (web parity) — every other
  * fleet row costs nothing extra, which matters because most people have no robots.
  */
@@ -227,6 +283,12 @@ fun EndpointPanel(app: TinyApp, deviceId: String, deviceName: String, capabiliti
     var note by remember { mutableStateOf<String?>(null) }
     var frame by remember { mutableStateOf<Bitmap?>(null) }
     var cameraFailed by remember { mutableStateOf(false) }
+    // When the frame on screen arrived, and whether that is still recent enough to
+    // call live. `frameLive` is REPUBLISHED by every tick of the camera loop rather
+    // than computed while drawing, because nothing else re-renders this panel once
+    // the frames stop — a badge derived at draw time would freeze along with them.
+    var frameAt by remember { mutableStateOf<Long?>(null) }
+    var frameLive by remember { mutableStateOf(false) }
 
     val hasCamera = remember(capabilities) { endpointHasCamera(capabilities) }
     val running = telemetryIsRunning(telemetry)
@@ -290,6 +352,10 @@ fun EndpointPanel(app: TinyApp, deviceId: String, deviceName: String, capabiliti
                 )
                 if (img != null) {
                     frame = img
+                    // Stamped HERE, beside the frame it dates. A `frameAt` set at
+                    // the top of the tick would date the REQUEST, and on a poll that
+                    // can time out after 15s those are not the same fact.
+                    frameAt = System.currentTimeMillis()
                     cameraFailed = false
                 } else if (frame == null) {
                     // Only admit failure while we've never had a frame: once one
@@ -298,6 +364,10 @@ fun EndpointPanel(app: TinyApp, deviceId: String, deviceName: String, capabiliti
                     cameraFailed = true
                 }
             }
+            // OUTSIDE the `resumed` gate on purpose: the ticks skipped while
+            // backgrounded still have to AGE the frame, or a phone taken out of a
+            // pocket finds a five-minute-old picture still badged live.
+            frameLive = FrameLiveness.isLive(frameAt)
             delay(2_000)
         }
     }
@@ -316,7 +386,7 @@ fun EndpointPanel(app: TinyApp, deviceId: String, deviceName: String, capabiliti
                 if (bmp != null) {
                     Image(
                         bitmap = bmp.asImageBitmap(),
-                        contentDescription = "Live camera view from $deviceName",
+                        contentDescription = FrameLiveness.spoken(deviceName, frameLive),
                         contentScale = ContentScale.Crop,
                         modifier = Modifier.matchParentSize(),
                     )
@@ -328,15 +398,18 @@ fun EndpointPanel(app: TinyApp, deviceId: String, deviceName: String, capabiliti
                                 .padding(horizontal = 7.dp, vertical = 3.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            // `running` alone lit the accent, so a stale frame from a
+                            // job that is still printing glowed exactly like a live
+                            // one. Both halves of the badge gate on liveness first.
                             Box(
                                 Modifier.size(5.dp).clip(RoundedCornerShape(50))
-                                    .background(if (running) accent else TinyGray),
+                                    .background(if (frameLive && running) accent else TinyGray),
                             )
                             Spacer(Modifier.width(4.dp))
                             Text(
-                                "live",
+                                FrameLiveness.badge(frameLive),
                                 style = MaterialTheme.typography.labelSmall,
-                                color = if (running) accent else Color.White.copy(alpha = 0.85f),
+                                color = if (frameLive && running) accent else Color.White.copy(alpha = 0.85f),
                             )
                         }
                     }
@@ -346,6 +419,15 @@ fun EndpointPanel(app: TinyApp, deviceId: String, deviceName: String, capabiliti
                         style = MaterialTheme.typography.labelSmall,
                         color = TinyGray,
                     )
+                }
+            }
+            // 🕒 A frame that stopped refreshing says WHEN it was taken, in the same
+            // sentence the necklace camera uses. Gated on `!frameLive` because while
+            // it IS live the badge already answers the question, and on `frameAt`
+            // (inside `asOf`) because an age with no reading under it dates nothing.
+            if (!frameLive) {
+                ReadingAge.asOf(frameAt)?.let {
+                    Text(it, style = MaterialTheme.typography.labelSmall, color = TinyGray)
                 }
             }
             Spacer(Modifier.height(6.dp))

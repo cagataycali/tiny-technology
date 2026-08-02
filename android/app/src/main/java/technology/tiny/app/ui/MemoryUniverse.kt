@@ -84,16 +84,20 @@ fun MemorySheet(app: TinyApp, tiny: String, onOpenGraph: (() -> Unit)? = null, o
             return@LaunchedEffect
         }
         val res = runCatching { app.api.getJson("/api/learnings?limit=200") }.getOrNull()
-        // null = transport failure; _status ≥ 400 = HTTP error. Either way we couldn't
-        // load — kept DISTINCT from a clean empty list so we don't render "nothing yet"
-        // (indistinguishable from genuinely empty) on an outage (iOS 3c37c2d parity).
-        val status = res?.optInt("_status", 0) ?: 0
-        if (res == null || status >= 400) {
-            serverFailed = status.takeIf { it >= 400 }
-                ?.let { technology.tiny.app.net.friendlyHttpError(it) } ?: "couldn't reach the server"
+        // One rule for all six list sheets ([LoadFailure]) — kept DISTINCT from a clean
+        // empty list so we don't render "nothing yet" (indistinguishable from genuinely
+        // empty) on an outage (iOS 3c37c2d parity). The rule asks whether the array
+        // ARRIVED, which a 200 that wasn't JSON fails while satisfying `status < 400`.
+        //
+        // Both key names, because this route has answered under each and the reader
+        // below accepts either — a rule that knew only one would call a good load a
+        // failure the day the other came back.
+        val body = LoadFailure.loaded(res, "learnings", alt = "memories")
+        if (body == null) {
+            serverFailed = LoadFailure.contentMessage(res, "learnings", "your memories", alt = "memories")
             return@LaunchedEffect
         }
-        val arr = res.optJSONArray("learnings") ?: res.optJSONArray("memories")
+        val arr = body.optJSONArray("learnings") ?: body.optJSONArray("memories")
         server = (0 until (arr?.length() ?: 0)).mapNotNull { i ->
             arr?.optJSONObject(i)?.let {
                 Learning(it.optString("id"), it.optString("content"), learningIsLive(it.optString("freshness", "live")))

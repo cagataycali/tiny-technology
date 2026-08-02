@@ -36,6 +36,28 @@ class DeepLinkRouteTest {
         assertEquals("messages", safeWidgetRoute("messages", browsable = false))
     }
 
+    // ── askQuery: the ask?q= trust rule (native tap→redeem) ────────────────
+    // Our own notification taps (never browsable) auto-send the push's redeem
+    // turn; a BROWSABLE ask?q= from any web page must NEVER auto-send an
+    // attacker-authored prompt into the user's agent — seed-only.
+
+    @Test fun `a trusted (non-browsable) ask query auto-sends`() {
+        val q = askQuery("fetch my results", browsable = false)!!
+        assertEquals("fetch my results", q.text)
+        assertEquals(true, q.autoSend)
+    }
+
+    @Test fun `a browser-originated ask query can only seed the composer`() {
+        val q = askQuery("rm -rf my life", browsable = true)!!
+        assertEquals(false, q.autoSend)
+    }
+
+    @Test fun `blank or missing q is no query at all`() {
+        assertNull(askQuery(null, browsable = false))
+        assertNull(askQuery("", browsable = false))
+        assertNull(askQuery("   ", browsable = true))
+    }
+
     @Test fun `a null host stays null (no route)`() {
         assertNull(safeWidgetRoute(null, browsable = true))
         assertNull(safeWidgetRoute(null, browsable = false))

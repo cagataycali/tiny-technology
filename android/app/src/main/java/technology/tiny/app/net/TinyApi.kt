@@ -306,19 +306,22 @@ class TinyApi(
         awaitClose { source.cancel() }
     }
 
-    /** Buffer the SSE stream to one string (relay proxy path — iOS chatOnce parity). */
+    /** Buffer the SSE stream to one string (relay proxy path — iOS chatOnce parity).
+     *  onTool carries the toolUseId (use_device P5): the relay path routes
+     *  round-trip tools to their real executors, which post results to the
+     *  chat's tool-result mailbox keyed by exactly that id. */
     suspend fun chatOnce(
         message: String,
         tiny: String,
         extraSystem: String? = null,
-        onTool: ((name: String, input: JSONObject) -> Unit)? = null,
+        onTool: ((id: String, name: String, input: JSONObject) -> Unit)? = null,
     ): String {
         val sb = StringBuilder()
         var err: String? = null
         chat(message, tiny, JSONArray(), extraSystem).collect { ev ->
             when (ev) {
                 is ChatEvent.TextDelta -> sb.append(ev.text)
-                is ChatEvent.BeforeToolCall -> onTool?.invoke(ev.name, ev.input)
+                is ChatEvent.BeforeToolCall -> onTool?.invoke(ev.toolUseId, ev.name, ev.input)
                 is ChatEvent.Error -> err = ev.message
                 else -> Unit
             }

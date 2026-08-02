@@ -1,0 +1,1 @@
+First public release. Create an AI by chatting, teach it what it should know, call it with your voice, and watch it show up on every device you own.

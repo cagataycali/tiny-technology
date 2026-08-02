@@ -57,7 +57,7 @@ testing against a staging deployment without rebuilding.
 app/src/main/java/technology/tiny/app/
 ├── auth/      sign-in & session (passkey/WebAuthn flows)
 ├── chat/      conversation state, streaming, continuity/scrub logic
-├── fleet/     multi-tiny management
+├── fleet/     device enrolment, relay polling, radios (see below)
 ├── geo/       location context & map sheet data
 ├── net/       API client (TinyApi.kt), SSE streaming
 ├── tools/     agent tool-call cards rendered in chat
@@ -68,6 +68,29 @@ app/src/main/java/technology/tiny/app/
 ├── wear/      phone-side bridge to the Wear OS app
 └── widget/    home-screen widgets
 ```
+
+## What `fleet/` holds
+
+The phone is a node, not just a client: it enrols itself (`POST /api/devices`),
+heartbeats, and polls the relay so the agent can reach it from anywhere. It also
+carries the radio link for hardware that has no network of its own.
+
+| File | What |
+|---|---|
+| `FleetManager.kt` | enrolment, 30s heartbeat, 5s relay poll while foregrounded |
+| `RelayService.kt` | foreground service that keeps the node reachable when the always-on setting is on |
+| `Wearables.kt` · `WearablesLive.kt` · `WearablesRecorder.kt` · `WearablesListener.kt` · `WearablesEvents.kt` | Meta glasses (Wearables Device Access Toolkit): photo, live HUD stream, mp4 recording, on-device speech, capture-button taps |
+| `BtMic.kt` | raises the Bluetooth SCO link so speech recognition hears the *glasses'* mic — Android never routes `SpeechRecognizer` over BT on its own |
+| `Bluetooth.kt` · `TinySetup.kt` | the tiny BLE beacon (the version byte names the board) and over-the-air WiFi/identity provisioning |
+| `TinyLive.kt` · `LiveTranscribe.kt` · `LiveScribe.kt` | the Nicla Vision's camera feed and the running transcript surface |
+| `NiclaVoiceGateway.kt` | the phone **is** the Nicla Voice's network stack: an autoConnect GATT link that heartbeats as the board and forwards wake notifies to `/api/devices/event` |
+| `PhoneRecorder.kt` · `MicClaim.kt` | phone-mic capture, and the arbitration that stops two features fighting over one microphone |
+| `DeviceActionAudit.kt` | every device action leaves a trace the user can read |
+
+Two boards are supported. **Nicla Vision** is a full node — it gets WiFi and its
+own device token, then heartbeats for itself. **Nicla Voice** has no WiFi at all
+(nRF52832 + NDP120), so it is only ever reachable while a paired phone holds its
+GATT link; one Voice per phone, and a re-pair replaces the previous claim.
 
 ## Distribution
 

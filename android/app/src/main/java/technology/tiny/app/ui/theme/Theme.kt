@@ -32,6 +32,16 @@ val TinySurfaceMid = Color(0xFF0D120F)
 val TinyCodeBg = Color.Black.copy(alpha = 0.45f)
 val TinyGray = Color(0xFF8A8F8C)
 val TinyDanger = Color(0xFFFF4D4D)
+/**
+ * Warning amber — iOS's `.orange`, for a signal that is not an error but that
+ * you shouldn't read at face value either: a mismatched chain id, a clamped
+ * amount, a camera that answered "busy". [TinyDanger] over-states all three.
+ *
+ * Lived in Chain.kt as a private val marked "local to this screen on purpose"
+ * until a second screen needed it (RelayCameraPanel's failure reason). One hex
+ * in two files is how two ambers drift apart.
+ */
+val TinyWarn = Color(0xFFFFB020)
 val TinyText = Color(0xFFE6EAE8)
 val TinyOutline = Color(0xFF242B27)
 

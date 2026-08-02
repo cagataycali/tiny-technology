@@ -75,6 +75,13 @@ class ActivityAgoTest {
         assertEquals("👀", iconFor("tiny_visit"))
     }
 
+    @Test fun `iconFor resolves batch_result to the robot`() {
+        // 🤖 A spawn_agents wait:false fleet that finished after its stream
+        // closed (web lib/chat/tools/spawn.ts) — same story as 💻: the ring is
+        // where a background completion surfaces, so ⚡ = invisible.
+        assertEquals("🤖", iconFor("batch_result"))
+    }
+
     @Test fun `iconFor resolves device_result to the laptop`() {
         // 💻 A use_device task whose reply landed after the 45s wait (worker
         // relay.ts buildLateReplyEvent). The event ring is the only surface a
@@ -95,6 +102,33 @@ class ActivityAgoTest {
     // needs a human", swept every minute by the worker) rendered exactly like a
     // corrupt event. The fallback is deliberate and unchanged; the ROSTER
     // (EMITTED_KINDS) is what turns a missing glyph into a red test.
+
+    /**
+     * 🎙️ The wearable kinds — and the one that was WRONG rather than missing.
+     *
+     * `device_note` is the job_missed case again: `device` is a KIND_ICONS key and
+     * a real prefix of it, so it inherited 💻 ("your laptop finished a task")
+     * while being what PhoneRecorder falls back to when
+     * /api/devices/transcript isn't deployed — the current production state — so
+     * it is the kind that carries REAL TRANSCRIBED SPEECH today. A row of the
+     * user's own words, labelled as a laptop task.
+     *
+     * The other three were plain absences from EMITTED_KINDS, which is why the
+     * roster test below passed while they rendered ⚡: it iterates the roster.
+     */
+    @Test fun `each wearable kind has its own glyph, and device_note is not a laptop`() {
+        val voice = listOf("nicla_wake", "nicla_transcript", "nicla_sentry", "device_note")
+        val glyphs = voice.map { iconFor(it) }
+        assertEquals("wearable kinds share a glyph: $glyphs", voice.size, glyphs.toSet().size)
+        for (kind in voice) {
+            assertEquals("$kind missing from the roster", true, EMITTED_KINDS.contains(kind))
+            assertEquals("$kind falls through to the bolt", false, iconFor(kind) == "⚡")
+        }
+        assertEquals(
+            "device_note inherited 💻 from the `device` prefix — it carries speech, not a laptop task",
+            false, iconFor("device_note") == iconFor("device_result"),
+        )
+    }
 
     @Test fun `every kind the worker emits has a real glyph, not the fallback`() {
         for (kind in EMITTED_KINDS) {

@@ -24,6 +24,7 @@ import technology.tiny.app.chat.Continuity
 import technology.tiny.app.chat.Speech
 import technology.tiny.app.net.TinyApi
 import technology.tiny.app.tools.DeviceTools
+import technology.tiny.app.tools.resolveOpenUrl
 
 data class RelayEntry(val prompt: String, val result: String, val ts: Long = System.currentTimeMillis())
 
@@ -99,9 +100,25 @@ class FleetManager(
     private val _eventsUnread = MutableStateFlow(0)
     val eventsUnread: StateFlow<Int> = _eventsUnread
 
-    // "location" = this node can answer where/speed asks with a live fused fix
-    // (relay block below; gated at runtime on the actual permission grant)
-    private val capabilities = listOf("chat", "location")
+    // What a relay invoke can REALLY do here (use_device P4/P5) — the model
+    // reads this list from use_device action:'list' and the system prompt's
+    // device block, and reasons from it ("only advertises chat+location, so
+    // it can't open apps"). Capability = the software path exists; runtime
+    // preconditions (permission grants, glasses linked, foreground) are
+    // reported honestly at invoke time by the device-actions audit.
+    //   location       = live fused fix (permission-gated at runtime)
+    //   bluetooth_scan = live BLE scan context (same runtime gate)
+    //   speak          = on-device TTS (quiet-hours gated)
+    //   open_app       = open_url incl. mailto/maps/spotify (foreground-gated)
+    //   screenshot     = MediaProjection capture behind its consent dialog
+    //   glasses        = meta_* bridges (honest "not linked" when absent)
+    //   record         = a {type:"record"} relay envelope records the phone's mic
+    //                    and answers with a TRANSCRIPT (no audio file — see
+    //                    PhoneRecorder's header for why Android cannot host one)
+    private val capabilities = listOf(
+        "chat", "location", "bluetooth_scan", "speak", "open_app", "screenshot", "glasses",
+        "record",
+    )
 
     fun start() {
         if (!auth.isLoggedIn) return
@@ -284,6 +301,16 @@ class FleetManager(
             RelayNotifier.handle(context, payload) { refreshUnread() }
             return
         }
+        // 🎙️ {type:"record"} — the worker's nicla_voice_record tool reaching this
+        // phone. Handled HERE because the poll CLAIMS envelopes (CAS
+        // delivered=0→1): an unhandled type is consumed and destroyed, not
+        // retried, so falling through to the `invoke` guard below meant the
+        // caller waited out its whole window and then told the user the phone
+        // might still be recording. Nothing was.
+        if (payload.optString("type") == "record") {
+            handleRecordEnvelope(envelopeId, payload)
+            return
+        }
         if (payload.optString("type") != "invoke") return
         val prompt = payload.optString("prompt")
         if (prompt.isEmpty()) return
@@ -314,6 +341,57 @@ class FleetManager(
             RelayNotifier.notifyFleetTrace(
                 context, ("relay-invoke-" + prompt).hashCode(),
                 "📡 Web agent reached your phone", prompt.take(120),
+            )
+        }
+    }
+
+    /**
+     * Record for the web agent and reply on the same envelope.
+     *
+     * ALWAYS replies, including on a refusal: the caller is blocked polling for
+     * a reply to this exact envelope id, and staying silent about a mic that is
+     * busy or a permission that was never granted spends its whole wait window
+     * before it can say anything at all. A named refusal arriving in two seconds
+     * is worth more than a timeout arriving in thirty-five.
+     */
+    private suspend fun handleRecordEnvelope(envelopeId: String, payload: JSONObject) {
+        val secs = PhoneRecorder.clampSeconds(
+            if (payload.has("seconds")) payload.optInt("seconds") else null,
+        )
+        val label = PhoneRecorder.label(payload.optString("reason"))
+        Log.i("TinyFleet", "relay record: ${secs}s ($label)")
+
+        val app = this.context as? technology.tiny.app.TinyApp
+        val take = if (app == null) {
+            PhoneRecorder.Take(false, "", "", 0, "recorder unavailable on this build")
+        } else {
+            PhoneRecorder.record(app, secs, label)
+        }
+        runCatching {
+            api.patchJson(
+                "/api/devices/relay",
+                JSONObject()
+                    .put("deviceId", auth.deviceId)
+                    .put("token", auth.deviceToken)
+                    .put("inReplyTo", envelopeId)
+                    .put("payload", PhoneRecorder.reply(take)),
+            )
+        }
+
+        // A remote request turned this phone's microphone on. That is exactly the
+        // kind of thing a user must be able to notice after the fact, so it lands
+        // in the relay log the same way an invoke does — and in the shade when
+        // nobody was watching the screen.
+        val summary = if (take.ok) {
+            "🎙️ recorded ${take.seconds}s — ${take.text.take(120).ifEmpty { "(silence)" }}"
+        } else {
+            "⚠ ${take.error ?: "recording failed"}"
+        }
+        _relayLog.value = (_relayLog.value + RelayEntry("🎙️ record ${secs}s ($label)", summary)).takeLast(50)
+        if (!foreground) {
+            RelayNotifier.notifyFleetTrace(
+                context, ("relay-record-$envelopeId").hashCode(),
+                "🎙️ Web agent recorded on your phone", summary.take(120),
             )
         }
     }
@@ -374,22 +452,101 @@ class FleetManager(
                 (block ?: "Location permission not granted on the phone.")
         }
         // Everything else proxies through the server agent as this device.
-        // Device-tool events from the proxied stream act on THIS phone (iOS parity).
-        return api.chatOnce(
+        // Device-tool events from the proxied stream act on THIS phone (iOS
+        // parity) — and every attempt is AUDITED (use_device P4): the proxied
+        // model gets no per-tool result, so without this trail it claims
+        // success for actions that silently no-oped ("Mail app opened 📬"
+        // while mailto: was dropped). The audit block appended to the reply is
+        // what the web-side agent relays instead of that optimism.
+        val audit = mutableListOf<String>()
+        val reply = api.chatOnce(
             "[Executing on ${deviceName()}, Android] $prompt$context",
             tiny = "tiny",
             extraSystem = continuity.buildContext(config.tinyName),
-            onTool = { name, input ->
-                if (name == "speak") {
-                    val text = input.optString("text")
-                    if (text.isNotBlank() && !config.isQuietNow()) {
-                        speech.speak(text, "relay-${System.currentTimeMillis()}")
+            onTool = { id, name, input ->
+                when (name) {
+                    "speak" -> {
+                        val text = input.optString("text")
+                        val quiet = config.isQuietNow()
+                        val spoke = text.isNotBlank() && !quiet
+                        if (spoke) speech.speak(text, "relay-${System.currentTimeMillis()}")
+                        audit += DeviceActionAudit.speakLine(spoke, quiet)
                     }
-                } else {
-                    deviceTools.handle(name, input)
+                    "open_url" -> {
+                        // Resolve the same decision openUrl() will make, but
+                        // OBSERVABLY: allowlist verdict + foreground check are
+                        // the two silent-failure layers being reported on.
+                        val raw = input.optString("url")
+                        val resolved = resolveOpenUrl(
+                            runCatching { android.net.Uri.parse(raw) }.getOrNull()?.scheme, raw,
+                        )
+                        val fg = Media.isForeground(this.context)
+                        deviceTools.handle(name, input)
+                        audit += DeviceActionAudit.openUrlLine(raw, resolved, fg)
+                    }
+                    // 🔁 Round-trip tools (use_device P5, iOS 943e7294 parity):
+                    // the proxied turn's server callback is blocked polling the
+                    // chat's tool-result mailbox — run the SAME executors main
+                    // chat uses (each posts an outcome on EVERY path, keyed by
+                    // this id). Dispatched async: the proxied stream stays open
+                    // on keepalives while the capture/bridge works.
+                    "screenshot" -> {
+                        if (foreground) {
+                            // Android's per-capture consent IS the system
+                            // MediaProjection dialog — the user is on the phone
+                            // and sees exactly what is asking for the screen.
+                            // Screenshot.deliver/postDenied posts every outcome.
+                            technology.tiny.app.tools.ScreenshotConsentActivity.launch(this.context, id)
+                            audit += DeviceActionAudit.dispatchedLine("screenshot (consent prompt shown)")
+                        } else {
+                            postToolFailure(id, "Screen capture needs the phone in the foreground — its consent dialog cannot show from the background. Ask the user to open the tiny app first.")
+                            audit += DeviceActionAudit.toolLine("screenshot", handled = false)
+                        }
+                    }
+                    "meta_take_photo", "meta_record_video", "meta_listen", "meta_glasses_status" -> {
+                        val app = this.context as? technology.tiny.app.TinyApp
+                        if (app == null) {
+                            postToolFailure(id, "glasses bridge unavailable on this build")
+                            audit += DeviceActionAudit.toolLine(name, handled = false)
+                        } else {
+                            scope.launch {
+                                when (name) {
+                                    "meta_take_photo" -> WearablesBridge.runPhotoTool(app, id)
+                                    "meta_record_video" -> GlassesRecorderBridge.runTool(app, id)
+                                    "meta_listen" -> WearablesListenerBridge.runTool(app, id, input.optInt("seconds", 10))
+                                    else -> WearablesBridge.runStatusTool(app, id)
+                                }
+                            }
+                            audit += DeviceActionAudit.dispatchedLine(name)
+                        }
+                    }
+                    else -> audit += DeviceActionAudit.toolLine(name, deviceTools.handle(name, input))
                 }
             },
         )
+        // Truncate the answer BEFORE appending the audit (iOS parity):
+        // handleEnvelope caps the whole reply at 7000, and a chatty answer
+        // must lose its tail — never the truth about what the phone did.
+        // 6500 + the render's ≤400-char block stays inside the cap.
+        return reply.take(6500) + DeviceActionAudit.render(audit)
+    }
+
+    /**
+     * Fast honest outcome for a round-trip tool this relay turn can't run —
+     * the server callback polls the chat's tool-result mailbox and, with
+     * nothing posted, strands for its full 90s (use_device design G7).
+     * Posting within one poll tick makes it an immediate, explainable error.
+     */
+    private fun postToolFailure(toolUseId: String, error: String) {
+        scope.launch {
+            runCatching {
+                api.postJson(
+                    "/api/chat/tool-result",
+                    JSONObject().put("toolUseId", toolUseId)
+                        .put("payload", JSONObject().put("ok", false).put("error", error).toString()),
+                )
+            }
+        }
     }
 
     private fun deviceName() = "${auth.login ?: "user"}-pixel"
