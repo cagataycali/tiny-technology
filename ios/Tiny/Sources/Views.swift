@@ -472,6 +472,23 @@ final class ChatModel: ObservableObject {
         let token = Keychain.get("tiny_token")
         guard let d: [String: Any] = try? await Api.post("/api/tiny", token: token, body: ["name": name]),
               name == tiny else { return }
+        // ⚠️⚠️ **A 200 is not proof of an answer.** The route bounds the worker at
+        // 10s and degrades a timeout, a 5xx or a non-JSON body into a 200 carrying
+        // its BLANK shape — which `try?` above cannot see. So one failure had two
+        // behaviours: delivered as an error it returned here keeping everything,
+        // and delivered as a 200 it was applied as CONFIGURATION. The accent fell
+        // back to brand green, hero/logo/intro-vibe/chips/tagline all cleared, and
+        // `cfg_accent_hex` was overwritten — persistence read by WatchBridge and
+        // the widget snapshot, so a worker hiccup repainted the watch and the home
+        // screen as well. `Session.publishWidgetSnapshot` states the rule one layer
+        // down: *a fleet-numbers refresh must not blank the widgets.*
+        //
+        // Absence cannot carry this distinction: switching to a tiny that really
+        // has no logo MUST clear the last one's. Only the route's own marker
+        // separates "no answer" from "an answer that is blank" — which is why it
+        // is a flag and not a missing key. (`TinyEditorLoad` documents
+        // /api/tiny's three shapes; this is its contract, not editor logic.)
+        if TinyEditorLoad.readFailed(d) { return }
         // Private + whether this device is vouched (default public/false on
         // any miss so a fetch failure never hard-locks a public tiny).
         isPrivate = d["private"] as? Bool ?? false

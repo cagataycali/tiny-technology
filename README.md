@@ -109,7 +109,7 @@ count drifts from the code.
 | **Make pictures** — generated images stored in R2 and rendered inline, on-device generation where the hardware allows | `generate_image` | [`worker/src/media.ts`](worker/src/media.ts) |
 | **Answer where you already are** — Telegram, any MCP client (`npx tiny-tech`), a menubar app, a watch | `telegram` `use_telegram` | [`tiny-tech/`](tiny-tech/) |
 
-Under all of it: **31 D1 migrations**, **247 test files** in the web suite alone, and one
+Under all of it: **31 D1 migrations**, **248 test files** in the web suite alone, and one
 identity that is the same object whether it's reached from a phone, a watch, a CLI, or
 another agent's `ask_tiny`.
 
