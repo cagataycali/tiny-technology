@@ -217,6 +217,10 @@ enum FlipperError: LocalizedError {
     case status(UInt64)
     case refused(String)
     case malformed(String)
+    /// The board's receive buffer never drained enough to take the whole
+    /// command. Its own error, not a timeout, because the cause and the cure are
+    /// different: nothing was sent, and retrying in a moment usually works.
+    case noRoom
 
     var errorDescription: String? {
         switch self {
@@ -230,6 +234,8 @@ enum FlipperError: LocalizedError {
             return why
         case .malformed(let what):
             return "The Flipper's answer to \(what) didn't parse."
+        case .noRoom:
+            return "The Flipper's Bluetooth buffer stayed full, so the command wasn't sent. Try again in a moment."
         }
     }
 }
@@ -389,6 +395,8 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     private var frameSeq = 0
     /// The tail of the button-event chain. See `send(_:hold:)`.
     private var inputChain: Task<Error?, Never>?
+    /// The tail of the outbound frame chain. See `enqueueWrite`.
+    private var writeChain: Task<Void, Never>?
 
     private let lock = NSLock()
     private var nextId: UInt32 = 1
@@ -415,6 +423,46 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// Folders holding the user's scanned credentials. Ported from
     /// tiny-tech/src/agent/flipper.ts SENSITIVE_DIRS — see `refuseSweep`.
     static let sensitiveDirs = ["/ext/nfc", "/ext/lfrfid", "/ext/ibutton", "/ext/u2f", "/ext/subghz"]
+    /// How long `waitForRoom` will hold a frame back waiting for the board to
+    /// drain. Deliberately well inside the shortest request timeout (8s) so the
+    /// caller learns it ran out of BUFFER rather than out of time.
+    private static let roomWaitTries = 60
+    private static let roomWaitMs = 50
+    /// Largest inbound frame we will believe. The real ones are small: a screen
+    /// frame is 1024 bytes plus its wrapper, a `Storage.Read` chunk about the
+    /// same, a DeviceInfo frame is one key. A length past this did not come from
+    /// the firmware, it came from a stream that lost its place — so it is a
+    /// signal to resynchronise, not a buffer to wait for.
+    private static let maxFrameBytes: UInt64 = 16384
+    /// A varint is ten bytes at most. More than that at the head of the buffer
+    /// without one parsing means those bytes are not a length prefix at all.
+    private static let maxVarintBytes = 10
+
+    // MARK: - What fits in a relay reply
+
+    /// Characters of reply the phone will spend. The relay itself truncates at
+    /// 7000 (`relay.ts`: `String(result).slice(0, 7000)`), so stopping short of
+    /// that leaves the envelope's own JSON room to exist.
+    static let replyBudget = 6500
+    /// Bytes of a non-text file rendered as hex. Deliberately the same window
+    /// the cable path uses (`tiny-tech/src/agent/flipper.ts`), so one `.sub`
+    /// reads identically whichever transport fetched it — the point of a preview
+    /// is to recognise the file, not to carry it.
+    static let hexPreviewBytes = 1024
+
+    /// Trim a reply to the budget **and say in the reply that it was trimmed.**
+    ///
+    /// ⚠️ The marker is the whole point; the trimming is incidental. A cut reply
+    /// is indistinguishable from a complete one, and the agent relays it as the
+    /// answer — so a listing missing its tail becomes "you don't have that card"
+    /// about a card the user does have, and a half-rendered capture reads as the
+    /// whole file. `String(...).prefix(n)` on its own produces exactly that lie,
+    /// which is why no caller here should use it directly.
+    static func fitReply(_ body: String, _ what: String) -> String {
+        guard body.count > replyBudget else { return body }
+        let note = "\n…\n(cut here — \(what) is longer than one reply can carry.)"
+        return String(body.prefix(max(0, replyBudget - note.count))) + note
+    }
 
     override private init() {
         super.init()
@@ -620,15 +668,56 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
             // Strong capture: the class is a @unchecked Sendable singleton, and a
             // weak one here reads as a `var` to Swift 6's closure checker.
             Task { @MainActor in
-                self.write(framed, id: id)
+                self.enqueueWrite(framed, id: id)
             }
         }
     }
 
-    /// Write one framed request, chunked to what the link and the board's buffer
-    /// will take.
+    /// Queue one framed request behind whatever is already on its way out.
+    ///
+    /// Whole frames, one at a time. `writeFrame` can suspend waiting for the
+    /// board's buffer to drain, and two suspended writers would interleave their
+    /// chunks on the wire — which the board reads as one corrupt frame, exactly
+    /// what the reservation in `writeFrame` exists to prevent. Same shape as
+    /// `inputChain` in `send(_:hold:)`, for the same reason.
     @MainActor
-    private func write(_ data: Data, id: UInt32) {
+    private func enqueueWrite(_ data: Data, id: UInt32) {
+        let previous = writeChain
+        writeChain = Task { @MainActor in
+            _ = await previous?.value
+            await self.writeFrame(data, id: id)
+        }
+    }
+
+    /// Write one framed request, chunked to what the link will take — and not a
+    /// byte of it until the whole frame is sure to fit.
+    ///
+    /// ⚠️ **A PARTIAL FRAME IS UNRECOVERABLE.** The board reads the varint length
+    /// and then waits for exactly that many bytes, so a frame cut short leaves
+    /// its parser mid-message: the NEXT request's bytes are eaten as this one's
+    /// tail, and every command after that decodes as garbage until the link
+    /// drops. The only symptom is a timeout, which reads as "the Flipper isn't
+    /// answering" rather than "we broke the stream". So flow control here is a
+    /// RESERVATION for the entire frame taken before the first chunk goes out —
+    /// never a per-chunk gate that can give up halfway.
+    @MainActor
+    private func writeFrame(_ data: Data, id: UInt32) async {
+        // Flow control is not decoration: the flow-control characteristic reports
+        // free RX buffer, and the firmware logs "Received %d, while was ready to
+        // receive %d bytes. Can lead to buffer overflow!" when a writer ignores
+        // it. Hold the whole frame back rather than overrun the board.
+        guard await waitForRoom(data.count) else {
+            fail(id, FlipperError.noRoom)
+            return
+        }
+        // The caller's timeout runs independently of this queue, so the wait is
+        // where a request gets abandoned. Sending it anyway would run a command
+        // nobody is listening for — a delete or a clock set landing after the
+        // user gave up and moved on.
+        guard lock.withLock({ pending[id] != nil }) else { return }
+        // Re-read the link AFTER the wait — it may have dropped while we waited,
+        // in which case `didDisconnectPeripheral` has already failed this id and
+        // `rxChar` belongs to a peripheral we no longer hold.
         guard let p = peripheral, let ch = rxChar else {
             fail(id, FlipperError.notLinked)
             return
@@ -637,12 +726,6 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         var offset = 0
         while offset < data.count {
             let n = min(mtu, data.count - offset)
-            // Flow control is not decoration: the flow-control characteristic
-            // reports free RX buffer, and the firmware logs "Received %d, while
-            // was ready to receive %d bytes. Can lead to buffer overflow!" when a
-            // writer ignores it. Hold back rather than overrun the board.
-            let room = lock.withLock { credits }
-            if let room, room < UInt32(n) { break }
             p.writeValue(data.subdata(in: offset..<offset + n), for: ch, type: rxWriteType)
             lock.withLock {
                 if let c = credits { credits = c > UInt32(n) ? c - UInt32(n) : 0 }
@@ -651,17 +734,45 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Wait until the board has room for `bytes`.
+    ///
+    /// Returns false only if the buffer never freed up — and in that case
+    /// NOTHING has been written, which is the whole point: a request that fails
+    /// here fails cleanly, where one abandoned halfway poisons every request
+    /// after it.
+    private func waitForRoom(_ bytes: Int) async -> Bool {
+        for _ in 0..<Self.roomWaitTries {
+            // nil = the characteristic has never notified, so there is no budget
+            // to honour and holding back would deadlock on information that is
+            // not coming. Send, as the firmware's own clients do.
+            guard let room = lock.withLock({ credits }) else { return true }
+            if room >= UInt32(bytes) { return true }
+            try? await Task.sleep(for: .milliseconds(Self.roomWaitMs))
+        }
+        return false
+    }
+
     /// Feed inbound bytes through the deframer. One notify can carry part of a
     /// frame, a whole frame, or several.
     private func consume(_ chunk: Data) {
         inbox.append(contentsOf: chunk)
         while true {
-            guard let (len, afterLen) = PBMsg.varint(inbox, 0) else { return } // truncated prefix
+            guard let (len, afterLen) = PBMsg.varint(inbox, 0) else {
+                // A truncated prefix is ordinary — wait for the rest. Unless
+                // there are already more bytes here than any varint can be, in
+                // which case waiting means waiting forever.
+                if inbox.count > Self.maxVarintBytes { desync("a length prefix that never ended") }
+                return
+            }
             if len == 0 {
                 // Not a shape the Flipper emits, but dropping the prefix is the
                 // only way out that doesn't spin forever on it.
                 inbox.removeFirst(afterLen)
                 continue
+            }
+            guard len <= Self.maxFrameBytes else {
+                desync("a frame claiming \(len) bytes")
+                return
             }
             let end = afterLen + Int(len)
             guard inbox.count >= end else { return } // frame still arriving
@@ -669,6 +780,19 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
             inbox.removeFirst(end)
             deliver(msg)
         }
+    }
+
+    /// The inbound stream lost its place. Drop what is buffered and fail what is
+    /// waiting, so the next request starts from a known-empty buffer.
+    ///
+    /// Without this a deframer holding one impossible length never delivers
+    /// another frame: every later notify just appends, every request times out,
+    /// and nothing anywhere says why. Recovering costs one round of errors;
+    /// stalling costs the session.
+    private func desync(_ what: String) {
+        inbox = []
+        lastError = "The Flipper's Bluetooth stream lost sync (\(what)). The next command starts fresh."
+        failAllPending(FlipperError.malformed("the Bluetooth stream"))
     }
 
     private func deliver(_ msg: PBMsg) {

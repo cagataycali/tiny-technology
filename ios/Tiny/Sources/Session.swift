@@ -825,22 +825,43 @@ final class TinySession: NSObject, ObservableObject {
             case "files", "ls", "list":
                 let entries = try await fg.list(path)
                 if entries.isEmpty { return ["result": "📁 \(path): (empty)"] }
-                let lines = entries.map { e in
-                    e.isDir ? "  📁 \(e.name)/" : "  📄 \(e.name) — \(e.size) bytes"
+                // Whole entries only, and a count when some are left out. A name
+                // cut in half is a file that does not exist, and the agent will
+                // go on to try reading it; a list quietly missing its tail is
+                // worse still, because "not in the listing" is how anyone reads
+                // "not on the card".
+                var out = "📁 \(path) (over Bluetooth from this phone):"
+                var shown = 0
+                for e in entries {
+                    let line = e.isDir ? "\n  📁 \(e.name)/" : "\n  📄 \(e.name) — \(e.size) bytes"
+                    if out.count + line.count > FlipperGateway.replyBudget - 120 { break }
+                    out += line
+                    shown += 1
                 }
-                return ["result": String(("📁 \(path) (over Bluetooth from this phone):\n"
-                    + lines.joined(separator: "\n")).prefix(6500))]
+                if shown < entries.count {
+                    out += "\n… \(shown) of \(entries.count) shown — the rest didn't fit one reply. Ask for a subfolder to see them."
+                }
+                return ["result": out]
 
             case "read":
                 let data = try await fg.read(path)
                 let text = String(data: data, encoding: .utf8)
                 if let t = text, !t.contains("\u{FFFD}") {
-                    return ["result": String("📄 \(path) (\(data.count) bytes)\n\(t)".prefix(6500))]
+                    return ["result": FlipperGateway.fitReply(
+                        "📄 \(path) (\(data.count) bytes)\n\(t)", "this file")]
                 }
-                // Not valid UTF-8 → hex, same rule the cable path uses, so a
-                // .sub capture reads the same whichever transport fetched it.
-                let hex = data.prefix(1024).map { String(format: "%02x", $0) }.joined()
-                return ["result": String("📄 \(path) (\(data.count) bytes, binary)\n\(hex)".prefix(6500))]
+                // Not valid UTF-8 → a hex preview, the same 1024-byte window the
+                // cable path uses, so a .sub reads the same whichever transport
+                // fetched it — including the cable's `…`, which says the preview
+                // is a preview. Without it the header's byte count reads as a
+                // promise about the hex below it, and 6000 bytes of allowed file
+                // can arrive 83% missing looking complete.
+                let window = min(data.count, FlipperGateway.hexPreviewBytes)
+                let hex = data.prefix(window).map { String(format: "%02x", $0) }.joined()
+                let cut = window < data.count
+                    ? "…\n(preview: the first \(window) of \(data.count) bytes.)" : ""
+                return ["result": FlipperGateway.fitReply(
+                    "📄 \(path) (\(data.count) bytes, binary)\n\(hex)\(cut)", "this file's hex preview")]
 
             case "md5":
                 return ["result": "\(path) — md5 \(try await fg.md5(path))"]
