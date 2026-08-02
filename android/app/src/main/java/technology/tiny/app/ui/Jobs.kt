@@ -14,13 +14,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import technology.tiny.app.TinyApp
 import technology.tiny.app.tools.AlertRecord
 import technology.tiny.app.tools.AlertStore
+import technology.tiny.app.ui.theme.TinyAccent
 import technology.tiny.app.ui.theme.TinyGray
+import technology.tiny.app.ui.theme.TinyWarn
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
@@ -51,14 +54,167 @@ internal fun runStamp(started: String, nowMs: Long): String =
     started.toLongOrNull()?.let { "${ago(it, nowMs)} ago" } ?: started.take(16)
 
 /**
+ * 🔴 What a job's schedule line MEANS — the question this sheet answered by
+ * guessing, in the one direction that invents history.
+ *
+ * The row rendered `ran Jan 1, 09:00 · fired 0×` about a reminder that never
+ * happened, because the cadence line read:
+ *
+ *     if (fireCount > 0 || !enabled) "ran" else "once at"
+ *
+ * 🔑 `!enabled` is NOT evidence that a job ran. The scheduler clears the flag
+ * from two places and only one of them is a run (verified against the CURRENT
+ * `worker/src/scheduler.ts`, since the line numbers the web and
+ * iOS quote have both moved since):
+ *
+ *   • after a successful fire — `UPDATE jobs SET enabled = 0` (:239), preceded
+ *     by CLAIM_SQL (:35), which increments `fire_count`.
+ *   • when it gives UP — the `skip-stale` branch (:171) writes
+ *     `last_fired_at = now, enabled = 0` for a one-shot that was due more than
+ *     `CATCH_UP_SECONDS` (24h) ago. `fire_count` is untouched. The job never ran
+ *     and now never will: it is disabled precisely so the tick stops looking.
+ *
+ * So `fire_count` is the ONLY field that records a run, and `last_fired_at` on
+ * such a row is the moment of ABANDONMENT — a time the job provably did not run
+ * at, which this sheet was rendering as "last Jan 1, 09:00" beside "fired 0×".
+ *
+ * ⚠️ And the two halves of this app contradicted each other out loud: since
+ * `JOB_ABANDONED_KIND` (scheduler.ts:126) the worker PUSHES "⏰ <name> never
+ * ran". The user reads that notification, opens this sheet, and is told it ran.
+ *
+ * ⚠️ That state needs no outage to reach. `runAt` is validated only as finite,
+ * so an agent that computes a timestamp from a misparsed date lands a one-shot
+ * already in the past; it is created enabled, the next tick marks it stale, and
+ * the sheet then claims it ran.
+ *
+ * Ported from the web's `lib/chat/job-cadence.ts` (and iOS's `JobCadence`, which
+ * ported the same rules). Pure and `nowSec`-injectable: [cadence] formats a
+ * date, this decides what the date MEANS.
+ *
+ * ⚠️ SECONDS throughout, matching the payload — [cadence] takes `nowMs` for the
+ * `daily@` conversion and divides on the way in. Two units in one rule is how a
+ * 24h window silently becomes 24000h.
+ */
+internal object JobCadence {
+    /**
+     * Mirror of the scheduler's `CATCH_UP_SECONDS` (scheduler.ts:76).
+     * `tests/android-job-cadence.test.ts` asserts the worker, the web module,
+     * iOS and this still say 24h — four languages, one rule, previously matched
+     * only by comment.
+     */
+    const val CATCH_UP_SECONDS = 24 * 60 * 60L
+
+    /**
+     * What a one-shot job's fire time means right now.
+     *
+     *  [RAN]     — it fired. The only state `fire_count` can attest to.
+     *  [MISSED]  — it will never fire: either already dropped (disabled, no
+     *              runs) or past the point where it can be (still enabled but
+     *              due beyond the catch-up window, so the very next tick takes
+     *              the skip-stale branch). Deliberately ONE state — "already
+     *              abandoned" and "certain to be abandoned" differ in
+     *              bookkeeping, not in anything the user can do about it.
+     *  [DUE]     — its time has passed, it is enabled, and it is inside the
+     *              catch-up window: a job in flight, not a broken one.
+     *  [PENDING] — its time is still ahead.
+     *  [UNKNOWN] — no usable `run_at`.
+     */
+    enum class OneShot { RAN, MISSED, DUE, PENDING, UNKNOWN }
+
+    /**
+     * How the line should FEEL, decided here rather than in the composable so it
+     * is testable without a UI. Android's cadence had no tone at all — the whole
+     * detail line is one gray join — so "didn't run" would have arrived in the
+     * same colour as "every 5 min", and the row's only warning would be a word
+     * the eye slides over.
+     */
+    enum class Tone { LIVE, DONE, WARN, MUTED }
+
+    /**
+     * The usable-timestamp guard (seconds > 0), shared with the web's
+     * `usableSec` and [whenStamp]'s own `n <= 0`. Kept as a named function
+     * rather than inlined so the rule below and the row's `last_fired_at` read
+     * the same guard.
+     */
+    fun usableSec(v: Long?): Long? = v?.takeIf { it > 0 }
+
+    /**
+     * Classify a one-shot. `nowSec` is unix SECONDS, matching the payload.
+     *
+     * Order matters, and the first branch is the whole point: a recorded run
+     * outranks every flag, including a still-enabled row (the post-fire disable
+     * is a separate statement inside a swallowing try/catch, so
+     * `enabled = 1, fire_count = 1` is a state that can exist — and it means the
+     * job RAN).
+     */
+    fun oneShotState(runAt: Long?, fired: Int, enabled: Boolean, nowSec: Long): OneShot {
+        if (fired > 0) return OneShot.RAN
+        val due = usableSec(runAt) ?: return OneShot.UNKNOWN
+        // Never ran, and nothing left to run it.
+        if (!enabled) return OneShot.MISSED
+        if (due > nowSec) return OneShot.PENDING
+        // Due. Whether it still gets to run is exactly the scheduler's own test.
+        return if (nowSec - due > CATCH_UP_SECONDS) OneShot.MISSED else OneShot.DUE
+    }
+
+    /**
+     * The word before the formatted time, or null when there is nothing true to
+     * say about a time we cannot read.
+     */
+    fun prefix(state: OneShot): String? = when (state) {
+        OneShot.RAN -> "ran"
+        // Names the outcome, not the flag: true for both halves of MISSED and
+        // impossible to mistake for a schedule.
+        OneShot.MISSED -> "didn't run"
+        // Not "once at" — the time has passed, so a future tense reads as a job
+        // that is still coming and makes an in-flight run look overdue forever.
+        OneShot.DUE -> "due"
+        OneShot.PENDING -> "once at"
+        OneShot.UNKNOWN -> null
+    }
+
+    /**
+     * The truthful word for `last_fired_at`, or null when that timestamp records
+     * nothing a person would call a run.
+     *
+     * "last" needs `fire_count` behind it. On a MISSED job the same field is the
+     * moment the scheduler switched the job off, which is worth showing — under
+     * its real name. A recurring job that skipped a stale slot also gets
+     * `last_fired_at` bumped with no fire, and lands here at `fired == 0` with
+     * UNKNOWN (no `run_at`): nothing true to say, so nothing is said — the row's
+     * own "fired 0×" already covers it.
+     */
+    fun lastFiredWord(fired: Int, state: OneShot): String? = when {
+        fired > 0 -> "last"
+        state == OneShot.MISSED -> "switched off"
+        else -> null
+    }
+
+    /**
+     * The colour rule. Recurring jobs are judged by their switch (a live
+     * `every 5 min` row is the common case); one-shots by what their time now
+     * means.
+     */
+    fun tone(schedule: String?, state: OneShot, enabled: Boolean): Tone {
+        if (!schedule.isNullOrEmpty()) return if (enabled) Tone.LIVE else Tone.MUTED
+        return when (state) {
+            OneShot.PENDING, OneShot.DUE -> Tone.LIVE
+            OneShot.RAN -> Tone.DONE
+            OneShot.MISSED -> Tone.WARN
+            OneShot.UNKNOWN -> Tone.MUTED
+        }
+    }
+}
+
+/**
  * Human cadence for the worker schedule DSL (web JobsPanel.tsx `cadence()` parity):
  * `*​/Nm`|`*​/Nh` → "every N min"/"every N hr"; `daily@HH:MM` (stored UTC) → "daily
- * at <local>"; any other schedule string → verbatim; else a one-shot `runAt` →
- * "once at"/"ran <when>" (ran once it has fired or been disabled). NOTE iOS shows
- * daily@ in raw UTC ("daily at HH:MM UTC"); web converts it to the viewer's local
- * clock so a non-UTC user needn't do the math — the better UX, so web is the target
- * for this DISPLAY label (not a byte contract). `nowMs` anchors the daily
- * conversion on today's UTC offset (incl. DST). Pure/testable.
+ * at <local>"; any other schedule string → verbatim; else a one-shot `runAt`, whose
+ * phrasing is [JobCadence]'s to decide — "once at"/"due"/"ran"/"didn't run".
+ * NOTE web converts daily@ to the viewer's local clock so a non-UTC user needn't do
+ * the math — the better UX, so web is the target for this DISPLAY label (not a byte
+ * contract), and iOS has since converted too. `nowMs` anchors the daily conversion
+ * on today's UTC offset (incl. DST) and, /1000, the one-shot rule. Pure/testable.
  */
 internal fun cadence(schedule: String?, runAt: Long?, fireCount: Int, enabled: Boolean, nowMs: Long): String {
     if (schedule != null) {
@@ -80,9 +236,14 @@ internal fun cadence(schedule: String?, runAt: Long?, fireCount: Int, enabled: B
         }
         return schedule
     }
-    if (runAt != null && runAt > 0) {
-        return "${if (fireCount > 0 || !enabled) "ran" else "once at"} ${whenStamp(runAt)}"
-    }
+    // ⚠️ Was `if (fireCount > 0 || !enabled) "ran" else "once at"`, which told
+    // people their abandoned reminder had happened. [JobCadence] reads
+    // `fire_count` as the only record of a run; `usableSec` is the same `> 0`
+    // guard this branch already had, now stated once.
+    val state = JobCadence.oneShotState(runAt, fireCount, enabled, nowMs / 1000)
+    val at = JobCadence.usableSec(runAt)
+    val prefix = JobCadence.prefix(state)
+    if (prefix != null && at != null) return "$prefix ${whenStamp(at)}"
     return "?"
 }
 
@@ -96,6 +257,23 @@ internal fun whenStamp(tsSec: Long?): String {
     val n = tsSec ?: 0
     if (n <= 0) return ""
     return SimpleDateFormat("MMM d, hh:mm a", Locale.US).format(Date(n * 1000))
+}
+
+/**
+ * Tone → colour, the only place the rule meets Compose, so [JobCadence.tone]
+ * itself stays testable without a UI.
+ *
+ * WARN is [TinyWarn], not [TinyDanger]: an abandoned reminder is not an error the
+ * app made, it is a fact the row must stop hiding — the same call Chain.kt's
+ * mismatched chain id and the camera's "busy" made. DONE and MUTED are both
+ * [TinyGray] on purpose: a job that has finished and a job with nothing to say
+ * are equally past, and giving "ran" its own colour would make every completed
+ * one-shot compete with the live rows above it.
+ */
+internal fun jobToneColor(tone: JobCadence.Tone): Color = when (tone) {
+    JobCadence.Tone.LIVE -> TinyAccent
+    JobCadence.Tone.WARN -> TinyWarn
+    JobCadence.Tone.DONE, JobCadence.Tone.MUTED -> TinyGray
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -257,15 +435,40 @@ fun JobsSheet(app: TinyApp, onDismiss: () -> Unit) {
                         Spacer(Modifier.width(8.dp))
                         Column(Modifier.weight(1f)) {
                             Text(j.name, style = MaterialTheme.typography.bodyMedium)
-                            Text(
-                                listOfNotNull(
+                            val state = JobCadence.oneShotState(j.runAt, j.fireCount, j.enabled, nowMs / 1000)
+                            // The cadence gets its OWN Text so it can carry a
+                            // tone. Android had no equivalent of iOS's green
+                            // cadence line — the whole detail line is one gray
+                            // join — which is worse, not better: "didn't run"
+                            // arrived in the same colour as "every 5 min", and
+                            // the row's only warning was a word the eye slides
+                            // over. Split, not recoloured wholesale: "as tiny ·
+                            // fired 0×" is not a warning about anything.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
                                     cadence(j.schedule, j.runAt, j.fireCount, j.enabled, nowMs),
-                                    j.tiny?.let { "as $it" },
-                                    "fired ${j.fireCount}×",
-                                    j.lastFired?.let { "last ${whenStamp(it)}" },
-                                ).joinToString(" · "),
-                                style = MaterialTheme.typography.labelSmall, color = TinyGray,
-                            )
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = jobToneColor(JobCadence.tone(j.schedule, state, j.enabled)),
+                                )
+                                Text(
+                                    listOfNotNull(
+                                        j.tiny?.let { "as $it" },
+                                        "fired ${j.fireCount}×",
+                                        // Was `"last ${whenStamp(it)}"` for any
+                                        // `last_fired_at` at all — but the
+                                        // scheduler sets that field when it GIVES
+                                        // UP too, so this named a time the job
+                                        // provably did not run at, right beside
+                                        // "fired 0×". [JobCadence.lastFiredWord]
+                                        // decides what the stamp is evidence OF.
+                                        JobCadence.usableSec(j.lastFired)?.let { at ->
+                                            JobCadence.lastFiredWord(j.fireCount, state)
+                                                ?.let { word -> "$word ${whenStamp(at)}" }
+                                        },
+                                    ).joinToString(" · ", prefix = " · "),
+                                    style = MaterialTheme.typography.labelSmall, color = TinyGray,
+                                )
+                            }
                             // Last runs, newest first — the observability half of a
                             // background loop: ✓/✗ + result preview + when.
                             runs.filter { it.jobId == j.id }.take(3).forEach { r ->

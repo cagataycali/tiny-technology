@@ -65,14 +65,60 @@ class JobsFormatTest {
         assertEquals("ran Jan 1, 09:00 AM", cadence(null, 1_704_099_600L, 1, true, 0))
     }
 
-    @Test fun `a disabled one-shot reads "ran" even at zero fires`() {
-        // done = fired>0 OR !enabled — a disabled one-shot is spent.
-        assertEquals("ran Jan 1, 09:00 AM", cadence(null, 1_704_099_600L, 0, false, 0))
+    /**
+     * ⚠️⚠️ THIS TEST USED TO PIN THE BUG AS CORRECT. It read:
+     *
+     *     // done = fired>0 OR !enabled — a disabled one-shot is spent.
+     *     assertEquals("ran Jan 1, 09:00 AM", cadence(null, 1_704_099_600L, 0, false, 0))
+     *
+     * "spent" is the assumption, and it is wrong: the scheduler ALSO clears
+     * `enabled` when it gives up on a one-shot it can no longer catch up with
+     * (skip-stale, past 24h), without touching `fire_count`. So this exact case —
+     * zero fires, disabled — is the ABANDONED job, and the assertion demanded the
+     * sheet call it "ran". See [JobCadence] for the two disable paths.
+     *
+     * Kept, inverted, with the old expectation named, because a test that asserts
+     * a defect is worse than no test: it makes the fix look like the regression.
+     */
+    @Test fun `a disabled one-shot that never fired says so — it did NOT run`() {
+        assertEquals("didn't run Jan 1, 09:00 AM", cadence(null, 1_704_099_600L, 0, false, 0))
     }
 
     @Test fun `neither schedule nor runAt yields the question mark`() {
         assertEquals("?", cadence(null, null, 0, true, 0))
         assertEquals("?", cadence(null, 0L, 0, true, 0)) // 0 is not a valid runAt
+    }
+
+    /**
+     * The [JobCadence] states, reached through the FUNCTION THE SHEET CALLS.
+     *
+     * ⚠️ The unit tests in JobCadenceTest prove the rule; these prove the rule is
+     * wired to the string. Every case above passed `nowMs = 0` — a 1970 "now" that
+     * makes every real timestamp look far in the future, so `pending` was the only
+     * state any of them could reach and the whole classifier was one branch deep.
+     * These anchor `nowMs` on the job's own fire time instead.
+     */
+    @Test fun `a passed-but-recent one-shot reads "due", not "once at"`() {
+        val fires = 1_704_099_600L
+        val nowMs = (fires + 3600) * 1000 // an hour late, well inside catch-up
+        assertEquals("due Jan 1, 09:00 AM", cadence(null, fires, 0, true, nowMs))
+    }
+
+    @Test fun `a one-shot stale past the catch-up window says it didn't run`() {
+        val fires = 1_704_099_600L
+        val nowMs = (fires + JobCadence.CATCH_UP_SECONDS + 1) * 1000
+        // Still ENABLED — the flag says nothing, the clock says it is over.
+        assertEquals("didn't run Jan 1, 09:00 AM", cadence(null, fires, 0, true, nowMs))
+    }
+
+    @Test fun `cadence converts its nowMs to seconds before applying the rule`() {
+        // ⚠️ The one unit seam in this file: [cadence] takes MILLIseconds (the
+        // daily@ conversion needs them) and the rule takes SECONDS. Un-divided,
+        // `nowSec` is ~1000× too large and every one-shot in history reads as
+        // stale-past-catch-up — i.e. "didn't run" for a job firing next week.
+        val fires = 1_704_099_600L
+        val nowMs = (fires - 86_400) * 1000 // a day BEFORE it fires
+        assertEquals("once at Jan 1, 09:00 AM", cadence(null, fires, 0, true, nowMs))
     }
 
     // ── whenStamp ─────────────────────────────────────────────────────────────
