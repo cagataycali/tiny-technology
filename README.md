@@ -59,6 +59,21 @@ that account's data — see the caution at the end of <a href="docs/CONCEPTS.md"
 before reusing them or adding your own.</sub>
 </div>
 
+<div align="center">
+<sub>Which is why both apps ship a <b>debug-only asset harness</b>: for the shots where the content is
+the point, it substitutes what the list <i>shows</i>, so a capture needn't be anyone's real memories.
+The standing rule is <b>seed content, never mutate the account for an asset</b> — and a harness that
+only replaces the <i>display</i> leaves every control on screen still wired to the real thing. Both of
+the memory sheet's swipe-to-forget buttons were: one sent a real <code>DELETE</code> to the signed-in
+account with a fabricated id (plain integers a busy account plausibly owns), and the other deleted
+from the phone and re-read the device store, swapping the user's actual memories into the frame the
+harness exists to keep them out of — the leak it was built to prevent, fired by its own UI. Both rows
+on both phones now check first, each inside its own handler so neither can answer for the other, and
+the check is compiled out of release builds so a shipped app can't be argv-tricked into going inert.
+The row still animates away, because a guard that merely refused would film a control that looks
+broken.</sub>
+</div>
+
 ---
 
 ## What is a tiny?
@@ -114,7 +129,7 @@ count drifts from the code.
 | **Make pictures** — generated images stored in R2 and rendered inline, on-device generation where the hardware allows | `generate_image` | [`worker/src/media.ts`](worker/src/media.ts) |
 | **Answer where you already are** — Telegram, any MCP client (`npx tiny-tech`), a menubar app, a watch | `telegram` `use_telegram` | [`tiny-tech/`](tiny-tech/) |
 
-Under all of it: **32 D1 migrations**, **265 test files** in the web suite alone, and one
+Under all of it: **32 D1 migrations**, **266 test files** in the web suite alone, and one
 identity that is the same object whether it's reached from a phone, a watch, a CLI, or
 another agent's `ask_tiny`.
 

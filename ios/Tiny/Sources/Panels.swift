@@ -1851,6 +1851,11 @@ struct MemoryView: View {
                             Text(m.content).font(.subheadline)
                                 .swipeActions {
                                     Button(role: .destructive) {
+                                        // ⚠️ Harness first — see `isDemo`. This handler
+                                        // re-reads the REAL on-device store, so one tap
+                                        // swapped the user's own memories into the frame
+                                        // the harness exists to keep them out of.
+                                        if isDemo { local.removeAll { $0.id == m.id }; return }
                                         Continuity.forgetMemory(tiny, m.id)
                                         local = Continuity.memories(tiny)
                                     } label: { Label("Forget", systemImage: "trash") }
@@ -1883,7 +1888,13 @@ struct MemoryView: View {
                                 Text(m.content).font(.subheadline)
                             }
                             .swipeActions {
-                                Button(role: .destructive) { Task { await forget(m.id) } } label: {
+                                Button(role: .destructive) {
+                                    // ⚠️ Harness first — see `isDemo`. `forget` sends a real
+                                    // DELETE to the signed-in account, and the demo ids are
+                                    // plain integers a real account plausibly owns.
+                                    if isDemo { server.removeAll { $0.id == m.id }; return }
+                                    Task { await forget(m.id) }
+                                } label: {
                                     Label("Forget", systemImage: "trash")
                                 }
                             }
@@ -1920,6 +1931,36 @@ struct MemoryView: View {
             local = Continuity.memories(tiny)
             await load()
         }
+    }
+
+    /// Is the asset harness substituting the dataset on screen right now?
+    ///
+    /// ⚠️⚠️ Both swipe actions in this sheet MUST consult this before touching a
+    /// real store, and neither did. The harness replaces what the list SHOWS and
+    /// nothing else, so the two destructive controls kept operating on the user's
+    /// actual account and phone while every row on screen was fabricated:
+    ///
+    ///  - the server row's `forget` sends a real `DELETE /api/learnings` with a
+    ///    demo id — `serverWire()` uses 100…108 and 200…202, ordinary D1
+    ///    autoincrement values a real account plausibly owns, so a swipe taken to
+    ///    demonstrate the swipe could close one of the user's own memories;
+    ///  - the local row calls `Continuity.forgetMemory` and then re-reads
+    ///    `Continuity.memories(tiny)`, which replaces the demo list with the
+    ///    user's REAL on-device memories mid-capture — the leak the harness was
+    ///    built to prevent, arriving through its own UI.
+    ///
+    /// Android guards both (`MemoryUniverse.kt`, `if (demo)` inside each row's
+    /// lambda) and iOS did not, so this is the standing capture rule — seed
+    /// content, never mutate the account for an asset — held on one phone only.
+    ///
+    /// `#if DEBUG` so a release build cannot be argv-tricked into the inert path
+    /// either, matching Android's `BuildConfig.DEBUG &&` conjunct.
+    private var isDemo: Bool {
+        #if DEBUG
+        MemoryHarness.usesDemoDataset(arguments: ProcessInfo.processInfo.arguments)
+        #else
+        false
+        #endif
     }
 
     private func load() async {
