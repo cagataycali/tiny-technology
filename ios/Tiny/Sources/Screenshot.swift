@@ -148,6 +148,74 @@ final class Screenshot {
         await postResult(toolUseId, token: token, payload: ["denied": true])
     }
 
+    // ── Remote consent (use_device relay path) ────────────────────────────────
+
+    /// Ask for consent and run the capture for a REMOTE ask — the web agent
+    /// reached this phone through use_device, so there is no chat view on
+    /// screen to host the prompt (docs/remote-screenshot-consent-design-2026-08-02).
+    ///
+    /// Three things make this deliberately unlike the chat path:
+    ///
+    /// 1. **It does not return the user's answer.** The relay caller must NOT
+    ///    await a human: `runDeviceEvent` runs inside the relay poll loop's
+    ///    current iteration, and that loop claims envelopes for the whole fleet
+    ///    rail — including the {type:"notify"} pushes that ARE iOS's push
+    ///    transport. Parking it on an unanswered alert would cost the user
+    ///    their notifications. So this dispatches and returns; the outcome
+    ///    reaches the server through the tool-result mailbox its callback is
+    ///    already polling (90s), exactly as Android's fire-and-forget consent
+    ///    activity does.
+    /// 2. **UIAlertController, not the SwiftUI alert.** That one is bound to
+    ///    ChatView's ChatModel, which a `nonisolated static` relay handler
+    ///    cannot reach — and ChatView's modifier chain is at both the
+    ///    type-checker's and the Release demangler's limits. A key-window
+    ///    presentation also correctly follows the user to whatever screen
+    ///    they're actually on, since a remote ask has nothing to do with chat.
+    /// 3. **Consent is still asked EVERY capture** (product decision,
+    ///    2026-07-23) — being remote earns no standing grant.
+    ///
+    /// Returns true when the prompt was actually presented; false means no
+    /// window/scene to present in, and the caller must post the failure itself
+    /// (nothing may leave the server's poll stranded).
+    @discardableResult
+    func askRemoteConsent(toolUseId: String, token: String?, reason: String, tiny: String) -> Bool {
+        guard let scene = UIApplication.shared.connectedScenes
+                .compactMap({ $0 as? UIWindowScene })
+                .first(where: { $0.activationState == .foregroundActive }),
+              let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        else { return false }
+
+        // Walk to whatever is actually on top: presenting on a controller that
+        // already has a sheet up (settings, a panel) silently does nothing.
+        var host: UIViewController = root
+        while let presented = host.presentedViewController, !presented.isBeingDismissed {
+            host = presented
+        }
+
+        let body = reason.isEmpty
+            ? "It will capture your screen once and can read what's shown."
+            : "\(reason)\n\nIt will capture your screen once and can read what's shown."
+        let alert = UIAlertController(
+            // Names the REMOTE origin — the user didn't ask for this on this
+            // device, and a prompt that looked local would be a trust bug.
+            title: "Let \(tiny) see your screen?",
+            message: "Asked from another device.\n\n\(body)",
+            preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Allow once", style: .default) { _ in
+            Task { @MainActor in
+                _ = await self.run(toolUseId: toolUseId, token: token,
+                                   fallback: Self.keyWindowSnapshot())
+            }
+        })
+        alert.addAction(UIAlertAction(title: "Don't allow", style: .cancel) { _ in
+            Task { @MainActor in
+                await self.postDenied(toolUseId: toolUseId, token: token)
+            }
+        })
+        host.present(alert, animated: true)
+        return true
+    }
+
     // ── Capture ──────────────────────────────────────────────────────────────
 
     #if targetEnvironment(macCatalyst)

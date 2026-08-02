@@ -107,6 +107,18 @@ export async function POST(req: Request) {
     }));
   } catch (err) {
     return new Response(JSON.stringify({
+      // ⚠️ This degrade is INDISTINGUISHABLE from a real answer without saying
+      // so. The blank shape below carries no `isOwner`, and a client that reads
+      // `isOwner ?? false` gets "false" — whose only meaning is "you don't own
+      // this tiny". iOS's editor said exactly that to owners whenever the worker
+      // timed out (Settings.swift, TinyEditorLoad.readFailed). A missing key
+      // cannot carry that distinction; a flag can.
+      //
+      // The status stays 200 on purpose: Control.tsx:241 does `.then(res =>
+      // res.json())` with no `res.ok` check, so a non-2xx here would be applied
+      // to the form as config and blank the web editor — trading one silent lie
+      // for a worse one. Consumers that need the truth read this flag.
+      unavailable: true,
       name,
       private: false,
       active: false,

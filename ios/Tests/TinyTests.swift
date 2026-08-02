@@ -1006,6 +1006,31 @@ import Foundation
         #expect(EventGlyph.icon(for: "job_error") == EventGlyph.icon(for: "job_result"))
     }
 
+    /// 🎙️ The wearable kinds — and the one that was WRONG rather than missing.
+    ///
+    /// `device_note` is the job_missed case wearing different clothes: `device` is
+    /// an icons key and a real prefix of it, so it inherited 💻, "your laptop
+    /// finished a task". But device_note is what NiclaRecorder.postToServer falls
+    /// back to while /api/devices/transcript isn't deployed — the current
+    /// production state — so it is the kind that carries REAL TRANSCRIBED SPEECH
+    /// today. A row of the user's own words, labelled as a laptop task.
+    ///
+    /// The other three were plain absences from `emittedKinds`: the glyphs were
+    /// added to `icons` when the necklace shipped and the roster was not, so
+    /// everyEmittedKindHasAGlyph — the test that exists to catch precisely this —
+    /// iterated a list none of them were on and passed.
+    @Test func eachWearableKindHasItsOwnGlyph() {
+        let voice = ["nicla_wake", "nicla_transcript", "nicla_sentry", "device_note"]
+        let glyphs = voice.map { EventGlyph.icon(for: $0) }
+        #expect(Set(glyphs).count == voice.count, "wearable kinds share a glyph: \(glyphs)")
+        for kind in voice {
+            #expect(EventGlyph.emittedKinds.contains(kind), "\(kind) missing from the roster")
+            #expect(EventGlyph.icon(for: kind) != "⚡", "\(kind) falls through to ⚡")
+        }
+        #expect(EventGlyph.icon(for: "device_note") != EventGlyph.icon(for: "device_result"),
+                "device_note inherited 💻 from the `device` prefix — it carries speech, not a laptop task")
+    }
+
     /// The loudest event in the system needs a glyph nothing else shares: a
     /// reconciliation page that looks like a page view is a page nobody reads.
     @Test func payAlarmIsTheSirenAndNothingElseIs() {
@@ -3882,6 +3907,67 @@ import Foundation
         ])
         #expect(seen.count == 3)
     }
+
+    // MARK: - …and the door the fix above did not cover (increment 19)
+
+    /// ⚠️⚠️ The suite's own premise was an unchecked assumption: *"whenever the
+    /// request threw"*. It usually does not. `app/api/tiny/route.ts` bounds the
+    /// worker at 10s and degrades a timeout, a 5xx or a non-JSON body into a
+    /// **200 carrying its blank shape**, so `Api.post` returns normally and the
+    /// missing `isOwner` becomes `false` through `?? false` — straight into the
+    /// branch that says *"Only X's owner can edit it."* The likelier door, left
+    /// open by a fix aimed at the rarer one.
+    @Test("the route's own degrade is not an ownership verdict")
+    func aDegradedTwoHundredIsNotAVerdict() {
+        // Verbatim the route's catch shape (with the marker it now carries).
+        let degraded: [String: Any] = [
+            "unavailable": true, "name": "acme", "private": false, "active": false,
+            "systemPrompt": "", "systemKnowledge": "", "data": "", "hook": "",
+            "worker": "", "schema": [String: Any](),
+        ]
+        #expect(TinyEditorLoad.readFailed(degraded))
+        // Which is the only thing that keeps it off the not-owner screen: the
+        // body's own `isOwner` is absent, and absent reads as false.
+        #expect(degraded["isOwner"] == nil)
+        #expect(TinyEditorLoad.screen(loaded: !TinyEditorLoad.readFailed(degraded),
+                                      isOwner: degraded["isOwner"] as? Bool ?? false) == .failed)
+    }
+
+    @Test("a tiny that really isn't there still gets the not-owner screen")
+    func anAnswerIsAnAnswerEvenWhenItIsNo() {
+        // The route's not-exists shape: no `isOwner` either, but the worker DID
+        // reply — so this is a real answer and must not be called a failure, or
+        // every mistyped name would offer a Retry that can never succeed.
+        let missing: [String: Any] = [
+            "name": "nope", "active": false, "systemPrompt": "", "systemKnowledge": "",
+            "data": "", "hook": "", "worker": "", "schema": [String: Any](),
+        ]
+        #expect(!TinyEditorLoad.readFailed(missing))
+        #expect(TinyEditorLoad.screen(loaded: !TinyEditorLoad.readFailed(missing),
+                                      isOwner: false) == .notOwner)
+    }
+
+    @Test("a real answer is never called a failure")
+    func aSuccessIsNotDegraded() {
+        for owner in [true, false] {
+            let ok: [String: Any] = ["name": "acme", "isOwner": owner, "isAuthorized": owner,
+                                     "active": true, "systemPrompt": "hi"]
+            #expect(!TinyEditorLoad.readFailed(ok))
+            #expect(TinyEditorLoad.screen(loaded: true, isOwner: owner) == (owner ? .editor : .notOwner))
+        }
+    }
+
+    @Test("only the real Boolean counts as the marker")
+    func theMarkerIsReadStrictly() {
+        // `unavailable: false` is a body that read fine. A STRING "true" is not
+        // our route talking — something rewrote the body — and there the old
+        // behaviour is the safer default: guessing a second time is what this
+        // whole arc exists to stop.
+        #expect(!TinyEditorLoad.readFailed(["unavailable": false]))
+        #expect(!TinyEditorLoad.readFailed(["unavailable": "true"]))
+        #expect(!TinyEditorLoad.readFailed([:]))
+        #expect(TinyEditorLoad.readFailed(["unavailable": true]))
+    }
 }
 
 /// An unread price must not look like — or become — free.
@@ -4534,5 +4620,49 @@ import Foundation
             #expect(!said.localizedCaseInsensitiveContains("tiny"),
                     "HTTP \(status) still talks about a tiny: \(said)")
         }
+    }
+
+}
+
+/// 🎙️ The transcript index survives its own schema change.
+@Suite struct NiclaTranscriptStoreTests {
+    @Test("an index.json from the previous build still decodes")
+    func addingIsPreviewDoesNotWipeStoredTranscripts() throws {
+        // NiclaRecorder's whole local store is one Codable round-trip through
+        // Documents/nicla-transcripts/index.json, and `loadIndex()` swallows a
+        // decode failure as `[]`. So a new NON-OPTIONAL field on NiclaTranscript
+        // is a silent data wipe on first launch after the update: every row the
+        // user recorded before today is gone, and the only thing on screen is
+        // "No transcripts yet". The default value on `isPreview` is what prevents
+        // that, and a default is exactly the kind of thing a later refactor
+        // "tidies" into a required field.
+        let old = """
+        [{"id":"t1","at":760000000,"seconds":42,"label":"memo","text":"the roof guy comes tuesday"}]
+        """
+        let rows = try JSONDecoder().decode([NiclaTranscript].self, from: Data(old.utf8))
+        #expect(rows.count == 1, "an older index.json no longer decodes — this is a data wipe")
+        #expect(rows[0].text == "the roof guy comes tuesday")
+        // False, not true: a pre-existing row is a LOCAL take, which was always
+        // full text. Defaulting the other way would send every old row off to
+        // fetch a "rest" that the server may not even have.
+        #expect(rows[0].isPreview == false, "an old local take was marked as a preview")
+    }
+
+    @Test("a preview row is visibly unfinished, and a short take is not")
+    func onlyATruncatedRowGetsTheEllipsis() {
+        // The bug this guards: the list route returns substr(text, 1, 200) while
+        // the server keeps 16KB, so a 120s memo arrived as its first ~12% and
+        // rendered as a complete short transcript — truncated text and short text
+        // are the same pixels. The flag has to survive the round-trip that the
+        // rendering depends on.
+        var t = NiclaTranscript(id: "t2", at: Date(), seconds: 120, label: "memo",
+                                text: String(repeating: "a", count: 200),
+                                audioFile: nil, audioUrl: nil, isPreview: true)
+        #expect(t.isPreview)
+        // fetchFullText's effect: the text is replaced AND the mark cleared, so
+        // the row stops offering to fetch what it already has.
+        t.text = String(repeating: "a", count: 1700)
+        t.isPreview = false
+        #expect(!t.isPreview && t.text.count == 1700)
     }
 }

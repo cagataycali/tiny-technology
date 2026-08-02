@@ -183,6 +183,11 @@ private enum Cmd {
     static let storageInfoReq = 28, storageInfoResp = 29
     static let storageStatReq = 24, storageStatResp = 25
     static let storageMd5Req = 14, storageMd5Resp = 15
+    // The two things BLE can do that the USB CLI cannot: see the screen and
+    // press the buttons. There is no `screenshot` and no `input` command in the
+    // text CLI at all, so this half of the panel has no cabled equivalent.
+    static let guiStartStreamReq = 20, guiStopStreamReq = 21
+    static let guiScreenFrame = 22, guiInputReq = 23
 }
 
 /// CommandStatus, for turning a code into something a person can read. The ones
@@ -264,6 +269,60 @@ struct FlipperInfo: Equatable {
     }
 }
 
+/// One redraw of the Flipper's screen, exactly as the board sent it.
+struct FlipperFrame: Equatable {
+    /// 1024 bytes: u8g2's page buffer, which is what the firmware hands the
+    /// framebuffer callback. Eight pages of 128 columns, one byte per column per
+    /// page, and the byte's bits run DOWN the screen — bit `y % 8`, LSB topmost.
+    /// Read it as 128 bytes per row instead and you get a recognisable-looking
+    /// smear rather than an obvious failure.
+    let data: Data
+    /// PB_Gui.ScreenOrientation: 0 horizontal, 1 flipped 180°, 2/3 vertical.
+    /// The buffer is always 128×64 page-major — orientation says how the board
+    /// wants it shown, it does not change the layout.
+    let orientation: Int
+    /// Frames since this stream started. Two identical redraws are equal by
+    /// content, so without a counter a live-but-static screen is indistinguishable
+    /// from a stream that died.
+    let seq: Int
+}
+
+/// PB_Gui.InputKey. The Flipper's six buttons, by their firmware numbers.
+enum FlipperKey: Int, CaseIterable, Identifiable {
+    case up = 0, down = 1, right = 2, left = 3, ok = 4, back = 5
+
+    var id: Int { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .up: return "chevron.up"
+        case .down: return "chevron.down"
+        case .right: return "chevron.right"
+        case .left: return "chevron.left"
+        case .ok: return "circle"
+        case .back: return "arrow.uturn.backward"
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .up: return "Up"
+        case .down: return "Down"
+        case .right: return "Right"
+        case .left: return "Left"
+        case .ok: return "OK"
+        case .back: return "Back"
+        }
+    }
+}
+
+/// PB_Gui.InputType. REPEAT (4) is deliberately absent: auto-repeat is something
+/// the board's own input service synthesises for a key it can see being held, and
+/// a client that sends REPEAT for a finger it cannot feel is guessing.
+enum FlipperInputType: Int {
+    case press = 0, release = 1, short = 2, long = 3
+}
+
 // MARK: - Gateway
 
 /// Not @MainActor, same reasoning as NiclaVoiceGateway: CoreBluetooth hands
@@ -301,6 +360,13 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// Set while a relay envelope is being served, so the devices panel can show
     /// that the web agent is talking to the Flipper through this phone.
     @Published var activity = ""
+    /// True between StartScreenStream and StopScreenStream. The board pushes a
+    /// frame on every redraw until it is told to stop, so this is also the flag
+    /// that says whether someone still owes it a stop.
+    @Published private(set) var streaming = false
+    /// The last redraw. nil while not streaming — a frozen picture of a menu the
+    /// user has since walked away from would be a lie about a live view.
+    @Published private(set) var screenFrame: FlipperFrame?
 
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -320,6 +386,9 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// regard for frame boundaries, so a 60-frame DeviceInfo can land as any
     /// number of notifies and one notify can hold several frames.
     private var inbox: [UInt8] = []
+    private var frameSeq = 0
+    /// The tail of the button-event chain. See `send(_:hold:)`.
+    private var inputChain: Task<Error?, Never>?
 
     private let lock = NSLock()
     private var nextId: UInt32 = 1
@@ -442,6 +511,11 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         rxChar = nil
         linked = false
         linkedAt = nil
+        // The board's stream dies with the RPC session, so the flag and the last
+        // picture have to go too — a mirror that keeps showing its final frame
+        // claims to be live.
+        streaming = false
+        screenFrame = nil
         failAllPending(FlipperError.notLinked)
     }
 
@@ -518,7 +592,10 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// frame lands, which is what a naive read returns halfway through a listing.
     private func request(_ content: Data, timeout: TimeInterval = 15,
                          label: String) async throws -> [PBMsg] {
-        guard linked || content.isEmpty == false else { throw FlipperError.notLinked }
+        // No `guard linked` here on purpose: finishLink() proves the link with a
+        // ping BEFORE `linked` is true, so a strict check would make the link
+        // unprovable. `write()` is the real gate — with no characteristic to
+        // write to it fails the request with .notLinked immediately.
         let id = lock.withLock { () -> UInt32 in
             let v = nextId
             nextId = nextId == UInt32.max ? 1 : nextId + 1
@@ -595,6 +672,24 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     }
 
     private func deliver(_ msg: PBMsg) {
+        // Screen frames are routed by CONTENT, ahead of the command_id lookup,
+        // because they are not answers to anything: once the stream is on the
+        // board pushes one per redraw, unprompted. Whether the firmware stamps
+        // them with 0 or echoes the id of the request that started the stream is
+        // not a thing this file should depend on — and if it echoes, matching on
+        // the id would resolve the start request with a picture instead of its
+        // acknowledgement, then keep appending frames to an entry nobody holds.
+        if let sf = msg.msg(Cmd.guiScreenFrame) {
+            // Same main queue as every other delegate callback (the manager is
+            // created with `queue: .main`), so the @Published write is on-thread.
+            if streaming {
+                frameSeq += 1
+                screenFrame = FlipperFrame(data: sf.bytes(1) ?? Data(),
+                                          orientation: Int(sf.num(2) ?? 0),
+                                          seq: frameSeq)
+            }
+            return
+        }
         let id = UInt32(truncatingIfNeeded: msg.num(Cmd.commandId) ?? 0)
         let more = (msg.num(Cmd.hasNext) ?? 0) != 0
         var resume: CheckedContinuation<[PBMsg], Error>?
@@ -764,6 +859,91 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         return "\(path) is a folder of the user's scanned cards and IDs — name a single file to read (list it first)."
     }
 
+    // MARK: - Screen and buttons
+
+    /// Start mirroring the Flipper's screen.
+    ///
+    /// This and `send(_:hold:)` are the two things the cable cannot do at all —
+    /// the text CLI has no screenshot command and no way to inject input, so a
+    /// mirror is not a BLE consolation prize for the missing capture, it is a
+    /// capability only this transport has.
+    ///
+    /// ⚠️ Whoever starts it owes it a `stopScreenStream()`. The board keeps
+    /// pushing a kilobyte per redraw until it is told to stop, and it is running
+    /// on its own battery in someone's pocket.
+    func startScreenStream() async throws {
+        // `streaming` goes up BEFORE the request, not after the acknowledgement:
+        // the board pushes on REDRAW, and a Flipper sitting on a static menu may
+        // not redraw for a long time. A first frame dropped because the flag
+        // wasn't up yet is a mirror that stays blank on a board that is working.
+        await MainActor.run {
+            self.frameSeq = 0
+            self.screenFrame = nil
+            self.streaming = true
+        }
+        do {
+            let frames = try await request(PB.empty(Cmd.guiStartStreamReq),
+                                          timeout: 10, label: "the screen stream")
+            try checkStatus(frames)
+        } catch {
+            await MainActor.run { self.streaming = false }
+            throw error
+        }
+    }
+
+    /// Stop mirroring. Deliberately non-throwing: this runs when a sheet closes
+    /// or a view disappears, and the only thing a caller could do with a failure
+    /// is leave the board streaming to nobody.
+    func stopScreenStream() async {
+        await MainActor.run {
+            self.streaming = false
+            self.screenFrame = nil
+        }
+        _ = try? await request(PB.empty(Cmd.guiStopStreamReq),
+                              timeout: 8, label: "stopping the screen stream")
+    }
+
+    /// Press one button, as the hardware would report it.
+    ///
+    /// PRESS, then SHORT (or LONG), then RELEASE — all three, in order. Not SHORT
+    /// alone: a Flipper view that tracks the key being down, like a game or the
+    /// IR app transmitting while OK is held, would see a key go short without
+    /// ever being pressed or released and stay stuck in whatever state that left.
+    /// The board's own input service emits all three, so the mirror does too.
+    ///
+    /// Sequences are chained rather than fired concurrently. Two overlapping taps
+    /// would interleave on the wire as PRESS(up), PRESS(ok), SHORT(up)… which the
+    /// input service reads as a chord nobody pressed.
+    @MainActor
+    func send(_ key: FlipperKey, hold: Bool = false) async throws {
+        let types: [FlipperInputType] = hold
+            ? [.press, .long, .release]
+            : [.press, .short, .release]
+        let previous = inputChain
+        // Strong self: the class is a @unchecked Sendable singleton, and a weak
+        // capture reads as a captured `var` to Swift 6's closure checker.
+        let mine = Task { () -> Error? in
+            _ = await previous?.value
+            for t in types {
+                do { try await self.input(key, t) } catch { return error }
+            }
+            return nil
+        }
+        inputChain = mine
+        if let failure = await mine.value { throw failure }
+    }
+
+    private func input(_ key: FlipperKey, _ type: FlipperInputType) async throws {
+        // Explicit zeros. UP and PRESS are both 0, and proto3 omits defaults —
+        // so an encoder being clever here would send an EMPTY body, which is
+        // indistinguishable from a message we forgot to fill in. nanopb reads a
+        // present zero the same as an absent one, so writing it costs nothing.
+        let body = PB.int(1, UInt64(key.rawValue)) + PB.int(2, UInt64(type.rawValue))
+        let frames = try await request(PB.sub(Cmd.guiInputReq, body),
+                                      timeout: 8, label: "a button press")
+        try checkStatus(frames)
+    }
+
     // MARK: - Status
 
     /// Fill `info` from the board. Each piece is independent: a Flipper that
@@ -882,6 +1062,10 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
         linked = false
         rxChar = nil
         inbox = []
+        // The firmware closes the RPC session on disconnect, which takes the
+        // screen stream with it. Nothing to stop, and nothing true left to show.
+        streaming = false
+        screenFrame = nil
         lock.withLock { credits = nil }
         // Anything mid-flight is gone with the link. Failing it now turns a
         // 15-second wait into an immediate, accurate answer.

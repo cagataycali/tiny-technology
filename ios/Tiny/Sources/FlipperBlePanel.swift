@@ -13,12 +13,14 @@
  * appears on the Flipper's own screen. Nothing this file can do replaces that
  * moment, so it gets out of the way and explains what to expect.
  */
+import CoreGraphics
 import SwiftUI
 
 struct FlipperBlePanel: View {
     @ObservedObject private var flipper = FlipperGateway.shared
     @State private var showPairing = false
     @State private var showFiles = false
+    @State private var showScreen = false
     @State private var busy = false
     @State private var note: String?
     /// When `flipper.info` was last read. The line it dates is a battery
@@ -60,6 +62,7 @@ struct FlipperBlePanel: View {
         .devicePanel()
         .sheet(isPresented: $showPairing) { FlipperPairingSheet() }
         .sheet(isPresented: $showFiles) { FlipperFilesSheet() }
+        .sheet(isPresented: $showScreen) { FlipperScreenSheet() }
     }
 
     @ViewBuilder private var paired: some View {
@@ -91,6 +94,8 @@ struct FlipperBlePanel: View {
                 // the board beeps and blinks in the user's hand.
                 Button("Beep") { Task { await beep() } }
                 Button("Files") { showFiles = true }
+                // The half of this feature the cable has no answer for at all.
+                Button("Screen") { showScreen = true }
             }
             .font(.caption2).buttonStyle(.bordered).controlSize(.mini)
             .disabled(busy)
@@ -289,5 +294,199 @@ struct FlipperFilesSheet: View {
         if n < 1024 { return "\(n) B" }
         if n < 1024 * 1024 { return String(format: "%.1f KB", Double(n) / 1024) }
         return String(format: "%.1f MB", Double(n) / 1_048_576)
+    }
+}
+
+/// The Flipper's own 128×64 screen, mirrored, with its six buttons underneath.
+///
+/// This is the half of the story the cable cannot tell. The USB CLI has no
+/// screenshot command and no way to inject input; BLE has both. So the honest
+/// shape of this feature is not "BLE is a worse cable" — each transport can do
+/// something the other cannot, and this is BLE's side of it. It is also the
+/// answer to `flipper_listen`'s cable-only refusal: a person can drive a capture
+/// on the board from here and then read the saved file over the same link.
+///
+/// ⚠️ It stays a PANEL feature, on purpose, and the relay handler must never grow
+/// a `press` action. Navigating to a saved .sub and tapping OK TRANSMITS it —
+/// so a remote button press is a transmit by another name: physical action on
+/// someone's gate, car or lock, from a sentence the user never said. The buttons
+/// here are under the user's own thumb, on their own phone, looking at the screen.
+struct FlipperScreenSheet: View {
+    @ObservedObject private var flipper = FlipperGateway.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var img: CGImage?
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 16) {
+                screen
+                dpad
+                Text("A press here is a press on the board — including the ones that transmit.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let e = error {
+                    Text(e).font(.caption2).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding()
+            .navigationTitle(flipper.unit?.name ?? "Flipper")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Done") { dismiss() } }
+            }
+        }
+        .task { await start() }
+        // Stopping is not optional: the board pushes a kilobyte per redraw until
+        // told otherwise, on its own battery, and nobody is watching after this.
+        .onDisappear { Task { await flipper.stopScreenStream() } }
+        .onChange(of: flipper.screenFrame) { _, f in
+            img = f.flatMap(Self.image)
+        }
+    }
+
+    @ViewBuilder private var screen: some View {
+        ZStack {
+            if let cg = img {
+                // .none, or the 128×64 grid gets blurred into something that looks
+                // like a photo of the screen instead of the screen.
+                Image(decorative: cg, scale: 1)
+                    .interpolation(.none)
+                    .resizable()
+                    .aspectRatio(2, contentMode: .fit)
+                    .rotationEffect(rotation)
+            } else {
+                Color.black.opacity(0.85)
+                    .aspectRatio(2, contentMode: .fit)
+                    .overlay {
+                        // Not an error, and worth spelling out: the firmware sends
+                        // a frame when the screen REDRAWS, so a Flipper resting on
+                        // a static menu sends nothing at all until something moves.
+                        Text(flipper.streaming
+                             ? "Waiting for the Flipper to redraw — press a button and it appears."
+                             : "Not streaming.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding()
+                    }
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+    }
+
+    @ViewBuilder private var dpad: some View {
+        // The board's own arrangement: a round d-pad with OK in the middle and
+        // Back below-right, so muscle memory transfers.
+        VStack(spacing: 8) {
+            FlipperKeyButton(key: .up, press: press)
+            HStack(spacing: 8) {
+                FlipperKeyButton(key: .left, press: press)
+                FlipperKeyButton(key: .ok, press: press)
+                FlipperKeyButton(key: .right, press: press)
+            }
+            HStack(spacing: 8) {
+                FlipperKeyButton(key: .down, press: press)
+                FlipperKeyButton(key: .back, press: press)
+            }
+        }
+    }
+
+    /// PB_Gui.ScreenOrientation. The buffer is always 128×64 page-major; this is
+    /// only how the board wants it shown.
+    private var rotation: Angle {
+        switch flipper.screenFrame?.orientation ?? 0 {
+        case 1: return .degrees(180)
+        case 2: return .degrees(90)
+        case 3: return .degrees(270)
+        default: return .zero
+        }
+    }
+
+    private func start() async {
+        error = nil
+        do {
+            try await flipper.startScreenStream()
+        } catch let err {
+            error = err.localizedDescription
+        }
+    }
+
+    private func press(_ key: FlipperKey, hold: Bool) {
+        Task {
+            do {
+                try await flipper.send(key, hold: hold)
+            } catch let err {
+                // Bound explicitly — a bare `catch` shadows the @State `error`
+                // with the thrown value, and the assignment then goes nowhere.
+                error = err.localizedDescription
+            }
+        }
+    }
+
+    /// 1024 bytes of u8g2 page buffer → a 128×64 image in the Flipper's own
+    /// colours, dark pixels on that orange backlight.
+    ///
+    /// The layout is the trap: eight PAGES of 128 columns, one byte per column
+    /// per page, and the byte's bits run DOWN the screen — bit `y % 8`, LSB at
+    /// the top. Read it as 128 bytes per row instead and the result is a
+    /// recognisable-looking smear, not an obvious failure.
+    static func image(_ f: FlipperFrame) -> CGImage? {
+        let w = 128, h = 64
+        let bytes = [UInt8](f.data)
+        // A short frame draws nothing rather than half a screen of garbage.
+        guard bytes.count >= w * h / 8 else { return nil }
+        var rgba = [UInt8](repeating: 255, count: w * h * 4)
+        for y in 0..<h {
+            let page = y / 8
+            let mask = UInt8(1 << (y % 8))
+            for x in 0..<w {
+                let lit = bytes[page * w + x] & mask != 0
+                let i = (y * w + x) * 4
+                rgba[i] = lit ? 0x20 : 0xFF
+                rgba[i + 1] = lit ? 0x14 : 0x82
+                rgba[i + 2] = 0x00
+            }
+        }
+        guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32,
+                       bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: provider, decode: nil, shouldInterpolate: false,
+                       intent: .defaultIntent)
+    }
+}
+
+/// One key. Tap and long press are DIFFERENT firmware events, not a slower
+/// version of each other — a Flipper submenu opens on OK short and offers delete
+/// on OK long — so this reports both.
+private struct FlipperKeyButton: View {
+    let key: FlipperKey
+    let press: (FlipperKey, Bool) -> Void
+    @State private var held = false
+
+    var body: some View {
+        Image(systemName: key.symbol)
+            .font(.title3.weight(.semibold))
+            .frame(width: 54, height: 44)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+            .contentShape(RoundedRectangle(cornerRadius: 10))
+            // One gesture, both events: the tap is derived from the RELEASE, so
+            // a press that already fired as a long press is not also sent as a
+            // short one. Two gestures stacked here would send both.
+            .onLongPressGesture(minimumDuration: 0.45, pressing: { down in
+                if down {
+                    held = false
+                } else if !held {
+                    press(key, false)
+                }
+            }, perform: {
+                held = true
+                press(key, true)
+            })
+            .accessibilityLabel(key.label)
     }
 }

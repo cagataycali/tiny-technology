@@ -487,6 +487,25 @@ enum TinyEditorLoad {
         guard loaded else { return .failed }
         return isOwner ? .editor : .notOwner
     }
+
+    /// ⚠️⚠️ **A 200 is not proof of an answer.** `app/api/tiny/route.ts` bounds the
+    /// worker at 10s and degrades a timeout, a 5xx or a non-JSON body into a
+    /// **200 carrying its blank shape** — deliberately, because `Control.tsx`
+    /// reads `res.json()` without checking `res.ok`, so a non-2xx there would be
+    /// applied as config and blank the web form. That blank shape has no
+    /// `isOwner`, and `?? false` turned its absence into "false" — the one value
+    /// whose only branch says *"Only X's owner can edit it."* So the owner of a
+    /// tiny was told they don't own it, and handed a remedy that fixes nothing,
+    /// because a worker hiccuped. `loadError`'s comment already names the rule
+    /// this broke: `isOwner` is a verdict the server actually gave.
+    ///
+    /// The route now marks that degrade, so "the read failed" is something the
+    /// client is TOLD rather than something it infers from a missing key. A
+    /// tiny that genuinely does not exist is a different answer — the worker
+    /// really did reply — and keeps the not-owner screen it always had.
+    static func readFailed(_ body: [String: Any]) -> Bool {
+        body["unavailable"] as? Bool == true
+    }
 }
 
 /// A price the editor may or may not know.
@@ -533,6 +552,10 @@ struct TinyEditorView: View {
     /// The read never came back. Kept apart from `isOwner`, which is a verdict
     /// the server actually gave — see TinyEditorLoad.
     @State private var loadError = false
+    /// Why it never came back, when the failure had words. `nil` alongside
+    /// `loadError` is the one case with none: the route answered 200 and told us
+    /// only that it could not read (see TinyEditorLoad.readFailed).
+    @State private var loadFailure: String?
     @State private var isOwner = false
     @State private var systemPrompt = ""
     @State private var systemKnowledge = ""
@@ -608,8 +631,20 @@ struct TinyEditorView: View {
                 Section { ProgressView("Loading \(name)…") }
             } else if screen == .failed {
                 Section {
-                    Text("Couldn't load \(name)'s settings — check the connection and try again. Nothing has been changed.")
+                    // Was "— check the connection and try again": a cause the app
+                    // never checked, on a screen whose commonest failure (an
+                    // expired session, the route's IP budget) that remedy cannot
+                    // fix. The reason is available on every throwing path; where
+                    // it isn't, the route told us only that it couldn't read, and
+                    // that is all this says.
+                    Text(loadFailure ?? "Couldn't read \(name)'s settings just now.")
                         .font(.subheadline).foregroundStyle(.secondary)
+                    // Kept, because unlike the sentence above it is TRUE: nothing
+                    // is written until a save, and a failed read returns before
+                    // touching a single field. On a settings screen that is the
+                    // one thing the reader most needs to know.
+                    Text("Nothing has been changed.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Button("Retry") { Task { await load() } }
                 }
             } else if screen == .notOwner {
@@ -823,11 +858,30 @@ struct TinyEditorView: View {
         // ("set the Tiny field to one of your own") that fixes nothing. Every
         // other loader on this screen already refuses the collapse; /api/graph's
         // comment even names it, masked-empty discipline.
-        guard let d: [String: Any] = try? await Api.post("/api/tiny", token: token, body: ["name": name]) else {
+        let d: [String: Any]
+        do {
+            d = try await Api.post("/api/tiny", token: token, body: ["name": name])
+        } catch {
+            // `contentMessage`, not `message`: the chat table's line for a 404 is
+            // "That tiny doesn't exist", which on the editor of a tiny the user
+            // opened FROM their own list would be another confident wrong answer.
+            // The reachable ones here are 429 (the route's IP budget — its body is
+            // already a full human sentence from lib/limit-message.ts, which the
+            // table must not override) and no-response.
+            loadFailure = LoadFailure.contentMessage(error)
             loadError = true
             loading = false
             return
         }
+        // A body arrived; it may still be the route saying it could not read.
+        if TinyEditorLoad.readFailed(d) {
+            loadFailure = nil
+            loadError = true
+            loading = false
+            return
+        }
+        loadFailure = nil
+        loadError = false
         isOwner = d["isOwner"] as? Bool ?? false
         systemPrompt = d["systemPrompt"] as? String ?? ""
         systemKnowledge = d["systemKnowledge"] as? String ?? ""

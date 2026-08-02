@@ -52,11 +52,51 @@ struct NiclaTranscript: Identifiable, Codable, Equatable {
     let at: Date
     let seconds: Int
     let label: String
-    let text: String
+    var text: String
     /// Local audio filename inside store dir (nil if the file write failed)
     var audioFile: String?
     /// Hosted /api/media URL (nil if upload failed or signed out)
     var audioUrl: String?
+    /// True while `text` is the SERVER'S 200-CHAR PREVIEW rather than the take.
+    ///
+    /// The list endpoint returns `substr(text, 1, 200) AS preview` while the
+    /// server keeps up to 16KB, and the memo button records 120 seconds — about
+    /// 1700 characters of ordinary speech. So a refreshed row held ~12% of what
+    /// was said and looked exactly like a complete short transcript: truncated
+    /// text and short text are the same pixels. This flag is what lets the row
+    /// know to fetch the rest, and it is why `text` is now `var`.
+    ///
+    /// Decodes to false for rows written by an older build — see the extension
+    /// below, because the default value alone does NOT survive decoding.
+    var isPreview: Bool = false
+}
+
+extension NiclaTranscript {
+    /// Decode an index.json written before `isPreview` existed.
+    ///
+    /// ⚠️ A default value on a property does NOT make the synthesized `Decodable`
+    /// init tolerate a missing key — it throws `.keyNotFound`. And `loadIndex()`
+    /// turns any decode failure into `[]`, so adding this one field was a silent
+    /// wipe of every transcript the user had ever recorded: first launch after the
+    /// update would show "No transcripts yet", with the local audio files still
+    /// sitting on disk unreferenced. `decodeIfPresent` is the fix.
+    ///
+    /// Declared in an EXTENSION so the memberwise `init(id:at:…isPreview:)` is
+    /// still synthesized; writing this inside the struct would suppress it.
+    /// Old rows default to `false`, not true — they are local takes, which always
+    /// held the whole transcript, so marking them preview would send each one off
+    /// to fetch a remainder that may not exist server-side.
+    init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        at = try c.decode(Date.self, forKey: .at)
+        seconds = try c.decode(Int.self, forKey: .seconds)
+        label = try c.decode(String.self, forKey: .label)
+        text = try c.decode(String.self, forKey: .text)
+        audioFile = try c.decodeIfPresent(String.self, forKey: .audioFile)
+        audioUrl = try c.decodeIfPresent(String.self, forKey: .audioUrl)
+        isPreview = try c.decodeIfPresent(Bool.self, forKey: .isPreview) ?? false
+    }
 }
 
 /// Everything the realtime tap + recognizer callbacks touch — mutation
@@ -525,22 +565,65 @@ final class NiclaRecorder: ObservableObject {
         let known = Set(transcripts.map(\.id))
         let fetched: [NiclaTranscript] = rows.compactMap { r in
             guard let id = r["id"] as? String, !known.contains(id) else { return nil }
-            // The list endpoint returns `preview` (200 chars server-side); a tap
-            // can fetch the full text by id later. `created` is unixepoch.
-            let text = (r["preview"] as? String) ?? (r["text"] as? String) ?? ""
+            // The list endpoint returns `preview` — literally `substr(text, 1, 200)`
+            // — so a row built from it is a STUB, and `isPreview` says so. The old
+            // comment here said "a tap can fetch the full text by id later", which
+            // was an intention, not a feature: nothing on either phone ever passed
+            // ?id=, so the app's copy of a 120s memo was its first ~200 characters
+            // with no sign the other 88% existed. `created` is unixepoch.
+            let full = (r["text"] as? String).flatMap { $0.isEmpty ? nil : $0 }
             let created = (r["created"] as? Double) ?? Double(r["created"] as? Int ?? 0)
             return NiclaTranscript(
                 id: id,
                 at: Date(timeIntervalSince1970: created),
                 seconds: (r["duration_s"] as? Int) ?? 0,
                 label: (r["label"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? "recording",
-                text: text,
+                text: full ?? (r["preview"] as? String) ?? "",
                 audioFile: nil,
-                audioUrl: (r["audio_url"] as? String).flatMap { $0.isEmpty ? nil : $0 })
+                audioUrl: (r["audio_url"] as? String).flatMap { $0.isEmpty ? nil : $0 },
+                // Trust the row's own `truncated` flag when the server sends one;
+                // otherwise infer it — a preview is only short of the whole take
+                // when it actually hit the 200-char cut.
+                isPreview: full == nil
+                    && ((r["truncated"] as? Bool)
+                        ?? (((r["preview"] as? String)?.count ?? 0) >= Self.previewChars))
+            )
         }
         guard !fetched.isEmpty else { return }
         transcripts = (transcripts + fetched).sorted { $0.at > $1.at }
         pruneAndSave()
+    }
+
+    /// Server-side `TRANSCRIPT_PREVIEW_CHARS`. A list row exactly this long is
+    /// assumed cut rather than coincidentally that length; being wrong costs one
+    /// redundant GET that rewrites the same text, so the cheap direction is to
+    /// over-fetch, never to under-mark.
+    static let previewChars = 200
+
+    /// Pull ONE transcript's full text through the `?id=` branch and keep it.
+    ///
+    /// This is the consumer the read proxy never had. The chain was whole on every
+    /// other link: the worker's `TranscriptGetCall` returns the stored text (up to
+    /// a 16KB cap), `/api/devices/transcript?id=` proxies it under the caller's
+    /// session, and the agent's own `nicla_voice_transcript` tool reads it — the
+    /// AGENT could quote a memo back that the phone that recorded it could not
+    /// show you.
+    ///
+    /// The result is written to the on-disk index, not just to view state: the
+    /// index IS the app's cache, so a @State-only update would re-fetch on every
+    /// tap and lose the text again at the next launch.
+    @discardableResult
+    func fetchFullText(_ t: NiclaTranscript) async -> String? {
+        guard let res: [String: Any] = try? await Api.get(
+            "/api/devices/transcript?id=\(t.id)", token: Keychain.get("tiny_token")),
+            let row = res["transcript"] as? [String: Any],
+            let full = row["text"] as? String, !full.isEmpty
+        else { return nil }
+        guard let i = transcripts.firstIndex(where: { $0.id == t.id }) else { return full }
+        transcripts[i].text = full
+        transcripts[i].isPreview = false
+        pruneAndSave()
+        return full
     }
 
     // ── Local persistence (Documents-JSON house pattern, Sessions.swift) ──
@@ -708,6 +791,10 @@ struct NiclaTranscriptsView: View {
     /// ("voice mode is using the microphone — stop it first"), and a Record
     /// button that silently does nothing is the worst version of that.
     @State private var recordError: String?
+    /// Ids with a full-text GET in flight, so a row shows a spinner instead of a
+    /// second "Read in full" — and so scrolling a preview row off and back on
+    /// cannot start the same fetch twice.
+    @State private var hydrating: Set<String> = []
 
     var body: some View {
         NavigationStack {
@@ -759,8 +846,26 @@ struct NiclaTranscriptsView: View {
                                     Text(t.at.formatted(date: .abbreviated, time: .shortened))
                                         .font(.caption2).foregroundStyle(.secondary)
                                 }
-                                Text(t.text).font(.callout)
+                                // The ellipsis is the whole tell. A 200-char cut and
+                                // a genuinely short memo are the same pixels, so
+                                // without it the row reads as the complete take.
+                                Text(t.isPreview ? t.text + "…" : t.text).font(.callout)
                                 HStack(spacing: 14) {
+                                    if t.isPreview {
+                                        if hydrating.contains(t.id) {
+                                            ProgressView().controlSize(.mini)
+                                        } else {
+                                            // Retry rail: the row hydrates itself on
+                                            // appear, so this is what's left when
+                                            // that GET failed — offline, or a signed
+                                            // -out session. Tapping is the only way
+                                            // back to the rest of the words.
+                                            Button { hydrate(t) } label: {
+                                                Label("Read in full", systemImage: "text.quote")
+                                            }
+                                            .font(.caption)
+                                        }
+                                    }
                                     if playable(t) {
                                         Button {
                                             toggle(t)
@@ -781,6 +886,11 @@ struct NiclaTranscriptsView: View {
                                 }
                             }
                             .padding(.vertical, 2)
+                            // Hydrate as the row scrolls into view rather than
+                            // pre-fetching all 50 on open: one GET per transcript
+                            // the user actually looks at, and the button below is
+                            // then only ever a retry.
+                            .onAppear { if t.isPreview { hydrate(t) } }
                         }
                         .onDelete { idx in
                             for i in idx { rec.delete(rec.transcripts[i]) }
@@ -827,6 +937,18 @@ struct NiclaTranscriptsView: View {
             } message: {
                 Text(recordError ?? "")
             }
+        }
+    }
+
+    /// Fetch the rest of a preview row's text, at most once at a time per id.
+    private func hydrate(_ t: NiclaTranscript) {
+        guard !hydrating.contains(t.id) else { return }
+        hydrating.insert(t.id)
+        Task {
+            await rec.fetchFullText(t)
+            // Cleared on failure too: a stuck spinner would leave the row with no
+            // way to try again, which is worse than showing the button once more.
+            hydrating.remove(t.id)
         }
     }
 

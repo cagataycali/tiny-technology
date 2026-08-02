@@ -1762,6 +1762,9 @@ func capabilityIcon(_ c: String) -> String? {
     case "open_app": return "square.grid.2x2"
     case "image_gen": return "wand.and.stars"
     case "glasses": return "eyeglasses"
+    // 📸 Screen capture — always behind a per-capture consent prompt, so the
+    // glyph is the viewfinder rather than anything that suggests it's silent.
+    case "screenshot": return "camera.viewfinder"
     // ── Mesh nodes: `mcp`/`files` plus one label per device tool that
     // resolved on that machine (tiny-tech device-tools.ts). A developer's
     // laptop declares a dozen, so these carry most of the strip's width.
@@ -1787,6 +1790,11 @@ func capabilityIcon(_ c: String) -> String? {
     // 🐬 Flipper Zero: a USB-attached RF multi-tool (IR / Sub-GHz / RFID), so it
     // wears the waves it speaks — distinct from `wifi` and from ble's dot.
     case "flipper": return "wave.3.right"
+    // 🐬📶 The same board, reached over Bluetooth by the phone wearing this chip
+    // instead of down a USB cable. A SEPARATE token on purpose: one shared
+    // `flipper` would let the backend route an IR capture to a phone, and BLE
+    // has no receive RPC at all — docs/flipper-ble-ios-design.md §4.2.
+    case "flipper_ble": return "dot.radiowaves.right"
     // ── Endpoint robots (their own API declares these) ──
     case "print": return "printer.fill"
     case "telemetry": return "waveform.path.ecg"
@@ -1838,6 +1846,9 @@ let CAPABILITY_LABELS: [String: String] = [
     "open_app": "opens apps",
     "image_gen": "makes images",
     "glasses": "glasses",
+    // "screenshot" as a bare token reads like a noun the device HAS; it's a
+    // thing the phone can be ASKED to do, and only with a tap each time.
+    "screenshot": "shows its screen",
     // ── Mesh nodes (tiny-tech device-tools.ts) ──
     "mcp": "MCP",                 // an acronym, so at least let it read as a NAME
     "files": "files",
@@ -1858,6 +1869,7 @@ let CAPABILITY_LABELS: [String: String] = [
     "telegram": "Telegram",
     "adb": "Android",
     "flipper": "Flipper Zero",
+    "flipper_ble": "Flipper (Bluetooth)",
     "integrations": "integrations",
     // ── Endpoint robots ──
     "print": "prints",
@@ -3552,23 +3564,39 @@ enum DevicesHarness {
     /// as the JSON *string* the worker really sends, deliberately unsorted so
     /// `decodeDevices`' sort has something to do.
     ///
-    /// Every `kind`, `platform` and capability list below is copied from the
-    /// code that actually enrolls that device — Session.enroll (ios-arm64, 8
-    /// capabilities), TinySetup (the necklaces' 6 and 4), tiny-tech's
+    /// Every `kind`, `platform` and capability list below comes from the code
+    /// that actually enrolls that device — Session.enroll (ios-arm64; its list is
+    /// now READ, not retyped, see phoneCapabilitiesJSON), TinySetup (the
+    /// necklaces' 6 and 4), tiny-tech's
     /// device.ts + device-tools.ts (`mcp`/`files` plus a label per resolved
     /// tool). The first draft invented them, and invented ones are worse than
     /// none: `platform: "iphone"` misses the `ios` glyph needle and drew a CPU
     /// chip on the phone, and 2-chip rows hid what a real Mac's dozen do to the
     /// row height. A harness that renders values the wire never carries is a
     /// picture of a screen this app doesn't have.
+    /// The phone row's capability list, **derived — never copied**.
+    ///
+    /// The comment above says "copied from the code that actually enrolls that
+    /// device", and a copy drifts: the day `screenshot` joined
+    /// `TinySession.capabilities` the literal here still listed 8, so the harness
+    /// drew a phone that enrolls less than this app does — and this harness is
+    /// what the store screenshots are shot from. A test asserts the two sets are
+    /// equal, which a literal can only satisfy until the next capability lands.
+    ///
+    /// ⚠️ That test is NOT vacuous now: the wire carries capabilities as a JSON
+    /// *string*, so it still proves `decodeDevices` round-trips this list back to
+    /// exactly what we enroll. Don't delete it as tautological.
+    static var phoneCapabilitiesJSON: String {
+        "[" + TinySession.capabilities.map { "\"\($0)\"" }.joined(separator: ",") + "]"
+    }
+
     static func serverWire() -> [[String: Any]] {
         [
             // This phone — the row that must never offer Revoke. Session.swift
             // enrolls `<login>-iphone` / ios-arm64 / daemon.
             ["id": myDeviceId, "name": "ada-iphone", "kind": "daemon", "platform": "ios-arm64",
              "online": true, "last_seen": NSNumber(value: 1_770_000_000),
-             "capabilities": "[\"chat\",\"bluetooth_scan\",\"location\",\"record\",\"speak\","
-                 + "\"open_app\",\"image_gen\",\"glasses\"]"],
+             "capabilities": phoneCapabilitiesJSON],
             // A mesh Mac: `npx tiny-tech mesh` enrolls kind `cli`, and every
             // device tool that resolved on that machine rides along as a label.
             // A developer's laptop really does declare this many.

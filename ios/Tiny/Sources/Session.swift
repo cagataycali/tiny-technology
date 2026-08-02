@@ -380,6 +380,23 @@ final class TinySession: NSObject, ObservableObject {
                         continue
                     }
 
+                    // 🐬 {type:"flipper"} — a flipper_* tool routed to this phone
+                    // because it holds the BLE link and no cable does. Same
+                    // claim-on-poll rule as {type:"record"}, and it MUST stay
+                    // above the invoke branch: a Flipper ask that fell through
+                    // to /api/chat would hand the agent flipper_status again,
+                    // which resolves this phone again.
+                    if payload["type"] as? String == "flipper" {
+                        relayActivity = "🐬 Flipper \(payload["action"] as? String ?? "status") for the web agent…"
+                        let reply = await Self.handleFlipperEnvelope(payload)
+                        _ = try? await Api.patchJson("/api/devices/relay", body: [
+                            "deviceId": id, "token": devTok, "inReplyTo": envId,
+                            "payload": reply,
+                        ])
+                        relayActivity = "✅ replied to web agent"
+                        continue
+                    }
+
                     guard payload["type"] as? String == "invoke",
                           let prompt = payload["prompt"] as? String else { continue }
 
@@ -647,13 +664,40 @@ final class TinySession: NSObject, ObservableObject {
         case .generateImage(let id, let prompt, let style):
             _ = await ImageGen.shared.run(toolUseId: id, prompt: prompt, style: style, token: token)
             return DeviceActionAudit.toolLine("generate_image", ran: true)
-        case .screenshot(let id, _):
-            // The per-capture consent sheet lives in the chat UI; presenting
-            // it for an invisible remote turn is the P5 follow-up. Post the
-            // honest outcome NOW so the server's 90s poll never strands (G7).
-            await postToolFailure(id, token: token,
-                error: "Screen capture via use_device needs its on-phone consent flow — not available remotely yet. Ask on the phone itself.")
-            return DeviceActionAudit.droppedLine("screenshot")
+        case .screenshot(let id, let reason):
+            // 📸 Remote consent (docs/remote-screenshot-consent-design-2026-08-02).
+            // The web agent asked THIS phone for its screen. Ask the human here
+            // — but DISPATCH, never await: this runs inside the relay poll
+            // loop's iteration, and that loop claims the {type:"notify"}
+            // envelopes that are iOS's entire push transport. Parking it on an
+            // unanswered alert would silently cost the user their pushes for as
+            // long as the prompt sat there. So the alert's own buttons post the
+            // outcome (allow → capture+upload, deny → {denied:true}) into the
+            // tool-result mailbox the server callback is already polling for
+            // 90s — the same fire-and-forget contract Android's consent
+            // activity has always used.
+            return await MainActor.run { () -> String? in
+                // Backgrounded is not a promptable state and not a capturable
+                // one: iOS won't present an alert for a background app, and
+                // ReplayKit records the FOREGROUND app's UI — so there would be
+                // nothing on screen to hand back even with consent. Fast honest
+                // failure keeps the server's poll from stranding (G7).
+                guard UIApplication.shared.applicationState == .active else {
+                    Task { await postToolFailure(id, token: token,
+                        error: "Screen capture needs the phone in the foreground — its consent prompt can't be shown from the background. Ask the user to open the tiny app first.") }
+                    return DeviceActionAudit.backgroundedLine("screenshot")
+                }
+                let shown = Screenshot.shared.askRemoteConsent(
+                    toolUseId: id, token: token, reason: reason, tiny: Config.tinyName)
+                guard shown else {
+                    // Active but no key window to present in (a scene mid-launch
+                    // or mid-transition). Nobody will ever tap, so say so now.
+                    Task { await postToolFailure(id, token: token,
+                        error: "Screen capture couldn't ask for permission on the phone right now — no window was ready. Ask the user to open the tiny app and try again.") }
+                    return DeviceActionAudit.droppedLine("screenshot")
+                }
+                return DeviceActionAudit.consentLine("screenshot")
+            }
         case .metaTakePhoto(let id):
             #if canImport(MWDATCore) && canImport(MWDATCamera)
             _ = await WearablesManager.shared.runPhotoTool(toolUseId: id, token: token)
@@ -729,9 +773,10 @@ final class TinySession: NSObject, ObservableObject {
     ///   open_app  = open_url incl. mailto/message/maps/spotify (foreground-gated)
     ///   image_gen = on-device Image Playground (needs Apple Intelligence)
     ///   glasses   = meta_* bridges (honest "not linked" when absent)
-    /// screenshot is deliberately NOT advertised: its consent flow can't show
-    /// on a relay turn yet — the executor fast-fails instead (P5 follow-up).
-    nonisolated static let capabilities = ["chat", "bluetooth_scan", "location", "record", "speak", "open_app", "image_gen", "glasses"]
+    ///   screenshot = ReplayKit capture behind a per-capture consent prompt the
+    ///     relay path now presents itself (foreground-gated; backgrounded says
+    ///     so — docs/remote-screenshot-consent-design-2026-08-02.md)
+    nonisolated static let capabilities = ["chat", "bluetooth_scan", "location", "record", "speak", "open_app", "image_gen", "glasses", "screenshot"]
 
     /// What to actually send on a beat: the static set, plus whatever is true
     /// only right now.
@@ -969,6 +1014,18 @@ final class TinySession: NSObject, ObservableObject {
                 ])
                 await Notify.post(title: "Recorded for your tiny",
                                   body: String(res.transcript.prefix(120)))
+                continue
+            }
+            // 🐬 Same rule for the Flipper: this loop runs when the app is
+            // backgrounded, which is the MOST likely state for a phone-held
+            // Flipper link (board in a pocket, phone in the other one), so
+            // this is not the redundant copy — it may be the only one that ever
+            // sees the envelope.
+            if payload["type"] as? String == "flipper" {
+                let reply = await Self.handleFlipperEnvelope(payload)
+                _ = try? await Api.patchJson("/api/devices/relay", body: [
+                    "deviceId": id, "token": devTok, "inReplyTo": envId, "payload": reply,
+                ])
                 continue
             }
             guard payload["type"] as? String == "invoke",

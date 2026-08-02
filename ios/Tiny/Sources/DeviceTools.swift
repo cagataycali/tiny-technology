@@ -144,6 +144,27 @@ enum DeviceActionAudit {
         "\(name): NOT executed — not available when another surface drives this phone via use_device"
     }
 
+    /// An action that was HANDED OFF, not completed: the phone showed the user a
+    /// consent prompt and returned without waiting (a relay turn must never
+    /// park on human reaction time — it would stall the envelope loop that
+    /// carries this phone's pushes). The terminal truth arrives separately,
+    /// through the tool-result mailbox the server callback is polling.
+    ///
+    /// So the tense is PRESENT and the claim is narrow: the prompt was shown.
+    /// Saying "captured" here would be the exact confabulation this audit
+    /// exists to prevent — at this instant nobody has tapped anything.
+    /// (Android parity: DeviceActionAudit.dispatchedLine.)
+    static func consentLine(_ name: String) -> String {
+        "\(name): consent prompt shown on the phone — the user's answer and any result post to the chat's tool mailbox"
+    }
+
+    /// A remote round-trip tool refused for a runtime precondition, naming the
+    /// precondition rather than the capability (the capability exists — this
+    /// phone just can't satisfy it right now).
+    static func backgroundedLine(_ name: String) -> String {
+        "\(name): NOT executed — the app is backgrounded, so its consent prompt can't be shown and iOS has no foreground screen to capture; ask the user to open the tiny app first"
+    }
+
     static func speakLine(spoke: Bool, quiet: Bool) -> String {
         spoke ? "speak: said aloud on the phone"
               : (quiet ? "speak: NOT spoken — quiet hours on the phone" : "speak: NOT spoken — empty text")

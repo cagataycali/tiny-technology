@@ -40,7 +40,17 @@ enum EventGlyph {
     static let icons: [(key: String, glyph: String)] = [
         ("job", "⏰"), ("job_missed", "⛔"), ("telegram", "✈️"), ("tiny_visit", "👀"), ("learn", "🧬"),
         ("device", "💻"), ("device_missed", "🚫"), ("pay_alarm", "🚨"),
+        // 🗣️🎙️👁️ Keyed in full, not behind a shared `nicla` prefix: a wake, the
+        // words that followed it, and the Vision seeing motion are three
+        // different rows to a reader.
+        //
+        // 📝 `device_note` is the job_missed case again — `device` IS a prefix of
+        // it, so it rendered 💻 ("your laptop finished a task") while carrying
+        // TRANSCRIBED SPEECH: it is NiclaRecorder.postToServer's fallback rail
+        // for when /api/devices/transcript isn't deployed, which is the state
+        // production is in, so it is the kind real takes land under today.
         ("nicla_wake", "🗣️"), ("nicla_transcript", "🎙️"), ("nicla_sentry", "👁️"),
+        ("device_note", "📝"),
         ("pay_earned", "💵"), ("pay_received", "💰"), ("pay_withdrawn", "🏦"), ("pay_refunded", "↩️"),
         ("push", "🔔"), ("share", "🔗"), ("tool", "🔧"), ("follow", "🤝"), ("dm", "💬"),
         // 🤖 `batch` covers `batch_result` — a spawn_agents wait:false fleet
@@ -57,6 +67,12 @@ enum EventGlyph {
         "pay_earned", "pay_received", "pay_withdrawn", "pay_refunded",
         "job_missed", "device_missed",
         "batch_result", // app-emitted via POST /events (spawn_agents wait:false)
+        // 🗣️🎙️👁️📝 devices.ts DEVICE_EVENT_KINDS — and THIS app writes two of
+        // them (NiclaVoiceGateway posts nicla_wake, NiclaRecorder posts
+        // device_note). The glyphs above were added when the necklace shipped;
+        // this list was not, so the parity pin that exists to catch exactly that
+        // could never fire, and device_note kept inheriting 💻.
+        "nicla_wake", "nicla_transcript", "nicla_sentry", "device_note",
     ]
 
     /// Prefix-match a kind to its glyph; a missing/unknown kind degrades to ⚡
