@@ -31,6 +31,7 @@
  */
 import CoreBluetooth
 import Foundation
+import UIKit
 
 // File scope for the same reason as NiclaVoiceGateway's: the delegate callbacks
 // that compare against these run off the main actor, and CBUUID is immutable but
@@ -403,6 +404,14 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// for Bluetooth, and a user with no Flipper should never be asked because of
     /// this file.
     private var wanted = false
+    /// `wanted`'s counterpart for the mirror: a view is on screen showing it.
+    /// Distinct from `streaming`, which is whether the BOARD is pushing frames —
+    /// the two diverge on purpose while the app is in the background, where the
+    /// stream is stopped but still owed back to the view that asked for it.
+    private var streamWanted = false
+    /// Kept so the pair can be found from one place. NotificationCenter owns the
+    /// blocks and this singleton never deinits, so nothing removes them.
+    private var phaseObservers: [NSObjectProtocol] = []
 
     /// Rolling inbound bytes. BLE notifies arrive in MTU-sized pieces with no
     /// regard for frame boundaries, so a 60-frame DeviceInfo can land as any
@@ -532,6 +541,31 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
            let id = UUID(uuidString: raw) {
             unit = Unit(peripheralId: id, name: d["name"] as? String ?? "Flipper")
         }
+        // ⚠️ A screen stream must not outlive the foreground, and `.onDisappear`
+        // cannot cover that: a sheet still on screen when the phone locks, or when
+        // the user switches to a browser, never disappears. So the board keeps
+        // rendering and pushing a kilobyte per redraw — on its own battery, at a
+        // mirror nobody is looking at, waking this app for every frame. And it
+        // lands on exactly the wrong rail: backgrounded is when the relay poll IS
+        // the feature (the web agent reaches the board only through it), and a
+        // redraw flood shares that link and this app's scraps of background time.
+        //
+        // The scenePhase observer lives in TinyApp, which cannot reach this
+        // singleton, so observe the UIKit notifications directly — Views.swift's
+        // backgrounding flush, same pattern. Strong self: the class is an
+        // @unchecked Sendable singleton, as in `request`.
+        phaseObservers = [
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil
+            ) { [self] _ in
+                Task { @MainActor in await suspendScreenStream() }
+            },
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil
+            ) { [self] _ in
+                Task { @MainActor in await resumeScreenStreamIfWanted() }
+            },
+        ]
     }
 
     // MARK: - Pairing
@@ -630,6 +664,12 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         // claims to be live.
         streaming = false
         screenFrame = nil
+        // Unlinking is deliberate, so nothing is owed a resume: left standing, the
+        // next background/foreground pair after a re-link would start a stream for
+        // a mirror that closed long ago. A DISCONNECT is the opposite case and
+        // deliberately leaves this alone — it reconnects by itself, and a sheet
+        // that is still open still wants its frames.
+        streamWanted = false
         failAllPending(FlipperError.notLinked)
     }
 
@@ -1087,6 +1127,12 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
             self.frameSeq = 0
             self.screenFrame = nil
             self.streaming = true
+            // From here until a view says it is done, a trip through the background
+            // owes this stream a resume. Set before the request, and NOT cleared by
+            // the catch below: a start that failed still leaves a sheet on screen
+            // wanting frames, and a free retry on the way back is worth more than a
+            // tidier flag.
+            self.streamWanted = true
         }
         do {
             let frames = try await request(PB.empty(Cmd.guiStartStreamReq),
@@ -1098,10 +1144,57 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         }
     }
 
-    /// Stop mirroring. Deliberately non-throwing: this runs when a sheet closes
-    /// or a view disappears, and the only thing a caller could do with a failure
-    /// is leave the board streaming to nobody.
+    /// Stop mirroring because a view is done with it. Deliberately non-throwing:
+    /// this runs when a sheet closes or a view disappears, and the only thing a
+    /// caller could do with a failure is leave the board streaming to nobody.
     func stopScreenStream() async {
+        // The view is done, so nothing is owed a resume. This is the ONLY
+        // difference between this and `suspendScreenStream`.
+        await MainActor.run { self.streamWanted = false }
+        await endStream()
+    }
+
+    /// Stop mirroring because the app is leaving the foreground — without
+    /// forgetting that a view still wants it back.
+    ///
+    /// ⚠️ This is the case `.onDisappear` cannot see. A sheet is still on screen
+    /// when the phone locks, so the stream used to run on into the background,
+    /// where the board pays for every redraw and nobody sees one.
+    @MainActor
+    func suspendScreenStream() async {
+        // Nothing to stop; a StopScreenStream on every backgrounding would be an
+        // RPC round trip for its own sake.
+        guard streaming else { return }
+        // The stop has to reach the board before iOS suspends this app, and the
+        // write may sit waiting on flow-control credits first. Views.swift holds
+        // one of these across a chat stream for the same reason.
+        let hold = UIApplication.shared.beginBackgroundTask(withName: "flipper-stop-stream")
+        await endStream()
+        if hold != .invalid { UIApplication.shared.endBackgroundTask(hold) }
+    }
+
+    /// Put the mirror back on the way in from the background — and only then.
+    @MainActor
+    func resumeScreenStreamIfWanted() async {
+        // `linked`, because a stream needs an RPC session; `!streaming`, because
+        // these notifications are not guaranteed to alternate (a relaunch straight
+        // into the foreground), and a second start under a live mirror would reset
+        // its frame counter.
+        guard streamWanted, linked, !streaming else { return }
+        do {
+            try await startScreenStream()
+        } catch {
+            // Not silent: otherwise the panel just says "Not streaming." about a
+            // mirror the user left running, and the stop we sent looks like the
+            // board's fault.
+            lastError = "The screen mirror was stopped while the app was in the background and couldn't be restarted: \(error.localizedDescription)"
+        }
+    }
+
+    /// The wire half of stopping: flag down, last picture gone, StopScreenStream
+    /// sent. Shared so the view's stop and the background suspend cannot drift —
+    /// what separates them is only whether a resume is still owed.
+    private func endStream() async {
         await MainActor.run {
             self.streaming = false
             self.screenFrame = nil

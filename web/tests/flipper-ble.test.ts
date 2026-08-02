@@ -652,9 +652,10 @@ describe('the screen stream and buttons are wired to the numbers the firmware an
     // The firmware sends a frame when the screen REDRAWS. A Flipper resting on a
     // static menu may not redraw for minutes, so a frame dropped because the
     // flag wasn't set yet is a mirror that stays blank on a board that works.
-    const at = gateway.indexOf('func startScreenStream')
-    expect(at).toBeGreaterThan(0)
-    const body = gateway.slice(at, at + 1400)
+    // Brace-matched, not `slice(at, at + 1400)`: a fixed window has gone red for
+    // nothing three times in this file, and had `request(` ever landed past the
+    // end it would have gone green covering nothing.
+    const body = swiftBody(gateway, 'func startScreenStream() async throws {')
     expect(body).toContain('streaming = true')
     expect(body.indexOf('streaming = true')).toBeLessThan(body.indexOf('request('))
     // …and it comes back down if the board refuses, so the panel doesn't wait
@@ -734,7 +735,8 @@ describe('the screen stream and buttons are wired to the numbers the firmware an
     // Stronger than the action list: the relay file must not reference the input
     // or streaming API at all, so a future action cannot quietly call it.
     expect(session).not.toMatch(/FlipperKey/)
-    expect(session).not.toMatch(/FlipperGateway\.shared\.(send|startScreenStream|stopScreenStream)/)
+    expect(session).not.toMatch(
+      /FlipperGateway\.shared\.(send|startScreenStream|stopScreenStream|suspendScreenStream|resumeScreenStreamIfWanted)/)
     // …and no tool names one either.
     expect(backend).not.toMatch(/name:\s*'flipper_(press|button|input|key|screen|screenshot)\w*'/)
   })
@@ -1151,5 +1153,122 @@ describe('a link is proved only once it can answer, and a failed bond says so', 
     // racing the human again with a longer stopwatch.
     expect(codeOnly(swiftBody(gateway, 'func ping()')))
       .toMatch(/timeout: 8/)
+  })
+})
+
+/**
+ * 🔋 A screen stream must not outlive the foreground.
+ *
+ * `.onDisappear` is not the event "the user left the app". A sheet still on screen
+ * when the phone locks — or when the user swipes to a browser to ask tiny
+ * something, which is this whole feature's reason to exist — never disappears. So
+ * the mirror kept running: the board renders and pushes a kilobyte per redraw, on
+ * its own battery, at a picture nobody can see, and iOS wakes this app for every
+ * frame of it.
+ *
+ * What makes that more than waste is the rail it lands on. Backgrounded is exactly
+ * when the relay poll IS the feature — a web agent reaches the board only through
+ * it — so a redraw flood competes for this link and for the app's scraps of
+ * background execution with the `flipper_status` the user is sitting there waiting
+ * for.
+ *
+ * The fix is a stop on the way out and a resume on the way in, which only works if
+ * the two facts stay apart: `streaming` is whether the BOARD is pushing frames,
+ * `streamWanted` is whether a view still wants them. Collapse them and you get
+ * either a stream nobody stops or a mirror that never comes back.
+ */
+describe('a screen stream does not outlive the foreground', () => {
+  // Lazily, inside the its: a slice taken in the describe body runs at collection
+  // time, so deleting the code under test reports "no tests" instead of a named
+  // red — and a mutant that takes the suite down teaches nothing about which
+  // guard held.
+  const gwInit = () => swiftBody(gateway, 'override private init() {')
+  const suspend = () => swiftBody(gateway, 'func suspendScreenStream() async {')
+  const resume = () => swiftBody(gateway, 'func resumeScreenStreamIfWanted() async {')
+
+  it('leaving the foreground stops the stream', () => {
+    const body = gwInit()
+    expect(body).toMatch(/UIApplication\.didEnterBackgroundNotification/)
+    // The call, not just the registration: an observer that fires nothing is the
+    // same silence as no observer.
+    expect(body).toMatch(/didEnterBackgroundNotification[\s\S]{0,400}suspendScreenStream\(\)/)
+  })
+
+  it('coming back starts it again — the stop is not a one-way trip', () => {
+    // Without this the change is a trade, not a fix: the user returns to a mirror
+    // that is dark and stays dark until they close and reopen the sheet.
+    const body = gwInit()
+    expect(body).toMatch(/UIApplication\.willEnterForegroundNotification/)
+    expect(body).toMatch(/willEnterForegroundNotification[\s\S]{0,400}resumeScreenStreamIfWanted\(\)/)
+  })
+
+  it('a suspend keeps the debt: the view still wants its frames', () => {
+    // The single thing that separates a suspend from a stop. Clear the flag here
+    // and the mirror never comes back, so the guard is that it is not touched.
+    expect(codeOnly(suspend(), /endStream/)).not.toMatch(/streamWanted/)
+    expect(suspend()).toMatch(/endStream\(\)/)
+  })
+
+  it('a view saying it is done clears the debt, through the same wire call', () => {
+    const stop = swiftBody(gateway, 'func stopScreenStream() async {')
+    expect(stop).toMatch(/streamWanted = false/)
+    expect(stop).toMatch(/endStream\(\)/)
+    // Both paths stop the board the same way, so they cannot drift apart on what
+    // they leave behind — a mirror still showing its final frame claims to be live.
+    const end = swiftBody(gateway, 'private func endStream() async {')
+    expect(end).toMatch(/streaming = false/)
+    expect(end).toMatch(/screenFrame = nil/)
+    expect(end).toMatch(/guiStopStreamReq/)
+  })
+
+  it('starting a mirror takes the debt on', () => {
+    expect(swiftBody(gateway, 'func startScreenStream() async throws {'))
+      .toMatch(/streamWanted = true/)
+  })
+
+  it('a resume needs a want, a link, and no stream already running', () => {
+    // All three in one guard: `linked` because a stream needs an RPC session, and
+    // `!streaming` because these notifications are not guaranteed to alternate —
+    // a second start under a live mirror would reset its frame counter.
+    expect(codeOnly(resume(), /guard/))
+      .toMatch(/guard streamWanted, linked, !streaming else \{ return \}/)
+  })
+
+  it('a suspend with nothing streaming sends nothing', () => {
+    // Otherwise every backgrounding spends an RPC round trip telling the board to
+    // stop a stream that was never started.
+    expect(codeOnly(suspend(), /guard streaming/)).toMatch(/guard streaming else \{ return \}/)
+  })
+
+  it('the stop is held open long enough to actually leave the phone', () => {
+    // A stop dropped in the background transition is the original bug with extra
+    // steps: the flag is down here and the board is still pushing there, and now
+    // nothing is even watching the frames. The write can also sit waiting on
+    // flow-control credits first, so the window is not theoretical.
+    const body = suspend()
+    expect(body).toMatch(/beginBackgroundTask/)
+    expect(body).toMatch(/endBackgroundTask/)
+    expect(body.indexOf('beginBackgroundTask')).toBeLessThan(body.indexOf('endStream'))
+    expect(body.indexOf('endStream')).toBeLessThan(body.indexOf('endBackgroundTask'))
+  })
+
+  it('a deliberate unlink owes nothing; a dropped link still does', () => {
+    // stop() is the user unlinking the board. Left standing, the next
+    // background/foreground pair after a re-link would start a stream for a mirror
+    // that closed long ago. A DISCONNECT is the opposite case — it re-dials by
+    // itself, and a sheet that is still open still wants its frames.
+    expect(codeOnly(swiftBody(gateway, 'func stop() {'), /streamWanted/))
+      .toMatch(/streamWanted = false/)
+    const drop = codeOnly(
+      swiftBody(gateway, 'didDisconnectPeripheral peripheral:'), /streaming = false/)
+    expect(drop, 'a transient drop must not cancel the resume').not.toMatch(/streamWanted/)
+  })
+
+  it('a resume that fails says why, instead of leaving a dark mirror', () => {
+    // The panel would otherwise just read "Not streaming." about a mirror the user
+    // left running, and the stop this app sent would look like the board's fault.
+    const body = resume()
+    expect(body).toMatch(/lastError = /)
+    expect(body).toMatch(/background/)
   })
 })
