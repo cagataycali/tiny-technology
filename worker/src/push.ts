@@ -50,7 +50,12 @@ export function bytesToB64url(bytes: ArrayBuffer | Uint8Array): string {
 async function vapidHeaders(env: any, endpoint: string): Promise<Record<string, string> | null> {
   const pub = env.VAPID_PUBLIC_KEY;   // base64url, uncompressed P-256 point (65 bytes)
   const priv = env.VAPID_PRIVATE_KEY; // base64url, 32-byte private scalar
-  const subject = env.VAPID_SUBJECT || 'mailto:help@tinyai.id';
+  // ⚠️ The fallback must be a domain WE still own: `sub` is the contact a push
+  // service uses to reach the sender about a misbehaving subscription, and
+  // VAPID_SUBJECT is not configured (checked against the deployed secret list),
+  // so this literal IS what production signs. tinyai.id lapsed and now resolves
+  // to an unrelated site — pointing push operators at somebody else's domain.
+  const subject = env.VAPID_SUBJECT || 'mailto:help@tiny.technology';
   if (!pub || !priv) return null;
 
   const aud = new URL(endpoint).origin;

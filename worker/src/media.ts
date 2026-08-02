@@ -32,6 +32,9 @@
 import { OpenAPIRoute, Query, Str } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
 import { hashDeviceToken } from "./devices";
+// One Range parser for the whole worker: /voice/recording learned the AVPlayer
+// contract the hard way, and this store serves the same kind of bytes.
+import { parseByteRange } from "./voice";
 
 const json = (data: any, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -167,16 +170,71 @@ export class MediaGetCall extends OpenAPIRoute {
     // UUID.ext only — no traversal, no listing probes
     if (!/^[0-9a-f-]{36}\.[a-z0-9]{2,4}$/.test(key)) return json({ error: "not found" }, 404);
 
+    const base: Record<string, string> = {
+      // Keys are content-addressed-once (never overwritten) — cache hard
+      "Cache-Control": "public, max-age=31536000, immutable",
+      // Belt-and-braces for the image/audio-only allowlist above
+      "X-Content-Type-Options": "nosniff",
+      // 🎧 Advertised on EVERY response, including the 404 path's siblings and
+      // the whole-body 200: AVPlayer decides whether an asset is seekable from
+      // this header on the first response, and a 200 without it is treated as a
+      // non-seekable stream even if later requests would have been honored.
+      "Accept-Ranges": "bytes",
+    };
+
+    // ── Range, because this store serves AUDIO to AVPlayer ────────────────────
+    //
+    // The route was `new Response(obj.body)` with no Content-Length and no
+    // Accept-Ranges: fine for <img> and for web <audio>, and NOT playable by
+    // AVPlayer, which opens every remote asset with `Range: bytes=0-1` and needs
+    // Accept-Ranges + Content-Length + a correct 206/Content-Range to size and
+    // seek the file. This is the identical bug that /voice/recording already had
+    // and fixed ("iOS won't play call recordings"); NiclaRecorder uploads its
+    // takes HERE, so the necklace's audio inherited the un-fixed copy. The rule
+    // from that fix holds: the strictest client we serve defines the contract.
+    //
+    // parseByteRange is voice.ts's — imported rather than re-implemented, so the
+    // RFC 7233 forms (0-1 probe, open-ended seek, suffix, clamping, the
+    // unsatisfiable cases) stay pinned by ONE set of tests instead of drifting
+    // between two parsers.
+    const head = await env.MEDIA.head(key);
+    if (!head) return json({ error: "not found" }, 404);
+    const total = head.size as number;
+    const type = head.httpMetadata?.contentType || "application/octet-stream";
+    const r = parseByteRange(request.headers.get("Range"), total);
+
+    if (r && "unsatisfiable" in r) {
+      // 416 with `bytes */total` — a seek past the end must say how long the
+      // asset really is, or the player retries the same bad window forever.
+      return new Response(null, {
+        status: 416,
+        headers: { ...base, "Content-Type": type, "Content-Range": `bytes */${total}` },
+      });
+    }
+
+    if (r) {
+      // R2 slices server-side: a 2-byte probe reads 2 bytes, not the whole 6MB
+      // clip, which is what makes this cheap enough to do on every open.
+      const part = await env.MEDIA.get(key, { range: { offset: r.start, length: r.end - r.start + 1 } });
+      if (!part) return json({ error: "not found" }, 404);
+      return new Response(part.body, {
+        status: 206,
+        headers: {
+          ...base,
+          "Content-Type": type,
+          "Content-Range": `bytes ${r.start}-${r.end}/${total}`,
+          "Content-Length": String(r.end - r.start + 1),
+        },
+      });
+    }
+
     const obj = await env.MEDIA.get(key);
     if (!obj) return json({ error: "not found" }, 404);
     return new Response(obj.body, {
-      headers: {
-        "Content-Type": obj.httpMetadata?.contentType || "application/octet-stream",
-        // Keys are content-addressed-once (never overwritten) — cache hard
-        "Cache-Control": "public, max-age=31536000, immutable",
-        // Belt-and-braces for the image/audio-only allowlist above
-        "X-Content-Type-Options": "nosniff",
-      },
+      // Content-Length on the whole-body path too: without it the response is
+      // chunked, and a player that cannot learn the length cannot show a
+      // scrubber or seek — it just plays forward, if it plays at all.
+      headers: { ...base, "Content-Type": type, "Content-Length": String(total) },
     });
   }
 }
