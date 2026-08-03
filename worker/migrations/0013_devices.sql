@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS devices (
   id TEXT PRIMARY KEY,            -- device uuid, generated at enroll
   user_id TEXT NOT NULL,          -- owner (FK users)
-  name TEXT NOT NULL,             -- "cagatay-macbook", editable
+  name TEXT NOT NULL,             -- login-derived, e.g. "<login>-pixel", editable
   platform TEXT,                  -- darwin-arm64 / linux-x64 / browser
   kind TEXT,                      -- daemon | browser | cli
   capabilities TEXT,              -- JSON array: ["shell","files",...]

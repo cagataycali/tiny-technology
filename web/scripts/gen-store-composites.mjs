@@ -148,11 +148,13 @@ export const BLOCKED_SOURCES = {
       "shows the user's real USDC balance AND a real wallet address. Only the MONETIZE crop of " +
       'android/raw/c3-wallet.png is publishable, and only from the bottom card.',
   },
-  // ⚠️ c40. This raw is the `fleet` screen and the fleet LIST is its entire content — six rows of
-  // the user's real device hostnames (`cagataycali-iphone`, `cagataycali-pixel (this phone)`,
-  // `cagatay-mac`, `cagataycali-ipad`, `cagatay-cagatay`, `thor`) with their online/last-seen
-  // state and a `revoke` button each. Unlike the wallet page there is no publishable region to
-  // crop to: every crop of this screen worth captioning IS the hostname list.
+  // ⚠️ c40. This raw is the `fleet` screen and the fleet LIST is its entire content — six rows,
+  // each the real hostname of a device the user owns (both phones, both laptops, the tablet and a
+  // node), with its online/last-seen state and a `revoke` button. Unlike the wallet page there is
+  // no publishable region to crop to: every crop of this screen worth captioning IS the hostname
+  // list. The names themselves are deliberately NOT quoted here — a note explaining why a
+  // hostname list must not be published is a poor place to publish one (tests/published-hostname
+  // -scrub, which greps this file for them).
   //
   // It was already known — `store-assets/copy/google-play.md` has listed "`play-05-devices` — the
   // user's whole device fleet by hostname" since the c28 audit. What c40 found is that the note

@@ -6,10 +6,14 @@ package technology.tiny.app.ui
  * ## Why this exists
  *
  * `play-05-devices.png` was sitting in the Play upload tree rendering the user's real
- * device fleet BY HOSTNAME — `cagataycali-iphone`, `cagataycali-pixel (this phone)`,
- * `cagatay-mac`, `cagataycali-ipad`, `cagatay-cagatay`, `thor` — each with its
+ * device fleet BY HOSTNAME — six rows, one per device they own (both phones, both
+ * laptops, the tablet and a node), each carrying its own real name plus its
  * online/last-seen state and a `revoke` button. The same raw also fed two Instagram
  * carousel slides (`ig-p1-5-devices`, `ig-p4-3-node`) that no cycle had ever listed.
+ *
+ * The names are described, never quoted: a docblock about why a hostname list cannot be
+ * published is the last place one should be pasted, and this file ships in the APK and
+ * in a public repo. `published-hostname-scrub.test.ts` greps this file for them.
  *
  * Unlike the wallet page there is **no publishable crop**: the fleet LIST is the
  * screen's entire content, so every crop worth captioning is the hostname list. And
