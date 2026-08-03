@@ -5608,6 +5608,87 @@ import Foundation
     }
 }
 
+/// 🛰️ "No nicla-vision device in your fleet — is it enrolled?" was said to people
+/// whose fleet was fine.
+///
+/// The live view's FIRST call is the fleet lookup, and it was
+/// `try? await Api.get("/api/devices")` behind a `guard let … else { return nil
+/// }`. Three unrelated answers arrived as that one nil, and `connect` had one
+/// sentence for it: a refused request (a session that lapsed since the last
+/// screen, a 424 from the worker), a 200 whose body couldn't be read, and the
+/// only case the sentence describes — a fleet with no necklace in it.
+///
+/// So a phone that had quietly signed itself out told the user their hardware was
+/// never enrolled. `connect` distinguishes a MISSING token two lines above this
+/// ("Log in first — the live view goes through your tiny"), so the view always
+/// cared about the difference; it just could not see a token that went stale
+/// rather than absent.
+@Suite struct FleetLookupTests {
+    func vision(_ id: String, lan: String? = nil) -> [String: Any] {
+        var d: [String: Any] = ["id": id, "platform": "nicla-vision",
+                                "online": true, "last_seen": 1000.0]
+        if let lan { d["lan_url"] = lan }
+        return d
+    }
+
+    @Test("a fleet holding a necklace hands back the necklace")
+    func aNecklaceIsFound() {
+        let lan = "http://192.168.1.207:8080"
+        #expect(TinyLive.readFleet(["devices": [vision("v1", lan: lan)]])
+                == .found(TinyLive.FoundDevice(id: "v1", lanURL: lan)))
+    }
+
+    /// The one case the old sentence was true for, and it must stay reachable.
+    @Test("a fleet with no necklace is noVision, not a refusal")
+    func anEmptyFleetIsNotARefusal() {
+        #expect(TinyLive.readFleet(["devices": []]) == .noVision)
+        #expect(TinyLive.readFleet(["devices": [["id": "p", "platform": "ios-arm64"]]]) == .noVision)
+    }
+
+    /// ⚠️ The bug. A body with no `devices` list is not a fleet without a
+    /// necklace — it is an answer we could not read, and the two must not share a
+    /// sentence.
+    @Test("an unreadable body is a refusal, and never noVision")
+    func anUnreadableBodyIsARefusal() {
+        #expect(TinyLive.readFleet([:]) == .couldNotAsk("Couldn't read your fleet."))
+        // The shape a worker error really takes.
+        #expect(TinyLive.readFleet(["error": "fleet unavailable"])
+                == .couldNotAsk("fleet unavailable"))
+        // `devices` present but not a list of objects — still unreadable.
+        #expect(TinyLive.readFleet(["devices": "none"]) == .couldNotAsk("Couldn't read your fleet."))
+    }
+
+    /// The server's own words outrank ours whenever it sent any, exactly as
+    /// `Api.httpMessage` prefers them — our fallback is for a body that explains
+    /// nothing.
+    @Test("the route's own words are preferred over our fallback")
+    func theRouteIsQuotedWhenItSpeaks() {
+        guard case .couldNotAsk(let why) = TinyLive.readFleet(["error": "device registry down"])
+        else { return #expect(Bool(false), "a body with only an error is not a lookup result") }
+        #expect(why == "device registry down")
+    }
+
+    /// Every refusal has to SAY something: an empty sentence renders as an empty
+    /// line and is the silence this whole path was fixed to stop producing.
+    @Test("no refusal is silent")
+    func everyRefusalSaysSomething() {
+        for body in [[:], ["error": ""], ["devices": 7], ["devices": "x"]] as [[String: Any]] {
+            guard case .couldNotAsk(let why) = TinyLive.readFleet(body) else {
+                #expect(Bool(false), "\(body) should not be readable as a fleet"); continue
+            }
+            #expect(!why.isEmpty, "\(body) produced an empty refusal")
+        }
+    }
+
+    /// An `error` key alongside a READABLE list is not a refusal — the list wins.
+    /// Otherwise a worker that annotates a partial success would blank the view.
+    @Test("a readable list wins over a stray error key")
+    func aListOutranksAnErrorKey() {
+        #expect(TinyLive.readFleet(["devices": [vision("v1")], "error": "partial"])
+                == .found(TinyLive.FoundDevice(id: "v1", lanURL: nil)))
+    }
+}
+
 /// 🎙️ A take ends when the SPEAKER stops, not when the caller's guess runs out.
 ///
 /// The wake word is the record button and handleWake asks for 10 seconds. Say the

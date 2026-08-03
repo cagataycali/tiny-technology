@@ -467,8 +467,16 @@ final class TinyLive: NSObject, ObservableObject {
         // and start remote frame polling immediately; if a LAN base turns up
         // AND answers, upgrade to the direct stream.
         stateText = "connecting through the cloud…"
-        guard let found = await findDevice(token: token) else {
+        let found: FoundDevice
+        switch await Self.lookUpVision(token: token) {
+        case .found(let device):
+            found = device
+        case .noVision:
             fail("No nicla-vision device in your fleet — is it enrolled?"); return
+        case .couldNotAsk(let why):
+            // The refusal's own words. A lapsed session says "Sign in again",
+            // not that the hardware on the user's neck was never enrolled.
+            fail(why); return
         }
         let id = found.id
         // The board's OWN address, off its heartbeat — no discovery round trip.
@@ -518,7 +526,70 @@ final class TinyLive: NSObject, ObservableObject {
     /// worse than none: DHCP reassigns it, so dialing it would mean waiting out a
     /// timeout against whatever machine holds it now before falling back — slower
     /// than never having tried.
-    struct FoundDevice { let id: String; let lanURL: String? }
+    struct FoundDevice: Equatable { let id: String; let lanURL: String? }
+
+    /// What asking the fleet for a necklace actually returned.
+    ///
+    /// `findDevice` was `guard let … = try? await Api.get("/api/devices") … else
+    /// { return nil }`, and `connect` turned that one nil into one sentence:
+    /// **"No nicla-vision device in your fleet — is it enrolled?"** Three
+    /// unrelated things arrived as that sentence, and it is only true of the
+    /// third:
+    ///
+    /// - the request was REFUSED — a session that lapsed since the last screen
+    ///   (401), a worker problem (424). The fleet is fine and the necklace is
+    ///   enrolled; the phone signed itself out. The user is sent to check their
+    ///   hardware enrollment when the fix is one tap on Log in.
+    /// - the body could not be read — a 200 whose `devices` isn't an array.
+    /// - there genuinely is no `nicla-vision` row. The sentence is correct here.
+    ///
+    /// `connect` already distinguishes a MISSING token two lines up ("Log in
+    /// first — the live view goes through your tiny"), so this view has always
+    /// cared about the difference; it just could not see a token that went stale
+    /// rather than absent. And `Api.getData`'s own doc names this defect class
+    /// verbatim — "that is how an expired session became 'No calls yet'" — which
+    /// makes this the third surface in the file to state the rule and the first
+    /// to be asked whether it obeys it.
+    enum FleetLookup: Equatable {
+        case found(FoundDevice)
+        /// The fleet answered and holds no necklace.
+        case noVision
+        /// We never got an answer we could read, and this is why.
+        case couldNotAsk(String)
+    }
+
+    /// The pure half: what a fleet BODY says. `Api.get` throws on every refusal
+    /// (`ApiError.http` carries the route's own words), so the only thing left to
+    /// decide here is a 200 that doesn't hold a list.
+    nonisolated static func readFleet(_ body: [String: Any]) -> FleetLookup {
+        guard let list = body["devices"] as? [[String: Any]] else {
+            // Trimmed and checked, following `Api.serverError(in:)`, which exists
+            // because `"error": ""` is a real shape on this wire: taken at face
+            // value it renders as an empty line, which is the silence this path
+            // was fixed to stop producing. A test caught it here first.
+            let said = (body["error"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return .couldNotAsk(said.isEmpty ? "Couldn't read your fleet." : said)
+        }
+        guard let found = pickVision(from: list) else { return .noVision }
+        return .found(found)
+    }
+
+    /// ⚠️ `contentMessage`, not `message` — the fleet is a list the user asked to
+    /// SEE. `message` ends at the CHAT status table, which words a bare 404 as
+    /// "That tiny doesn't exist": a confident answer about a thing that is not a
+    /// tiny, reachable here by nothing worse than a stale build hitting the
+    /// worker's router-level 404. `contentMessage` keeps 401/424/5xx and any
+    /// server-worded refusal (where the table is right) and declines to guess
+    /// otherwise. The relay SEND arms above correctly use `message`: an invoke is
+    /// something the user SENT, not a list they opened.
+    static func lookUpVision(token: String?) async -> FleetLookup {
+        do {
+            return readFleet(try await Api.get("/api/devices", token: token))
+        } catch {
+            return .couldNotAsk(LoadFailure.contentMessage(error))
+        }
+    }
 
     /// Split out from the fetch so the ordering and the lan_url extraction — the
     /// two things that decide whether the fast path is taken — are testable
@@ -543,13 +614,6 @@ final class TinyLive: NSObject, ObservableObject {
             return raw
         }
         return FoundDevice(id: id, lanURL: lan)
-    }
-
-    private func findDevice(token: String?) async -> FoundDevice? {
-        guard let devices: [String: Any] = try? await Api.get("/api/devices", token: token),
-              let list = devices["devices"] as? [[String: Any]]
-        else { return nil }
-        return Self.pickVision(from: list)
     }
 
     // ---- remote mode: relay `frame` polling — works from anywhere ------------
