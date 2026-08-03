@@ -143,10 +143,21 @@ describe('a timeout must be EARNED by reading the mailbox', () => {
 
   /**
    * `.relayRefused` already existed for this and was reachable from the SEND arm
-   * only. Three sites now: the send, the early exit, and the exhausted budget.
+   * only.
+   *
+   * ⚠️ This began as `.toBe(3)` — the site count at the time — and inc 33 turned
+   * it red by adding a FOURTH that the rule wants (the send's `catch`, so a
+   * lapsed session on the POST names itself). A total is not the invariant; it
+   * fails on the improvement and passes if a site moves from the collect arm to
+   * the send arm, which is the actual regression. So: assert the two ARMS, split
+   * at the poll loop.
    */
   it('the refusal case is reachable from both ends of the round trip', () => {
-    expect(frameResult().split('.relayRefused(').length - 1).toBe(3)
+    const body = frameResult()
+    const loop = body.indexOf('for _ in 0 ..< framePollTries')
+    expect(loop, 'the poll loop is gone — re-anchor').toBeGreaterThan(-1)
+    expect(body.slice(0, loop), 'nothing refuses on the SEND arm').toContain('.relayRefused(')
+    expect(body.slice(loop), 'nothing refuses on the COLLECT arm').toContain('.relayRefused(')
   })
 })
 

@@ -570,32 +570,127 @@ final class TinyLive: NSObject, ObservableObject {
         }
     }
 
-    /// Remote ears: ask the necklace for a 2s clip, play the hosted WAV.
+    /// Remote ears: ask the necklace for a 3s clip, play the hosted WAV.
+    ///
+    /// Every arm ends in a sentence, because the only other thing this tap can
+    /// produce is a spinner that stops. It used to have FOUR silent dead ends —
+    /// send refused, poll refused, budget spent, and an answer carrying no URL —
+    /// and on all four the panel went on showing "tiny necklace · remote" while
+    /// the user waited 36 seconds for audio that was never coming. Silence here
+    /// is worse than a wrong sentence: it is indistinguishable from not having
+    /// tapped at all.
     func remoteListen() {
         guard !remoteListening, let id = remoteDeviceId else { return }
         remoteListening = true
+        // A note from the LAST tap must not be read as this one's answer.
+        speechNote = nil
         Task {
             defer { remoteListening = false }
-            guard let sent: [String: Any] = try? await Api.post("/api/devices/relay", token: token, body: [
-                "toDevice": id, "payload": ["type": "invoke", "prompt": "record"],
-            ]), let msgId = sent["id"] as? String else { return }
-            for _ in 0 ..< 12 {
-                try? await Task.sleep(for: .seconds(3))
-                guard let r: [String: Any] = try? await Api.get(
-                    "/api/devices/relay?inReplyTo=\(msgId)", token: token),
-                    let reply = r["reply"] as? [String: Any],
-                    let payload = reply["payload"] as? String,
-                    let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
-                    let text = obj["result"] as? String
-                else { continue }
-                if let range = text.range(of: #"https://\S+\.wav"#, options: .regularExpression),
-                   let url = URL(string: String(text[range])) {
-                    try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
-                    clipPlayer = AVPlayer(url: url)
-                    clipPlayer?.play()
-                }
-                return
+            switch await Self.clipResult(deviceId: id, token: token) {
+            case .clip(let url):
+                try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+                clipPlayer = AVPlayer(url: url)
+                clipPlayer?.play()
+            case let outcome:
+                speechNote = outcome.note
             }
+        }
+    }
+
+    private static let clipPollTries = 12
+    private static let clipPollEvery = 3.0
+
+    /// What a remote-listen tap turned into.
+    ///
+    /// The same four answers `FrameFailure` distinguishes for the camera, minus
+    /// the ones audio can't have — kept as its own type because `.noAnswer`'s
+    /// sentence is the only media-specific line, and a shared enum whose one
+    /// variable part is the message is a worse trade than four honest cases.
+    enum ListenResult: Equatable {
+        /// A hosted WAV to play. The only case with nothing to say.
+        case clip(URL)
+        /// It answered, but with words instead of a clip — "mic busy", "no
+        /// microphone". The most useful outcome and the one the old loop dropped
+        /// most thoroughly: it regexed for a URL and, finding none, returned.
+        case said(String)
+        /// tiny wouldn't take the request or wouldn't let us collect the answer.
+        /// Either END of the round trip, per `RelayPoll`.
+        case couldNotAsk(String)
+        /// The necklace never answered inside the budget — and we could SEE that,
+        /// having read the mailbox.
+        case noAnswer(seconds: Int)
+
+        /// The line to show. `nil` only for the case that speaks for itself.
+        var note: String? {
+            switch self {
+            case .clip: return nil
+            case .said(let what): return what
+            case .couldNotAsk(let why): return why
+            case .noAnswer(let s): return "No clip in \(s)s — is the necklace still online?"
+            }
+        }
+    }
+
+    /// Read one reply payload from a `record` invoke.
+    ///
+    /// Pure, and the point of the increment: `readFrameAnswer` states the rule
+    /// two screens below — "if the device said ANYTHING, stop polling and say
+    /// what it said" — and lists the two bugs it was written to kill. Both were
+    /// still live here, on the same wire, for the same reason: a payload with no
+    /// URL left the loop as nothing, and a bare-string payload (legal, since the
+    /// worker validates with JS `JSON.parse`) failed the `[String: Any]` cast.
+    ///
+    /// The server already does this correctly for the SAME invoke —
+    /// `nicla_listen` in `lib/chat/tools/nicla.ts` regexes the identical pattern
+    /// and makes the necklace's own words the error when it finds no URL. So a
+    /// user who ASKED the agent to listen was told why, while a user who tapped
+    /// the ear got a spinner. The regex is deliberately the same string as the
+    /// server's, and a test pins that agreement.
+    nonisolated static func readClipAnswer(_ payload: String) -> ListenResult {
+        let text = RelayReply.text(payload)
+        guard let range = text.range(of: #"https://\S+\.wav"#, options: .regularExpression),
+              let url = URL(string: String(text[range]))
+        else { return .said(text) }
+        return .clip(url)
+    }
+
+    /// One relay round-trip: invoke `record`, await the reply, hand back the WAV.
+    ///
+    /// Shaped exactly like `frameResult`, including `RelayPoll` on the poll arm,
+    /// so the two devices' panels cannot drift apart on what a silence means.
+    static func clipResult(deviceId: String, token: String?) async -> ListenResult {
+        let sent: [String: Any]
+        do {
+            sent = try await Api.post("/api/devices/relay", token: token, body: [
+                "toDevice": deviceId, "payload": ["type": "invoke", "prompt": "record"],
+            ])
+        } catch {
+            // `try?` here is what let a 401 on the SEND arm be reported as
+            // "Couldn't reach the relay" — the shrug that hid an expired session.
+            return .couldNotAsk(LoadFailure.message(error))
+        }
+        guard let msgId = sent["id"] as? String, !msgId.isEmpty else {
+            return .couldNotAsk((sent["error"] as? String) ?? "Couldn't reach the relay.")
+        }
+        let query = msgId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? msgId
+        var refusal: String?
+        for _ in 0 ..< clipPollTries {
+            try? await Task.sleep(for: .seconds(clipPollEvery))
+            switch await RelayPoll.read(inReplyTo: query, token: token) {
+            case .empty:
+                refusal = nil
+            case .unreadable(let why, let status):
+                refusal = why
+                if RelayPoll.isTerminal(status: status) { return .couldNotAsk(why) }
+            case .answered(let payload):
+                return readClipAnswer(payload)
+            }
+        }
+        switch RelayPoll.verdict(refusal: refusal) {
+        case .deviceSilent:
+            return .noAnswer(seconds: Int(Double(clipPollTries) * clipPollEvery))
+        case .couldNotAsk(let why):
+            return .couldNotAsk(why)
         }
     }
 
@@ -681,11 +776,19 @@ final class TinyLive: NSObject, ObservableObject {
     /// silent bugs that used to live in the polling arm.
     static func frameResult(deviceId: String, token: String?,
                             keepGoing: @escaping () -> Bool = { true }) async -> Result<UIImage, FrameFailure> {
-        let sent: [String: Any]? = try? await Api.post("/api/devices/relay", token: token, body: [
-            "toDevice": deviceId, "payload": ["type": "invoke", "prompt": "frame"],
-        ])
-        guard let msgId = sent?["id"] as? String, !msgId.isEmpty else {
-            return .failure(.relayRefused((sent?["error"] as? String) ?? "Couldn't reach the relay."))
+        let sent: [String: Any]
+        do {
+            sent = try await Api.post("/api/devices/relay", token: token, body: [
+                "toDevice": deviceId, "payload": ["type": "invoke", "prompt": "frame"],
+            ])
+        } catch {
+            // The SEND arm's own version of the poll bug: `try?` threw away the
+            // route's words, so a lapsed session became "Couldn't reach the
+            // relay" — a network shrug over an answer that named its own cause.
+            return .failure(.relayRefused(LoadFailure.message(error)))
+        }
+        guard let msgId = sent["id"] as? String, !msgId.isEmpty else {
+            return .failure(.relayRefused((sent["error"] as? String) ?? "Couldn't reach the relay."))
         }
         let query = msgId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? msgId
         /// The last attempt's reason, nil once an attempt reads the mailbox —

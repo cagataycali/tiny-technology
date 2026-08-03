@@ -4232,6 +4232,92 @@ import Foundation
     }
 }
 
+// ── Remote ears: the rule the camera learned and the microphone didn't ──────
+
+/// `readFrameAnswer` states the rule — "if the device said ANYTHING, stop polling
+/// and say what it said" — and lists the two bugs it was written to kill. Both
+/// were still live in `remoteListen`, on the same wire, for the same reason: it
+/// regexed a `.wav` URL out of `obj["result"]` and, finding none, **returned with
+/// nothing said**. A bare-string payload (legal here — the worker validates with
+/// JS `JSON.parse`) failed the `[String: Any]` cast and hit `continue`, so an
+/// answer that HAD arrived burned the whole 36s budget and then said nothing too.
+///
+/// Four silent dead ends, behind a spinner, over a panel still reading
+/// "tiny necklace · remote". The server has always done this correctly for the
+/// SAME invoke (`nicla_listen`, `lib/chat/tools/nicla.ts`): no URL → the
+/// necklace's own words become the error. So asking the agent to listen told you
+/// why; tapping the ear did not.
+@Suite struct ListenResultTests {
+
+    @Test func everyOutcomeExceptTheClipHasSomethingToSay() {
+        // The whole defect in one assertion: a tap may not end in silence.
+        let mustSpeak: [TinyLive.ListenResult] = [
+            .said("mic busy"),
+            .couldNotAsk("Please sign out and back in."),
+            .noAnswer(seconds: 36),
+        ]
+        for c in mustSpeak {
+            #expect(c.note?.isEmpty == false, "a silent outcome is the bug being fixed: \(c)")
+        }
+        // …and the clip says nothing BECAUSE it plays. The one case allowed to.
+        #expect(TinyLive.ListenResult.clip(URL(string: "https://r2.example/a.wav")!).note == nil)
+    }
+
+    @Test func aHostedWavIsTheClip() {
+        #expect(TinyLive.readClipAnswer(#"{"result":"recorded 3s: https://r2.example/clip.wav"}"#)
+                == .clip(URL(string: "https://r2.example/clip.wav")!))
+    }
+
+    /// The headline. This payload used to produce NOTHING: no clip, no sentence,
+    /// no state change — a spinner that stopped.
+    @Test func anAnswerWithoutAClipIsStillAnAnswer() {
+        #expect(TinyLive.readClipAnswer(#"{"result":"microphone busy"}"#) == .said("microphone busy"))
+        #expect(TinyLive.readClipAnswer(#"{"error":"no microphone on this device"}"#)
+                == .said("no microphone on this device"))
+    }
+
+    /// `RelayReply.text` is why this passes: the old code read `obj["result"]`
+    /// only, so a daemon answering `{"text":…}` or `{"output":…}` — both of which
+    /// the shared unwrapper has always handled — was treated as no answer at all.
+    @Test func theOtherKeysTheWireUsesAreReadToo() {
+        #expect(TinyLive.readClipAnswer(#"{"text":"say that again?"}"#) == .said("say that again?"))
+        #expect(TinyLive.readClipAnswer(#"{"output":"nothing to hear"}"#) == .said("nothing to hear"))
+    }
+
+    /// Bug 2 of `readFrameAnswer`'s pair, which the audio path still had: a bare
+    /// JSON string is a legal payload, and it used to fail the dictionary cast.
+    @Test func aBareStringPayloadIsAnAnswerNotATimeout() {
+        #expect(TinyLive.readClipAnswer(#""mic in use""#) == .said("mic in use"))
+        // Even when the bare string IS the clip URL.
+        #expect(TinyLive.readClipAnswer(#""https://r2.example/bare.wav""#)
+                == .clip(URL(string: "https://r2.example/bare.wav")!))
+    }
+
+    /// Unparseable payloads reach the user verbatim rather than vanishing — a raw
+    /// payload on screen is debuggable, a blank panel is not.
+    @Test func anUnparseablePayloadIsShownAsItCame() {
+        #expect(TinyLive.readClipAnswer("<html>502</html>") == .said("<html>502</html>"))
+    }
+
+    /// A URL that isn't a WAV is not a clip: playing it would hand AVPlayer bytes
+    /// it cannot decode, which is silence again — the failure this suite exists
+    /// to forbid. The words go to the user instead.
+    @Test func aNonWavURLIsWordsNotAClip() {
+        #expect(TinyLive.readClipAnswer(#"{"result":"see https://r2.example/photo.jpg"}"#)
+                == .said("see https://r2.example/photo.jpg"))
+        // http:// is not the hosted-upload scheme either.
+        #expect(TinyLive.readClipAnswer(#"{"result":"http://192.168.1.9/clip.wav"}"#)
+                == .said("http://192.168.1.9/clip.wav"))
+    }
+
+    /// The timeout names the wait it actually spent, and blames the necklace only
+    /// because `clipResult` reaches `.noAnswer` solely from `RelayPoll`'s
+    /// `.deviceSilent` — the inc-32 rule, inherited rather than re-derived.
+    @Test func theTimeoutQuotesTheBudgetItSpent() {
+        #expect(TinyLive.ListenResult.noAnswer(seconds: 36).note == "No clip in 36s — is the necklace still online?")
+    }
+}
+
 // ── The relay poll: who a silence is ABOUT ─────────────────────────────────
 
 /// Both device panels polled the reply mailbox with `guard let … else { continue }`
