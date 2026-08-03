@@ -187,6 +187,11 @@ internal class LiveScribe(private val app: TinyApp) {
             .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_ENCODING, android.media.AudioFormat.ENCODING_PCM_16BIT)
             .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_SAMPLING_RATE, 16_000)
             .putExtra(RecognizerIntent.EXTRA_AUDIO_SOURCE_CHANNEL_COUNT, 1)
+            // What this rail hears is filed as a transcript row and read back by
+            // `nicla_voice_transcripts` — the agent's memory of what the necklace
+            // heard, long after nobody is watching the panel. A row that reads as one
+            // run-on is the version that survives.
+            .askForPunctuation()
 
         // The recognizer must be built and driven from the main looper.
         main.post {

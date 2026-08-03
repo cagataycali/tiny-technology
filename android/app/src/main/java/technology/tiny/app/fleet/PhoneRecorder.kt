@@ -369,6 +369,11 @@ object PhoneRecorder {
                         .putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
                         .putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang)
                         .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, lang)
+                        // ⚠️ ON THIS RAIL THE TRANSCRIPT *IS* THE RECORDING. This phone
+                        // cannot hand the agent an audio file (see the header), so
+                        // nicla_voice_record's answer is text and nothing else — there is
+                        // no recording to fall back to when the words run together.
+                        .askForPunctuation()
                 )
             }
         }

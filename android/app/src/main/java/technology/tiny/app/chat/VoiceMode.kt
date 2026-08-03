@@ -8,6 +8,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import technology.tiny.app.fleet.askForPunctuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -148,6 +149,13 @@ class VoiceMode(
                     // (Speech.applyVoice → Locale.getDefault); this closes the mic side.
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE, deviceLanguageTag)
                     .putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, deviceLanguageTag)
+                    // A dictated utterance is a MESSAGE, not a preview: ChatViewModel
+                    // builds this class as `VoiceMode(app, speech) { text -> send(text) }`,
+                    // so what the silence watcher banks is what the agent reads.
+                    // `EXTRA_PARTIAL_RESULTS` above does not excuse skipping this —
+                    // the partials feed the on-screen meter, and the FINAL text is sent.
+                    // (iOS Voice.swift:195, the same rail, same fix.)
+                    .askForPunctuation()
             )
         }
     }

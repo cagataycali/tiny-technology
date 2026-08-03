@@ -119,6 +119,14 @@ object WearablesListenerBridge {
      * The recognizer recipe, single-sourced (GlassesLive's HUD transcript
      * shares it): prefer the strictly on-device recognizer (API 31+); the
      * intent fallback still sets EXTRA_PREFER_OFFLINE for older paths.
+     *
+     * ⚠️ SINGLE-SOURCING IS WHAT MAKES `meta_listen` ONE TOOL. Its two rails —
+     * this bridge's own session and the ride-along on an already-running HUD
+     * card ([GlassesLive.beginRecognition], which calls both functions below) —
+     * must return text of the SAME SHAPE, or the tool's output format depends on
+     * whether the user happened to have a card open. iOS split on exactly that
+     * (`e8b6df23`: two rails, one punctuated), and it split because each rail
+     * built its own request. Here they cannot.
      */
     internal fun newRecognizer(context: Context): Pair<SpeechRecognizer, Boolean> {
         val onDevice = Build.VERSION.SDK_INT >= 31 && SpeechRecognizer.isOnDeviceRecognitionAvailable(context)
@@ -135,6 +143,7 @@ object WearablesListenerBridge {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
             putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true)
+            askForPunctuation()
         }
 
     /** One recognizer session: resolves at final results or a terminal error. */
