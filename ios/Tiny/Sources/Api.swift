@@ -138,9 +138,18 @@ enum Api {
     }
 
     /// One request core — every JSON verb rides this (was 5 copy-pastes)
-    private static func request(_ path: String, method: String = "GET", token: String? = nil, body: [String: Any]? = nil) async throws -> Data {
+    ///
+    /// `cachePolicy` is a parameter for POLLED reads. `/api/devices/relay`'s GET
+    /// answers `{ reply: null }` until a device replies and sends NO
+    /// `Cache-Control` at all, so nothing but the caller knows that a cached
+    /// "not yet" would be a lie about now — the rule `getBody` states and the
+    /// relay poll needs. Defaulted, so every other verb is untouched.
+    private static func request(_ path: String, method: String = "GET", token: String? = nil,
+                               body: [String: Any]? = nil,
+                               cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy) async throws -> Data {
         var req = URLRequest(url: URL(string: base + path)!)
         req.httpMethod = method
+        req.cachePolicy = cachePolicy
         // Bound every JSON verb (the web's AbortSignal.timeout house rule). The
         // URLSession default is 60s/7-day; without this, a stalled half-open
         // connection leaves the panels that await this (.loading in Universe/
@@ -177,8 +186,9 @@ enum Api {
         return String(msg.prefix(300))
     }
 
-    static func get<T>(_ path: String, token: String?) async throws -> T {
-        let data = try await request(path, token: token)
+    static func get<T>(_ path: String, token: String?,
+                       cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy) async throws -> T {
+        let data = try await request(path, token: token, cachePolicy: cachePolicy)
         guard let obj = try JSONSerialization.jsonObject(with: data) as? T else { throw ApiError.badResponse }
         return obj
     }

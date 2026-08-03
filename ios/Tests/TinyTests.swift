@@ -4232,6 +4232,150 @@ import Foundation
     }
 }
 
+// ── The relay poll: who a silence is ABOUT ─────────────────────────────────
+
+/// Both device panels polled the reply mailbox with `guard let … else { continue }`
+/// and so collapsed three different answers into one `nil`: an empty mailbox, a
+/// refusal (`ApiError.http` — 401 when the session lapsed mid-poll, 424 when the
+/// worker had a problem), and no response at all. Only the FIRST is evidence
+/// about the device, and both loops ended on a sentence blaming it anyway —
+/// "No frame in 19s — is the camera awake?" and "<laptop> didn't answer in 30s —
+/// is `tiny mesh` still running there?"
+///
+/// `FrameFailureTests` above already asserts the rule ("re-wording them
+/// client-side is how 'relay send failed' came to stand in for a 401") and
+/// `FrameFailure.relayRefused` already existed for it. It held on the SEND arm
+/// only. These tests are the poll arm's half.
+@Suite struct RelayPollTests {
+
+    /// The headline, as one assertion: a session that lapsed mid-poll must never
+    /// come out the other end as a claim about the hardware.
+    @Test func aLapsedSessionIsNotASleepingCamera() {
+        let read = RelayPoll.classify(.failure(ApiError.http(401, "login required")))
+        guard case .unreadable(let reason, let status) = read else {
+            Issue.record("a refusal read as \(read) — the whole defect")
+            return
+        }
+        #expect(status == 401)
+        // 401 is in `statusOwnsTheMessage`, so the table's line wins over the
+        // worker's wire phrase — "Login required" is not something to show a
+        // person, and the remedy is the useful half.
+        #expect(reason.contains("sign out and back in"))
+        // Settled: no amount of waiting signs you back in.
+        #expect(RelayPoll.isTerminal(status: status))
+        // And the verdict may not blame the device.
+        #expect(RelayPoll.verdict(refusal: reason) == .couldNotAsk(reason))
+    }
+
+    /// The other half of the same rule: an EMPTY mailbox is real evidence, so the
+    /// timeout it earns must survive. Fixing the lie by never blaming the device
+    /// would be the same bug facing the other way.
+    @Test func anEmptyMailboxStillEarnsATimeout() {
+        #expect(RelayPoll.classify(.success(["ok": true, "reply": NSNull()])) == .empty)
+        // The route omits `reply` in no case, but a body that simply lacks it is
+        // the same statement and must not read as a failure.
+        #expect(RelayPoll.classify(.success(["ok": true])) == .empty)
+        #expect(RelayPoll.verdict(refusal: nil) == .deviceSilent)
+    }
+
+    @Test func aReplyIsTheAnswerAndStopsTheWait() {
+        let body: [String: Any] = ["ok": true, "reply": ["payload": #"{"result":"fw 1.3.4"}"#]]
+        #expect(RelayPoll.classify(.success(body)) == .answered(#"{"result":"fw 1.3.4"}"#))
+    }
+
+    /// Where the status does NOT own the message, the server's own words reach
+    /// the screen — the rule `theWordingComesFromWhoeverActuallyKnows` states for
+    /// the send arm. 424 is this route's wrapper for a worker-side problem, and
+    /// "device not found" is the most actionable sentence in the whole flow.
+    @Test func theServersOwnWordsSurviveTheClassification() {
+        let read = RelayPoll.classify(.failure(ApiError.http(424, "device not found")))
+        guard case .unreadable(let reason, let status) = read else {
+            Issue.record("a 424 read as \(read)")
+            return
+        }
+        #expect(reason.contains("device not found"))
+        #expect(status == 424)
+    }
+
+    /// ⚠️ The half that must NOT regress: a 424, a 5xx or a dropped packet is a
+    /// MOMENT, and `pollTries` exists because the host has to run a whole agent
+    /// turn before it can answer. Ending the wait on those would re-break the
+    /// "No reply within 4s" bug that the 15×2s budget was introduced to fix.
+    @Test func onlyASettledRefusalEndsTheWait() {
+        for settled in [400, 401, 403, 404] {
+            #expect(RelayPoll.isTerminal(status: settled), "\(settled) will not fix itself")
+        }
+        for moment in [408, 424, 429, 500, 502, 503] {
+            #expect(!RelayPoll.isTerminal(status: moment), "\(moment) deserves its retries")
+        }
+        // A transport failure has no status and is the most transient of all —
+        // a phone in a lift must not lose the reply it is about to receive.
+        #expect(!RelayPoll.isTerminal(status: nil))
+    }
+
+    /// No response at all: no status to branch on, but still a sentence, and
+    /// still not the device's fault.
+    @Test func aTransportFailureHasNoStatusAndStillHasWords() {
+        let read = RelayPoll.classify(.failure(URLError(.notConnectedToInternet)))
+        guard case .unreadable(let reason, let status) = read else {
+            Issue.record("a transport failure read as \(read)")
+            return
+        }
+        #expect(status == nil)
+        #expect(reason.lowercased().contains("connection"))
+    }
+
+    /// Bytes arrived and weren't JSON — a mid-redeploy HTML error page served
+    /// with a 200, which `Api.get` throws as `.badResponse`. That is emphatically
+    /// not an empty mailbox, and the old `try?` made it one.
+    @Test func anHtmlErrorPageIsNotAnEmptyMailbox() {
+        let read = RelayPoll.classify(.failure(ApiError.badResponse))
+        guard case .unreadable(let reason, let status) = read else {
+            Issue.record("a junk body read as \(read) — it would have become a timeout")
+            return
+        }
+        #expect(status == nil)   // no HTTP refusal, so nothing to branch on
+        #expect(!reason.isEmpty)
+        #expect(!RelayPoll.isTerminal(status: status))  // a redeploy passes
+    }
+
+    /// Every unreadable carries something to show. A silent failure is the shape
+    /// of the bug being fixed, so this is the same assertion
+    /// `everyFailureCarriesSomethingToShowTheUser` makes for FrameFailure.
+    @Test func noRefusalIsSilent() {
+        let errors: [Error] = [
+            ApiError.http(401, "login required"), ApiError.http(424, "device not found"),
+            ApiError.http(500, nil), ApiError.http(418, nil), ApiError.badResponse,
+            URLError(.timedOut),
+        ]
+        for e in errors {
+            guard case .unreadable(let reason, _) = RelayPoll.classify(.failure(e)) else {
+                Issue.record("\(e) did not classify as unreadable")
+                continue
+            }
+            #expect(!reason.isEmpty, "a silent refusal is the bug: \(e)")
+        }
+    }
+
+    /// The LAST attempt decides, and a read clears an earlier refusal. Both
+    /// directions matter: an early blip must not overrule what we could see at
+    /// the end, and an early success must not paper over a refusal at the end.
+    @Test func theLastAttemptDecidesTheVerdict() {
+        #expect(RelayPoll.verdict(refusal: nil) == .deviceSilent)
+        #expect(RelayPoll.verdict(refusal: "Backend unavailable (HTTP 424)")
+                == .couldNotAsk("Backend unavailable (HTTP 424)"))
+    }
+
+    /// A reply whose payload is not a string is documented as unreachable (the
+    /// route stringifies on send). Pinned so the documented behaviour and the
+    /// real behaviour are the same claim: it reads as "nothing yet", which keeps
+    /// the poll going rather than surfacing an empty status line.
+    @Test func aNonStringPayloadCountsAsNothingYet() {
+        #expect(RelayPoll.classify(.success(["reply": ["payload": 7]])) == .empty)
+        #expect(RelayPoll.classify(.success(["reply": ["nope": "x"]])) == .empty)
+    }
+}
+
 // ── Map presence: what "you are not visible" is allowed to mean ────────────
 
 /// Opting out of the public map has two halves — stop publishing (local) and

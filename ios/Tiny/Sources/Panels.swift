@@ -3372,12 +3372,23 @@ struct FlipperDevicePanel: View {
         }
 
         let query = envId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? envId
+        // The last attempt's reason, cleared by any attempt that reads the
+        // mailbox — RelayPoll.verdict's contract. Without it this loop spent 30s
+        // discarding "login required" and then blamed the LAPTOP, which is the
+        // same mistake as the "Flipper offline" wording above: the honest
+        // sentence names the thing that actually refused.
+        var refusal: String?
         for _ in 0..<Self.pollTries {
             try? await Task.sleep(for: .seconds(Self.pollEverySeconds))
-            guard let got: [String: Any] = await Api.getBody(
-                "/api/devices/relay?inReplyTo=\(query)", token: token) else { continue }
-            if let reply = got["reply"] as? [String: Any],
-               let payload = reply["payload"] as? String {
+            switch await RelayPoll.read(inReplyTo: query, token: token) {
+            case .empty:
+                refusal = nil
+            case .unreadable(let why, let httpStatus):
+                refusal = why
+                // A settled refusal ends the wait — 30s of spinner cannot make a
+                // signed-out session sign back in.
+                if RelayPoll.isTerminal(status: httpStatus) { error = why; return }
+            case .answered(let payload):
                 // The host's reply payload → the line to show. The agent answers
                 // `{"result":"…"}`; other daemons answer `{"text":…}` or a bare
                 // string. Anything unrecognised is shown verbatim rather than
@@ -3391,8 +3402,13 @@ struct FlipperDevicePanel: View {
                 return
             }
         }
-        error = "\(hostName) didn't answer in \(Self.pollTries * Self.pollEverySeconds)s — "
-              + "is `tiny mesh` still running there?"
+        switch RelayPoll.verdict(refusal: refusal) {
+        case .deviceSilent:
+            error = "\(hostName) didn't answer in \(Self.pollTries * Self.pollEverySeconds)s — "
+                  + "is `tiny mesh` still running there?"
+        case .couldNotAsk(let why):
+            error = why
+        }
     }
 }
 

@@ -46,6 +46,132 @@ enum RelayReply {
     }
 }
 
+/// One poll of a relay reply mailbox — and who to blame when the wait runs out.
+///
+/// Both device panels poll `GET /api/devices/relay?inReplyTo=…` in a loop, and
+/// both wrote the same `guard let … else { continue }`, which collapses three
+/// different answers into one `nil`:
+///
+///   * a readable, still-empty mailbox — the device hasn't answered YET;
+///   * a refusal, thrown as `ApiError.http`: 401 `login required` when the
+///     session lapsed mid-poll, 424 when the worker itself had a problem;
+///   * no response at all — the phone lost its network.
+///
+/// **Only the first says anything about the device**, and both loops ended on a
+/// sentence that blames it anyway: "No frame in 19s — is the camera awake?" and
+/// "<laptop> didn't answer in 30s — is `tiny mesh` still running there?" So a
+/// phone that had quietly signed itself out sent its owner to a camera that was
+/// awake and to a laptop whose daemon was running fine.
+///
+/// `FrameFailureTests` already states the rule this restores — "the server's and
+/// the device's own words survive verbatim; re-wording them client-side is how
+/// 'relay send failed' came to stand in for a 401" — and `FrameFailure` already
+/// has the case for it, `.relayRefused`. The rule held on the SEND arm only,
+/// five lines above the poll that ignored it.
+///
+/// Pure, and outside both panels, for `readFrameAnswer`'s reason: the defect
+/// lived in a `guard` inside an async polling loop, which is precisely where no
+/// test could reach it.
+enum RelayPoll {
+    /// What one read of the mailbox turned out to be.
+    enum Read: Equatable {
+        /// The device answered. The raw payload, for the caller to interpret —
+        /// a frame, a status line, whatever it asked for.
+        case answered(String)
+        /// The mailbox was READ and is still empty. The only case that is
+        /// evidence about the device, and so the only one that earns a timeout.
+        case empty
+        /// We could not read the mailbox at all. `reason` is already house copy
+        /// (`LoadFailure.message`: the server's own words where it gave any, the
+        /// status table otherwise); `status` is nil for a transport failure.
+        case unreadable(reason: String, status: Int?)
+    }
+
+    /// What a poll RESPONSE means, as a pure decision.
+    ///
+    /// The reason wording is `LoadFailure.message`, not a fourth private copy of
+    /// the same table: that helper exists because five sheets each guessed
+    /// "Login required or network error", and it already separates a lapsed
+    /// session from a dropped connection from an HTML error page served with a
+    /// 200. A poll needs exactly that distinction.
+    static func classify(_ result: Result<[String: Any], Error>) -> Read {
+        switch result {
+        case .success(let body):
+            // `reply: null` is the route's own "nothing yet" (it answers
+            // `{ ok: true, reply: data.reply ?? null }`), so a readable body
+            // with no reply is the empty mailbox rather than a failure.
+            //
+            // A reply whose `payload` is not a string counts as empty too: the
+            // wire guarantees a string (the route stringifies non-strings on
+            // send, `sanitizeRelayPayload` on the worker side), so this arm is
+            // unreachable rather than lossy.
+            guard let reply = body["reply"] as? [String: Any],
+                  let payload = reply["payload"] as? String else { return .empty }
+            return .answered(payload)
+        case .failure(let error):
+            return .unreadable(reason: LoadFailure.message(error),
+                               status: (error as? ApiError)?.status)
+        }
+    }
+
+    /// One poll, classified. The only impure part, and deliberately the only
+    /// thing in here a test cannot drive.
+    static func read(inReplyTo query: String, token: String?) async -> Read {
+        do {
+            // Never from the cache: this GET's URL is constant for the whole
+            // poll and its body is `{ reply: null }` until the device answers,
+            // so a cached "not yet" would end the wait on a stale nothing. The
+            // route sends no `Cache-Control`, so the caller has to say it —
+            // `Api.getBody` states the same rule for the same reason.
+            let body: [String: Any] = try await Api.get(
+                "/api/devices/relay?inReplyTo=\(query)", token: token,
+                cachePolicy: .reloadIgnoringLocalCacheData)
+            return classify(.success(body))
+        } catch {
+            return classify(.failure(error))
+        }
+    }
+
+    /// Is retrying pointless — i.e. does this refusal describe US rather than a
+    /// moment?
+    ///
+    /// A 401 does not stop being a 401 two seconds later, and 403 is the
+    /// worker's OWNERSHIP refusal ("re-auth won't help", per `ApiError`), so
+    /// spending the rest of the budget on either is a spinner over a question
+    /// already answered. 400 means we built the URL wrong and 404 means there is
+    /// no such route on the build we're talking to.
+    ///
+    /// Everything else keeps its retries, which is the half worth protecting:
+    /// nil is a transport blip, 424 is this route's "the worker had a problem"
+    /// wrapper, and 5xx/429 are moments. Turning those into an early exit would
+    /// re-break the thing `pollTries` exists for — a host that needs a few
+    /// seconds to run an agent turn.
+    static func isTerminal(status: Int?) -> Bool {
+        guard let status else { return false }
+        return status == 400 || status == 401 || status == 403 || status == 404
+    }
+
+    /// Who the budget running out is ABOUT.
+    enum Verdict: Equatable {
+        /// We read the mailbox and it stayed empty. Now the device may be blamed.
+        case deviceSilent
+        /// We never managed to read it, so we have no standing to say the device
+        /// was silent — it may have answered into a mailbox we couldn't open.
+        case couldNotAsk(String)
+    }
+
+    /// The verdict, from the state of the LAST attempt.
+    ///
+    /// - Parameter refusal: the final attempt's reason, or nil if the final
+    ///   attempt read the mailbox. A successful read CLEARS it on purpose: an
+    ///   early blip must not overrule what we could see at the end, and a
+    ///   refusal at the end must not be papered over by an early success.
+    static func verdict(refusal: String?) -> Verdict {
+        guard let refusal else { return .deviceSilent }
+        return .couldNotAsk(refusal)
+    }
+}
+
 /// One segment's audio on disk, so a necklace-live row can be played back.
 ///
 /// Same shape as NiclaRecorder.TakeBox's file half and for the same reason: a
@@ -481,9 +607,14 @@ final class TinyLive: NSObject, ObservableObject {
     /// peek" placeholder they started from — five different failures wearing one
     /// blank face, none of them distinguishable from not having tapped at all.
     enum FrameFailure: Error {
-        /// The send never landed: signed out, device revoked, no network.
+        /// tiny wouldn't take the request, or wouldn't let us collect the answer:
+        /// signed out, device revoked, no network. Either END of the round trip —
+        /// the poll arm reaches this too, because a mailbox we are not allowed to
+        /// open tells us nothing about the board (see `RelayPoll`).
         case relayRefused(String)
-        /// The board never answered inside the poll budget.
+        /// The board never answered inside the poll budget — and we could SEE
+        /// that, having read the mailbox. `RelayPoll.verdict` is what keeps this
+        /// case from standing in for "we couldn't ask".
         case noReply(seconds: Int)
         /// It DID answer, with words instead of an image — "camera busy",
         /// "no camera on this device". The most useful failure of the five, and
@@ -557,27 +688,40 @@ final class TinyLive: NSObject, ObservableObject {
             return .failure(.relayRefused((sent?["error"] as? String) ?? "Couldn't reach the relay."))
         }
         let query = msgId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? msgId
+        /// The last attempt's reason, nil once an attempt reads the mailbox —
+        /// see `RelayPoll.verdict`. This is what stops a lapsed session from
+        /// being reported as a sleeping camera.
+        var refusal: String?
         for _ in 0 ..< framePollTries {
             try? await Task.sleep(for: .seconds(framePollEvery))
             guard keepGoing() else { return .failure(.cancelled) }
-            guard let r: [String: Any] = try? await Api.get(
-                "/api/devices/relay?inReplyTo=\(query)", token: token),
-                let reply = r["reply"] as? [String: Any],
-                let payload = reply["payload"] as? String
-            else { continue }
-            // Past here the device HAS answered. An answer without an image is
-            // still an answer, so it must never fall through to the timeout.
-            switch readFrameAnswer(payload) {
-            case .words(let said):
-                return .failure(.deviceSaid(said))
-            case .imageURL(let url):
-                guard let (data, _) = try? await URLSession.shared.data(from: url),
-                      let img = UIImage(data: data)
-                else { return .failure(.undecodable) }
-                return .success(img)
+            switch await RelayPoll.read(inReplyTo: query, token: token) {
+            case .empty:
+                refusal = nil
+            case .unreadable(let why, let status):
+                refusal = why
+                // Retrying a 401 is 19s of spinner over a settled question.
+                if RelayPoll.isTerminal(status: status) { return .failure(.relayRefused(why)) }
+            case .answered(let payload):
+                // Past here the device HAS answered. An answer without an image
+                // is still an answer, so it must never fall through to a timeout.
+                switch readFrameAnswer(payload) {
+                case .words(let said):
+                    return .failure(.deviceSaid(said))
+                case .imageURL(let url):
+                    guard let (data, _) = try? await URLSession.shared.data(from: url),
+                          let img = UIImage(data: data)
+                    else { return .failure(.undecodable) }
+                    return .success(img)
+                }
             }
         }
-        return .failure(.noReply(seconds: Int(Double(framePollTries) * framePollEvery)))
+        switch RelayPoll.verdict(refusal: refusal) {
+        case .deviceSilent:
+            return .failure(.noReply(seconds: Int(Double(framePollTries) * framePollEvery)))
+        case .couldNotAsk(let why):
+            return .failure(.relayRefused(why))
+        }
     }
 
     /// The streaming loop's view of the same call: it retries on its own
