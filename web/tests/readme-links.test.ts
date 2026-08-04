@@ -42,8 +42,9 @@ describe('root README link integrity', () => {
   it('derived a real target set, not an empty scan', () => {
     // If the extraction regex quietly stops matching, every other assertion
     // here passes against nothing — require the derivation to have found
-    // roughly what the README actually contains.
-    expect(relative.length).toBeGreaterThanOrEqual(30)
+    // roughly what the README actually contains. (The README was deliberately
+    // cut to ~130 lines in the tiny-voice rewrite; the floor moved with it.)
+    expect(relative.length).toBeGreaterThanOrEqual(20)
   })
 
   it('every relative link and image target exists', () => {

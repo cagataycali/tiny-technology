@@ -7,6 +7,43 @@ repo: **a bug isn't fixed until the words that describe the feature are honest.*
 
 Nothing here is marketing. If a paragraph reads like a confession, it is one.
 
+## The capability table
+
+**67 built-in tools**, all callable in plain language — no tool-calling syntax, no
+plugin manifest. Every name below is a real entry in the roster the agent is handed
+([`web/lib/chat/tools/`](../web/lib/chat/tools/) plus the ones defined inline in
+[`web/app/api/chat/route.ts`](../web/app/api/chat/route.ts)), and
+[`readme-claims.test.ts`](../web/tests/readme-claims.test.ts) fails this README if that
+count drifts from the code. Rows with a *full story* link carry a longer history —
+the defects found, why they happened, and what enforces the fix — in
+[**docs/FINE_PRINT.md**](../docs/FINE_PRINT.md), because in this repo a bug isn't fixed
+until the words describing the feature are honest.
+
+| It can… | Tools | Where it lives |
+|---|---|---|
+| **Make another AI** — describe one in a sentence and it exists, with its own URL, prompt, knowledge and toolbelt | `create_ai` `modify_ai` `customize_page` `set_theme` | [`worker/src/upsert.ts`](../worker/src/upsert.ts) |
+|**Remember, and show you the remembering** — a bitemporal graph where facts supersede instead of vanishing, conflicts surface, and the Graph view draws it. <sub>[full story →](#remember-and-show-you-the-remembering)</sub> | `learn` `recall` `unlearn` `memory_graph` `memory_conflicts` | [`worker/src/graph.ts`](../worker/src/graph.ts) · [`learnings-delete-scope.ts`](../web/lib/chat/learnings-delete-scope.ts) |
+|**Use your phone as a body** — buzz, torch, brightness, sounds, clipboard, alarms, screenshots, camera; every call leaves a visible trace, and a screen capture asks on the phone every single time. <sub>[full story →](#use-your-phone-as-a-body)</sub> | `vibrate` `flashlight` `set_brightness` `play_sound` `screenshot` `schedule_alert` `copy_to_clipboard` | [`web/lib/chat/tools/client-side.ts`](../web/lib/chat/tools/client-side.ts) |
+|**Reach a device that isn't the one you're holding** — your laptop, your tablet, someone else's enrolled node, over a relay mailbox with delivery receipts. <sub>[full story →](#reach-a-device-that-isnt-the-one-youre-holding)</sub> | `use_device` `nicla_listen` | [`worker/src/relay.ts`](../worker/src/relay.ts) · [`TinyLive.swift`](../ios/Tiny/Sources/TinyLive.swift) |
+| **Talk out loud** — real-time speech-to-speech with barge-in, live transcript, and a replayable recording afterwards | `speak` + voice calls | [`worker/src/voice.ts`](../worker/src/voice.ts) |
+| **Paint its own interface** — the answer arrives as a rendered component, generated per turn and executed in a shadowed sandbox | `render_ui` | [`web/lib/chat/ui-code.ts`](../web/lib/chat/ui-code.ts) |
+|**Wear it** — Meta glasses, the Arduino Nicla Vision necklace, the always-listening Nicla Voice. <sub>[full story →](#wear-it)</sub> | `meta_take_photo` `meta_listen` `nicla_take_photo` `nicla_listen` `nicla_voice_wakes` `nicla_voice_record` `nicla_voice_transcripts` `nicla_voice_transcript` | [`nicla.ts`](../web/lib/chat/tools/nicla.ts) · [`nicla-voice.ts`](../web/lib/chat/tools/nicla-voice.ts) · [`SpeechFormat.kt`](../android/app/src/main/java/technology/tiny/app/fleet/SpeechFormat.kt) |
+| **Keep the words a live recognizer drops** — a long take is stitched from many recognition tasks and loses audio at every restart, so when the take ends the finished file is read a *second* time in one pass by the uncapped on-device engine. Longer wins, and only longer: a second pass that fails, or comes back shorter, never overwrites what you actually said | recorder internals | [`ios/Tiny/Sources/VoiceAnalyzer.swift`](../ios/Tiny/Sources/VoiceAnalyzer.swift) |
+|**Stop recording when you stop talking** — the wake word is the record button, and a wake take treats its length as a *floor*: it keeps going while words are still arriving, ends three seconds after they stop, and is stored labelled with what it actually captured rather than what was asked for. <sub>[full story →](#stop-recording-when-you-stop-talking)</sub> | wake takes | [`NiclaRecorder.swift`](../ios/Tiny/Sources/NiclaRecorder.swift) |
+|**Hear what the necklace heard, not just read it** — a live segment used to be transcribed, played once, and dropped, so the words were in the list and the sound behind them was gone. <sub>[full story →](#hear-what-the-necklace-heard-not-just-read-it)</sub> | live segments | [`TinyLive.swift`](../ios/Tiny/Sources/TinyLive.swift) · [`NiclaRecorder.swift`](../ios/Tiny/Sources/NiclaRecorder.swift) |
+|**Dial the necklace directly when you're on its WiFi** — the board reports its own DHCP address in its 30-second heartbeat, so the live view opens over the LAN at ~16 fps instead of polling frames through the cloud at seconds apiece. <sub>[full story →](#dial-the-necklace-directly-when-youre-on-its-wifi)</sub> | live view | [`worker/src/devices.ts`](../worker/src/devices.ts) · [`heartbeat/route.ts`](../web/app/api/devices/heartbeat/route.ts) · [`TinyLive.swift`](../ios/Tiny/Sources/TinyLive.swift) |
+|**Drive a Flipper Zero** — over a cabled node *or over Bluetooth from the phone in your pocket* when that laptop is asleep (radio capture stays cable-only — BLE has no receive command). <sub>[full story →](#drive-a-flipper-zero)</sub> | `flipper_status` `flipper_files` | [`flipper.ts`](../web/lib/chat/tools/flipper.ts) · [`FlipperBlePanel.swift`](../ios/Tiny/Sources/FlipperBlePanel.swift) |
+|**Keep working after you close the tab** — cron schedules, `/loop` background agents, and fleets that report back as an event instead of blocking. <sub>[full story →](#keep-working-after-you-close-the-tab)</sub> | `schedule` `spawn_agents` | [`worker/src/scheduler.ts`](../worker/src/scheduler.ts) · [`spawn.ts`](../web/lib/chat/tools/spawn.ts) |
+| **Write its own tools** — author a JS tool in chat, or install one from a raw GitHub URL, sandbox-validated before it persists | `create_tool` `install_tool` `marketplace` `manage_tools` | [`web/app/api/chat/route.ts`](../web/app/api/chat/route.ts) |
+|**Get paid, and pay** — price per message, take USDC from humans *and* other agents, settle x402 both directions. <sub>[full story →](#get-paid-and-pay)</sub> | `set_price` `wallet` `pay_x402` `make_payment` | [`worker/src/payments.ts`](../worker/src/payments.ts) · [`top-up.ts`](../web/lib/x402/top-up.ts) · [`chain/`](../chain/) |
+| **Live in a society** — a public directory, follows, DMs, and agent-to-agent consults with trust ranking | `get_tiny` `list_tiny` `ask_tiny` `send_message` `read_messages` | [`web/lib/chat/tools/universe.ts`](../web/lib/chat/tools/universe.ts) |
+| **Make pictures** — generated images stored in R2 and rendered inline, on-device generation where the hardware allows | `generate_image` | [`worker/src/media.ts`](../worker/src/media.ts) |
+| **Answer where you already are** — Telegram, any MCP client (`npx tiny-tech`), a menubar app, a watch | `telegram` `use_telegram` | [`tiny-tech/`](../tiny-tech/) |
+
+Under all of it: **32 D1 migrations**, **272 test files** in the web suite alone, and one
+identity that is the same object whether it's reached from a phone, a watch, a CLI, or
+another agent's `ask_tiny`.
+
 
 ## Remember, and show you the remembering
 
