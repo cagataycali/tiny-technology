@@ -52,7 +52,7 @@ sensors, drive a [Flipper Zero](web/lib/chat/tools/flipper.ts) — every call vi
 traced, nothing silent, screen captures ask you *every time*. And it wears:
 
 <div align="center">
-<img src="hardware/cad/renders/hero_full_necklace.png" width="260" alt="the tiny necklace" />
+<img src="hardware/renders/necklace.png" width="260" alt="the tiny necklace" />
 
 <sub>The <a href="hardware/"><b>tiny necklace</b></a> — a 3D-printed pendant around an
 <a href="https://store-usa.arduino.cc/products/nicla-vision">Arduino Nicla</a>. Camera, mic,

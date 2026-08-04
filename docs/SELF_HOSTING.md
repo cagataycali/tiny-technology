@@ -205,10 +205,10 @@ The [tiny necklace](../hardware/) needs a Nicla board, ~$1 of PLA, and 60 cm of 
 
 ```bash
 # Open a sliced plate in Bambu Studio (profile embedded) → Slice → Print
-open hardware/cad/tiny_v29_vision_x1.3mf     # Vision pendant  (7.6 g, ~1 h)
-open hardware/cad/tiny_v29_voice_x1.3mf      # Voice pendant   (6.3 g, ~48 min)
-open hardware/cad/tiny_v29_locket.3mf        # battery locket  (14.7 g, ~1.5 h)
-open hardware/cad/tiny_v29_cordkit.3mf       # the bead that closes the cord
+open hardware/prints/vision.3mf     # Vision pendant  (7.6 g, ~1 h)
+open hardware/prints/voice.3mf      # Voice pendant   (6.3 g, ~48 min)
+open hardware/prints/locket.3mf        # battery locket  (14.7 g, ~1.5 h)
+open hardware/prints/cordkit.3mf       # the bead that closes the cord
 
 # Flash + provision the board (firmware lives in its own repo)
 pip install strands-nicla                     # github.com/cagataycali/strands-nicla

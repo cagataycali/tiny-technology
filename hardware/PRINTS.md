@@ -1,4 +1,11 @@
-# tiny necklace — print files quick reference
+# tiny necklace — the receipts
+
+> ⚠️ This file is the design-bench log, kept verbatim. It references old
+> iterations (v2.1–v2.8), check scripts and STLs that were pruned from this
+> public tree — the shipping version is v2.9 and lives here as
+> [`pendant.scad`](pendant.scad) + [`prints/`](prints/). The full bench
+> (every iteration, the toolpath gates, the profiles) stays in the private
+> design repo. The numbers and lessons below are still true.
 
 Everything below v2.6 was sliced **PLA 0.20mm Standard, textured PEI, no
 supports**. v2.6 moves to the **0.12mm jewelry profile** described at the
@@ -14,11 +21,11 @@ undesigned. v2.9 designs that: a **3mm cord wrapped once around the bar**, a
 
 | file | what | status | weight | time |
 |------|------|--------|--------|------|
-| `cad/tiny_v29_vision_x1.3mf` | **v2.9 CURRENT** — 1 Vision case with the crown seat: tray + white 7-ring insert + door, two-color | open → `Slice plate` → `Print plate` | 7.63 g | 59m 54s |
-| `cad/tiny_v29_vision_x2.3mf` | the same plate ×2 — one print for both new boards | open → `Slice plate` → `Print plate` | 14.91 g | 1h 57m 0s |
-| `cad/tiny_v29_cordkit.3mf` | the cord kit: 3 sliding beads at 2.8 / 2.9 / 3.0mm bore, one colour | open → `Slice plate` → `Print plate` | 1.03 g | 15m 9s |
-| `cad/tiny_v29_voice_x1.3mf` | 1 **Nicla Voice** case, same cord system, 9.5mm deep (`face="voice"`) | open → `Slice plate` → `Print plate` | 6.26 g | 48m 20s |
-| `cad/tiny_v29_locket.3mf` | the **battery locket** (`bat=true`): tray + white mark + snap-on cell cover + door, 4 parts | open → `Slice plate` → `Print plate` | 14.67 g | 1h 36m 7s |
+| `prints/vision.3mf` | **v2.9 CURRENT** — 1 Vision case with the crown seat: tray + white 7-ring insert + door, two-color | open → `Slice plate` → `Print plate` | 7.63 g | 59m 54s |
+| `prints/vision_x2.3mf` | the same plate ×2 — one print for both new boards | open → `Slice plate` → `Print plate` | 14.91 g | 1h 57m 0s |
+| `prints/cordkit.3mf` | the cord kit: 3 sliding beads at 2.8 / 2.9 / 3.0mm bore, one colour | open → `Slice plate` → `Print plate` | 1.03 g | 15m 9s |
+| `prints/voice.3mf` | 1 **Nicla Voice** case, same cord system, 9.5mm deep (`face="voice"`) | open → `Slice plate` → `Print plate` | 6.26 g | 48m 20s |
+| `prints/locket.3mf` | the **battery locket** (`bat=true`): tray + white mark + snap-on cell cover + door, 4 parts | open → `Slice plate` → `Print plate` | 14.67 g | 1h 36m 7s |
 
 Every time in this file is the slice header's `model printing time`, and every
 weight is the sum of its `total filament weight [g]` fields. Named, because the
@@ -67,8 +74,8 @@ is the whole adjustment mechanism, and it is why the tails are 7cm and not trim.
   bead down and it grows. Friction against a compressible cord is the one number
   arithmetic cannot settle, so the kit prints **three** at 0.1mm intervals and
   you keep the one that feels right — 0.2g and eight minutes against a reprint.
-  `renders/v29_cordkit.png`, `renders/v29_seat_detail.png` (empty groove | cord
-  seated in it), `renders/hero_full_necklace.png` (the whole 44.3cm necklace).
+  `renders/beads.png`, `renders/cord_seat.png` (empty groove | cord
+  seated in it), `renders/necklace.png` (the whole 44.3cm necklace).
 - **The Nicla Voice board wears the same necklace.** `tiny_v29_voice_x1.3mf` is
   `face="voice"` at depth **9.5** instead of 12.5 — a case for the board that is
   already on the desk, not the two in the post. The cord, the bead and the seat
@@ -425,7 +432,7 @@ Model-only 3MFs (slice yourself in Bambu Studio):
   filament — see gotcha 4 above for the fix.)
 - `cad/tiny_v1_model.3mf`, `cad/tiny_split_plate.3mf`, `cad/tiny_chain_model.3mf`
 
-Sources: `cad/tiny_necklace_split.scad` (printable tray/door; `face=` plain /
+Sources: `pendant.scad` (printable tray/door; `face=` plain /
 halo / halo2), `cad/tiny_necklace_lab.scad` (31 catalog faces, `design=`),
 fit proof `cad/tiny_necklace_fitcheck.scad`, viewer `cad/tiny_halo_viewer.html`.
 
