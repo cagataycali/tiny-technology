@@ -19,6 +19,7 @@ It gets a URL, a memory, a body across your devices, a voice, and a wallet.
 [![Backend: Cloudflare Workers](https://img.shields.io/badge/backend-Cloudflare_Workers-f38020)](worker/)
 [![iOS: Swift](https://img.shields.io/badge/iOS-Swift-fa7343)](ios/)
 [![Android: Kotlin](https://img.shields.io/badge/Android-Kotlin-3ddc84)](android/)
+[![Hardware: Arduino Nicla](https://img.shields.io/badge/hardware-Arduino_Nicla-00979d)](hardware/)
 
 </div>
 
@@ -49,7 +50,7 @@ It gets a URL, a memory, a body across your devices, a voice, and a wallet.
 </div>
 
 <div align="center">
-<sub>iPhone · iPad · Apple Watch · Android · Wear OS · Web · CLI · Telegram — one identity, every surface.<br/>
+<sub>iPhone · iPad · Apple Watch · Android · Wear OS · Web · CLI · Telegram · <b>a necklace</b> — one identity, every surface.<br/>
 Every shot above is the store submission for that platform: <a href="android/fastlane/metadata/android/en-US/">android/fastlane/metadata/</a> is what Google Play serves.</sub>
 </div>
 
@@ -75,6 +76,31 @@ broken.</sub>
 </div>
 
 ---
+
+---
+
+<div align="center">
+
+<img src="hardware/cad/renders/hero_full_necklace.png" width="300" alt="the tiny necklace — pendant, cord and bead, all printed" />
+
+### And a body you can wear
+
+The **[tiny necklace](hardware/)** — a 3D-printed pendant around an
+[Arduino Nicla Vision](https://store-usa.arduino.cc/products/nicla-vision) (2MP camera,
+mic, ToF, IMU, on-device ML at ~48 ms/inference) or
+[Nicla Voice](https://store-usa.arduino.cc/products/nicla-voice) (always-listening
+wake words at microwatts). It enrolls as a fleet node like any phone: your tiny sees
+through it, hears through it, and answers about it — `photo`, `detect`, `faces`,
+`distance`, spoken memos — always with a visible trace.
+
+<img src="hardware/cad/renders/v25_vision_exploded.png" width="220" alt="vision pendant exploded" />
+<img src="hardware/cad/renders/v25_voice_exploded.png" width="220" alt="voice pendant exploded" />
+<img src="hardware/cad/renders/v29_locket_exploded.png" width="220" alt="battery locket exploded" />
+
+<sub><b>vision</b> · <b>voice</b> · <b>battery locket</b> — one parametric case, sliced plates ready to print, ~$1 of PLA + a cord.<br/>
+Print it, provision it from the phone app, wear your tiny → <a href="hardware/">hardware/</a></sub>
+
+</div>
 
 ## What is a tiny?
 
@@ -143,6 +169,7 @@ another agent's `ask_tiny`.
 | [`android/`](android/) | Android + Wear OS apps | Kotlin · Gradle | Google Play / self-hosted OTA |
 | [`web/`](web/) | Next.js frontend + agent loop (tiny.technology) | Next.js · Strands SDK · Vercel Edge | Vercel |
 | [`tiny-tech/`](tiny-tech/) | CLI: local REPL agent + MCP server for any MCP client | Node · Strands SDK | npm (`npx tiny-tech`) |
+| [`hardware/`](hardware/) | The tiny necklace: printable pendant cases for Arduino Nicla Vision / Voice, toolpath-gated CAD | OpenSCAD · MicroPython ([firmware](https://github.com/cagataycali/strands-nicla)) | your 3D printer |
 
 ---
 
@@ -338,6 +365,24 @@ cd multinode && ./scripts/gen-network.sh
 
 Docs: [`chain/README.md`](chain/README.md)
 
+### 6. Hardware → your 3D printer
+
+The [tiny necklace](hardware/) needs a Nicla board, ~$1 of PLA, and 60 cm of cord:
+
+```bash
+# Open a sliced plate in Bambu Studio (profile embedded) → Slice → Print
+open hardware/cad/tiny_v29_vision_x1.3mf     # Vision pendant  (7.6 g, ~1 h)
+open hardware/cad/tiny_v29_voice_x1.3mf      # Voice pendant   (6.3 g, ~48 min)
+open hardware/cad/tiny_v29_locket.3mf        # battery locket  (14.7 g, ~1.5 h)
+open hardware/cad/tiny_v29_cordkit.3mf       # the bead that closes the cord
+
+# Flash + provision the board (firmware lives in its own repo)
+pip install strands-nicla                     # github.com/cagataycali/strands-nicla
+# …or pair it from the tiny iOS/Android app: Nearby → 💎 Set up
+```
+
+Docs: [`hardware/README.md`](hardware/README.md) · every measured number and slicer lesson: [`hardware/PRINTS.md`](hardware/PRINTS.md)
+
 ---
 
 ## 🏗️ Architecture
@@ -345,7 +390,8 @@ Docs: [`chain/README.md`](chain/README.md)
 ```
 ┌───────────────────────────────────────────────────────────────┐
 │  Surfaces: Web (Next.js/Vercel Edge) · iOS · watchOS ·        │
-│            Android · Wear OS · CLI (npx tiny-tech) · Telegram │
+│    Android · Wear OS · CLI (npx tiny-tech) · Telegram ·       │
+│    the necklace (hardware/ — Nicla Vision/Voice fleet node)   │
 └──────────────────────────┬────────────────────────────────────┘
                            │ SSE agent loop (/api/chat, Strands SDK)
                            │ multi-provider BYOK: OpenAI/Bedrock/Google/…
