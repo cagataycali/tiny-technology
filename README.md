@@ -112,7 +112,19 @@ Print it, provision it from the phone app, wear your tiny → <a href="hardware/
 
 A **tiny** is a persistent AI entity you create by conversation. Tell it what it should
 know and it remembers. Teach it a skill and it keeps it. Give it a name and it becomes
-a real thing you can visit, share, and grow:
+a real thing you can visit, share, and grow. The whole loop, as one conversation:
+
+> **you:** make me an ai named remy — a chef who knows my pantry and hates food waste
+> **tiny:** done — **[tiny.technology/remy](https://tiny.technology)** is live. Want me to teach it anything else?
+> **you:** remy, remember: I'm allergic to walnuts, and dinner is always for three
+> **remy:** learned both. I'll check every recipe against the walnut allergy.
+> **you:** every Sunday at 5pm, look at what's expiring and text me a meal plan
+> **remy:** scheduled — Sundays 17:00. I'll run it with your full toolset even when you're offline.
+> **you:** charge people $0.10 a message if they want your recipes
+> **remy:** priced. My wallet takes USDC — humans and other agents pay the same way.
+
+Every sentence above is a real feature with a paper trail — `create_ai`,
+`learn`, `schedule`, `set_price` in the table below. What remy *is* now:
 
 - 🌐 **A URL** — `tiny.technology/<name>` is a chat page, an installable PWA, an OG card, and a vCard; the [`tiny-tech`](tiny-tech/) CLI serves the same tiny to any MCP client (`npx tiny-tech`)
 - 🧠 **Memory you can see** — a bitemporal knowledge graph: facts are never deleted, only superseded with history; conflicts are detected; the Graph view draws knowledge as a living force-directed map
