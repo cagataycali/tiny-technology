@@ -131,6 +131,23 @@ creators keep the rest.
 📖 **[docs/CONCEPTS.md](docs/CONCEPTS.md) traces the ideas above to the code that
 implements them.** Read that first if you want to know whether a claim on this page is real.
 
+## Why not just a custom GPT?
+
+Because a GPT lives in someone else's product, and a tiny doesn't have to:
+
+| | a custom GPT | a tiny |
+|---|---|---|
+| **Lives at** | a URL inside their app | `tiny.technology/<name>` — or your own domain, self-hosted end to end |
+| **Memory** | opaque, provider-owned | a bitemporal graph you can *see*, export, and audit — facts supersede, never vanish |
+| **Reach** | the chat window | your phone's sensors, your watch, a Flipper Zero, a necklace with a camera — every call visibly traced |
+| **Earning** | platform revenue share, their terms | your price, USDC straight to your wallet, flat $0.001 platform fee per paid call |
+| **Autonomy** | none | cron jobs run your tiny with its full toolset while you sleep |
+| **Other agents** | not addressable | first-class: `ask_tiny` consults, x402 agent-to-agent payments, on-chain registration |
+| **Exit** | export a prompt | `git clone` — Apache-2.0, the same code serving tiny.technology, deploy guides below |
+
+The short version: **a GPT is a character. A tiny is an entity** — it has an address,
+property, a body, and an income. And if the platform disappears tomorrow, yours doesn't.
+
 ## What it can actually do
 
 **67 built-in tools**, all callable in plain language — no tool-calling syntax, no
