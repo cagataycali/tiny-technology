@@ -1,24 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="tiny">
-  <!-- tiny — static mark (no SMIL). For print, PPTX/PDF embeds, favicons, and any
-       renderer that drops animation. Same geometry as logo-mark.svg at rest. -->
-  <defs>
-    <radialGradient id="t-glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.85"/>
-      <stop offset="55%" stop-color="#00FF88" stop-opacity="0.22"/>
-      <stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="t-core" cx="50%" cy="45%" r="55%">
-      <stop offset="0%" stop-color="#eafff4"/>
-      <stop offset="45%" stop-color="#00FF88"/>
-      <stop offset="100%" stop-color="#00b45f"/>
-    </radialGradient>
-  </defs>
+  <!-- tiny — the drop, rest frame. Seven equal peers, no hub. Discrete at
+       rest by design (spacing 35.71 > fusion ~29.3), so the static mark
+       needs no filter and renders crisp anywhere. -->
   <rect width="120" height="120" rx="26" fill="#020604"/>
-  <circle cx="60" cy="60" r="34" fill="url(#t-glow)"/>
-  <circle cx="60" cy="18" r="4" fill="#00FF88"/>
-  <circle cx="102" cy="60" r="3" fill="#00FF88" opacity="0.8"/>
-  <circle cx="60" cy="102" r="3.4" fill="#7dffc0"/>
-  <circle cx="24" cy="44" r="2.6" fill="#00FF88" opacity="0.7"/>
-  <circle cx="96" cy="88" r="2.6" fill="#00FF88" opacity="0.7"/>
-  <circle cx="60" cy="60" r="15" fill="url(#t-core)"/>
+  <circle cx="42.15" cy="29.07" r="11.08" fill="#00FF88"/>
+  <circle cx="77.86" cy="29.07" r="11.08" fill="#00FF88"/>
+  <circle cx="95.71" cy="60.0" r="11.08" fill="#00FF88"/>
+  <circle cx="77.86" cy="90.93" r="11.08" fill="#00FF88"/>
+  <circle cx="42.15" cy="90.93" r="11.08" fill="#00FF88"/>
+  <circle cx="24.29" cy="60.0" r="11.08" fill="#00FF88"/>
+  <circle cx="60" cy="60" r="11.08" fill="#00FF88"/>
 </svg>

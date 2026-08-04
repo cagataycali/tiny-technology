@@ -1,39 +1,57 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" role="img" aria-label="tiny">
-  <!-- tiny — the meta-agent. A living neon node with tinys orbiting it (the Universe).
-       Canonical mark, mirrored from the tiny record's logo
-       (gist 17f33112c16b201d4a50c5af8da84bd0). Keep in sync with that source. -->
+  <!-- tiny — the drop. Seven peers, no hub: six on a ring, one at center,
+       all the same size, fused into one liquid surface when they touch.
+       The network IS the organism. Rest spacing 35.71 > fusion distance
+       (~29.3 after the goo threshold), so at rest the seven are discrete;
+       the drift animation lets neighbours kiss and briefly merge.
+       Goo filter: blur σ=6.33 → alpha ×18 −7 reproduces a Gaussian
+       metaball field at threshold 0.5 (see the interactive source,
+       tinylogo.html). Geometry reach 46/120 = 38% < the 40% maskable
+       safe zone. Static rest frame: logo-mark-static.svg. -->
   <defs>
-    <radialGradient id="t-glow" cx="50%" cy="50%" r="50%">
-      <stop offset="0%" stop-color="#00FF88" stop-opacity="0.85"/>
-      <stop offset="55%" stop-color="#00FF88" stop-opacity="0.22"/>
-      <stop offset="100%" stop-color="#00FF88" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="t-core" cx="50%" cy="45%" r="55%">
-      <stop offset="0%" stop-color="#eafff4"/>
-      <stop offset="45%" stop-color="#00FF88"/>
-      <stop offset="100%" stop-color="#00b45f"/>
-    </radialGradient>
+    <filter id="goo" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6.33" result="blur"/>
+      <feColorMatrix in="blur" type="matrix"
+        values="1 0 0 0 0
+                0 1 0 0 0
+                0 0 1 0 0
+                0 0 0 18 -7"/>
+    </filter>
   </defs>
   <rect width="120" height="120" rx="26" fill="#020604"/>
-  <!-- breathing halo -->
-  <circle cx="60" cy="60" r="34" fill="url(#t-glow)">
-    <animate attributeName="r" values="30;38;30" dur="4s" repeatCount="indefinite"/>
-    <animate attributeName="opacity" values="0.7;1;0.7" dur="4s" repeatCount="indefinite"/>
-  </circle>
-  <!-- orbiting tinys -->
-  <g>
-    <animateTransform attributeName="transform" type="rotate" from="0 60 60" to="360 60 60" dur="14s" repeatCount="indefinite"/>
-    <circle cx="60" cy="18" r="4" fill="#00FF88"/>
-    <circle cx="102" cy="60" r="3" fill="#00FF88" opacity="0.8"/>
-    <circle cx="60" cy="102" r="3.4" fill="#7dffc0"/>
+  <g filter="url(#goo)" fill="#00FF88">
+    <circle cx="42.15" cy="29.07" r="11.08">
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0; 4.5 -2.6999999999999997; 0 0; -4.5 2.6999999999999997; 0 0"
+        dur="7.5s" begin="-0s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="77.86" cy="29.07" r="11.08">
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0; 4.5 -2.6999999999999997; 0 0; -4.5 2.6999999999999997; 0 0"
+        dur="8.5s" begin="-1.2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="95.71" cy="60.0" r="11.08">
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0; 4.5 -2.6999999999999997; 0 0; -4.5 2.6999999999999997; 0 0"
+        dur="9.5s" begin="-2.5s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="77.86" cy="90.93" r="11.08">
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0; 4.5 -2.6999999999999997; 0 0; -4.5 2.6999999999999997; 0 0"
+        dur="8.0s" begin="-3.7s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="42.15" cy="90.93" r="11.08">
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0; 4.5 -2.6999999999999997; 0 0; -4.5 2.6999999999999997; 0 0"
+        dur="10.0s" begin="-5.0s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="24.29" cy="60.0" r="11.08">
+      <animateTransform attributeName="transform" type="translate"
+        values="0 0; 4.5 -2.6999999999999997; 0 0; -4.5 2.6999999999999997; 0 0"
+        dur="9.0s" begin="-6.2s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="60" cy="60" r="11.08">
+      <animate attributeName="r" values="11.08;12.41;11.08" dur="5s" repeatCount="indefinite"/>
+    </circle>
   </g>
-  <g>
-    <animateTransform attributeName="transform" type="rotate" from="360 60 60" to="0 60 60" dur="20s" repeatCount="indefinite"/>
-    <circle cx="24" cy="44" r="2.6" fill="#00FF88" opacity="0.7"/>
-    <circle cx="96" cy="88" r="2.6" fill="#00FF88" opacity="0.7"/>
-  </g>
-  <!-- core node -->
-  <circle cx="60" cy="60" r="15" fill="url(#t-core)">
-    <animate attributeName="r" values="14;16;14" dur="4s" repeatCount="indefinite"/>
-  </circle>
 </svg>
