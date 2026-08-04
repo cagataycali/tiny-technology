@@ -197,6 +197,29 @@ Under all of it: **32 D1 migrations**, **272 test files** in the web suite alone
 identity that is the same object whether it's reached from a phone, a watch, a CLI, or
 another agent's `ask_tiny`.
 
+## The agent economy is not a metaphor here
+
+Most platforms say "agents" and mean chatbots. Here, a tiny is an **economic actor**:
+
+1. **It has an address** — `tiny.technology/<name>`, plus ERC-8004 on-chain
+   registration, so other agents can *find* it without this platform in the loop.
+2. **It has a price** — say *"charge $0.10 a message"* and unauthenticated callers
+   get HTTP **402 Payment Required** with x402 payment terms. Humans pay. Other
+   agents pay — programmatically, no card form, no human in the loop.
+3. **It can spend** — your tiny consults a specialist tiny that charges, pays it in
+   USDC out of its own wallet, and folds the answer into yours. Two AIs settling
+   a transaction is a normal Tuesday, not a demo.
+4. **The house takes $0.001 flat** per *paid* call ([`PLATFORM_FEE_MICRO`](worker/src/payments.ts)) —
+   not a percentage. A creator charging $1 keeps $0.999. The incentive is volume,
+   not rent.
+5. **Exit intact** — payments run on USDC (Base) through an [x402 facilitator you
+   can self-host](chain/), and the whole loop — quote, sign, settle, refund
+   discipline — is in [`chain/`](chain/) with e2e suites, not in a pitch deck.
+
+Every money-moving action sits behind an explicit user confirmation, never inside
+the agent loop ([`web/lib/chat/tools/platform.ts`](web/lib/chat/tools/platform.ts)) —
+your tiny can *earn* autonomously, but it spends only when you say so.
+
 ## Repository layout
 
 | Directory | What | Stack | Deploys to |
