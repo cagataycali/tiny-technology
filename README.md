@@ -220,20 +220,6 @@ Every money-moving action sits behind an explicit user confirmation, never insid
 the agent loop ([`web/lib/chat/tools/platform.ts`](web/lib/chat/tools/platform.ts)) —
 your tiny can *earn* autonomously, but it spends only when you say so.
 
-## Repository layout
-
-| Directory | What | Stack | Deploys to |
-|---|---|---|---|
-| [`worker/`](worker/) | Backend: identity, memory, universe RAG, payments, jobs | Cloudflare Worker · D1 · KV · Vectorize | Cloudflare |
-| [`chain/`](chain/) | Contracts, x402 facilitator, QBFT validator network | Solidity · Foundry · Node | Base / tiny chain |
-| [`ios/`](ios/) | iPhone, iPad, Apple Watch apps + widgets | Swift · XcodeGen | App Store / TestFlight / OTA |
-| [`android/`](android/) | Android + Wear OS apps | Kotlin · Gradle | Google Play / self-hosted OTA |
-| [`web/`](web/) | Next.js frontend + agent loop (tiny.technology) | Next.js · Strands SDK · Vercel Edge | Vercel |
-| [`tiny-tech/`](tiny-tech/) | CLI: local REPL agent + MCP server for any MCP client | Node · Strands SDK | npm (`npx tiny-tech`) |
-| [`hardware/`](hardware/) | The tiny necklace: printable pendant cases for Arduino Nicla Vision / Voice, toolpath-gated CAD | OpenSCAD · MicroPython ([firmware](https://github.com/cagataycali/strands-nicla)) | your 3D printer |
-
----
-
 ## ⚡ Try it
 
 Three doors, by effort:
@@ -248,6 +234,20 @@ npx tiny-tech login && npx tiny-tech
 
 # 5 minutes — hack on the platform itself:
 ```
+
+## Repository layout
+
+| Directory | What | Stack | Deploys to |
+|---|---|---|---|
+| [`worker/`](worker/) | Backend: identity, memory, universe RAG, payments, jobs | Cloudflare Worker · D1 · KV · Vectorize | Cloudflare |
+| [`chain/`](chain/) | Contracts, x402 facilitator, QBFT validator network | Solidity · Foundry · Node | Base / tiny chain |
+| [`ios/`](ios/) | iPhone, iPad, Apple Watch apps + widgets | Swift · XcodeGen | App Store / TestFlight / OTA |
+| [`android/`](android/) | Android + Wear OS apps | Kotlin · Gradle | Google Play / self-hosted OTA |
+| [`web/`](web/) | Next.js frontend + agent loop (tiny.technology) | Next.js · Strands SDK · Vercel Edge | Vercel |
+| [`tiny-tech/`](tiny-tech/) | CLI: local REPL agent + MCP server for any MCP client | Node · Strands SDK | npm (`npx tiny-tech`) |
+| [`hardware/`](hardware/) | The tiny necklace: printable pendant cases for Arduino Nicla Vision / Voice, toolpath-gated CAD | OpenSCAD · MicroPython ([firmware](https://github.com/cagataycali/strands-nicla)) | your 3D printer |
+
+---
 
 ## Run it locally
 
@@ -541,6 +541,7 @@ if yours isn't, that's a bug worth an issue before anything else. The
 ---
 
 <div align="center">
-<sub><b>Your AI shouldn't live in someone else's product. Make one that's yours.</b></sub><br/>
-<sub><a href="https://tiny.technology">tiny.technology</a></sub>
+<sub><b>Your AI shouldn't live in someone else's product.</b><br/>
+Make one that's yours — with a name, a memory, a body, and an income.</sub><br/><br/>
+<sub><a href="https://tiny.technology"><b>tiny.technology</b></a> — say "make me an AI" and see.</sub>
 </div>
