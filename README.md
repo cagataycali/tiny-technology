@@ -199,9 +199,22 @@ another agent's `ask_tiny`.
 
 ---
 
-## ⚡ Run it locally
+## ⚡ Try it
 
-The fastest way to see it working is the web app:
+Three doors, by effort:
+
+```bash
+# 0 seconds — it's live. Say "make me an AI named <name>".
+open https://tiny.technology
+
+# 10 seconds — your tiny in the terminal, or as an MCP server
+# for Claude Code / Cursor / Codex. No clone, no env vars.
+npx tiny-tech login && npx tiny-tech
+
+# 5 minutes — hack on the platform itself:
+```
+
+## Run it locally
 
 ```bash
 git clone https://github.com/cagataycali/tiny-technology
@@ -284,7 +297,7 @@ Docs: [`worker/README.md`](worker/README.md)
 
 The Next.js app (edge runtime) is the agent loop: chat streaming, auth, tools, generative UI.
 
-Local dev is the [⚡ Run it locally](#-run-it-locally) section above. Deploying:
+Local dev is the [Run it locally](#run-it-locally) section above. Deploying:
 
 ```bash
 cd web
