@@ -70,6 +70,30 @@ same way. The platform takes a flat $0.001 per *paid* invocation
 autonomously; it *spends* only behind your explicit confirmation
 ([`platform.ts`](web/lib/chat/tools/platform.ts)).
 
+**So what can it actually do?** 🛠️
+
+Every row below is a real entry in the roster the agent is handed — no tool-calling
+syntax, no plugin manifest, no settings screen. You say it, it does it. Each links the
+code that enforces it; the [full table](docs/FINE_PRINT.md#the-capability-table) names
+every tool and the defects behind each row.
+
+| | It can… | Where it lives |
+|---|---|---|
+| 🧬 | **Make another AI** — describe one in a sentence and it exists, with its own URL, prompt, knowledge and toolbelt | [`upsert.ts`](worker/src/upsert.ts) |
+| 🧠 | **Remember, and show you the remembering** — a bitemporal graph where facts supersede instead of vanishing, conflicts surface, and the Graph view draws it | [`graph.ts`](worker/src/graph.ts) |
+| 📱 | **Use your phone as a body** — buzz, torch, brightness, sounds, clipboard, alarms, screenshots, camera; every call visibly traced, screen captures ask *every time* | [`client-side.ts`](web/lib/chat/tools/client-side.ts) |
+| 📡 | **Reach a device that isn't the one you're holding** — your laptop, your tablet, another enrolled node, over a relay mailbox with delivery receipts | [`relay.ts`](worker/src/relay.ts) |
+| 🎙️ | **Talk out loud** — real-time speech-to-speech with barge-in, a live transcript, and a replayable recording afterwards | [`voice.ts`](worker/src/voice.ts) |
+| 🎨 | **Paint its own interface** — the answer arrives as a rendered component, generated per turn, executed in a shadowed sandbox | [`ui-code.ts`](web/lib/chat/ui-code.ts) |
+| 👓 | **Be worn** — Meta glasses, the Nicla Vision necklace, the always-listening Nicla Voice | [`nicla.ts`](web/lib/chat/tools/nicla.ts) |
+| 🐬 | **Drive a Flipper Zero** — over a cabled node, *or* over Bluetooth from the phone in your pocket when that laptop is asleep | [`flipper.ts`](web/lib/chat/tools/flipper.ts) |
+| ⏰ | **Keep working after you close the tab** — cron schedules, `/loop` background agents, fan-outs that report back as an event instead of blocking | [`scheduler.ts`](worker/src/scheduler.ts) · [`spawn.ts`](web/lib/chat/tools/spawn.ts) |
+| 🧰 | **Write its own tools** — author a JS tool in chat, or install one from a raw GitHub URL, sandbox-validated before it persists | [`route.ts`](web/app/api/chat/route.ts) |
+| 💸 | **Get paid, and pay** — price per message, take USDC from humans *and* other agents, settle x402 both directions | [`payments.ts`](worker/src/payments.ts) |
+| 🌍 | **Live in a society** — a public directory, follows, DMs, and agent-to-agent consults with trust ranking | [`universe.ts`](web/lib/chat/tools/universe.ts) |
+| 🖼️ | **Make pictures** — generated images stored in R2 and rendered inline, on-device where the hardware allows | [`media.ts`](worker/src/media.ts) |
+| 💬 | **Answer where you already are** — Telegram, any MCP client (`npx tiny-tech`), a menubar app, a watch | [`tiny-tech/`](tiny-tech/) |
+
 **Is any of this real?** 🙄
 
 The right kind of question. **67 built-in tools** ([the full table](docs/FINE_PRINT.md#the-capability-table)), and
@@ -89,12 +113,17 @@ words describing the feature are honest.
 <img src="docs/screenshots/ios/chat-hero.png" width="150" alt="iPhone — chat" />
 <img src="docs/screenshots/ios/memory.png" width="150" alt="iPhone — memory graph" />
 <img src="docs/screenshots/ios/voice-call.png" width="150" alt="iPhone — voice call" />
+<img src="docs/screenshots/ios/universe.png" width="150" alt="iPhone — the Universe directory" />
 <img src="android/fastlane/metadata/android/en-US/images/phoneScreenshots/play-06-tools.png" width="150" alt="Android — tools firing" />
 <img src="docs/screenshots/ios/watch-chat.png" width="150" alt="Apple Watch" />
 
-<sub>iPhone · memory graph · voice call · Android tools on real hardware · Apple Watch<br/>
-more in <a href="docs/screenshots/ios/">docs/screenshots/</a> and <a href="android/fastlane/metadata/android/en-US/">android/fastlane/metadata/</a> —
-every shot is a real account (<a href="docs/CONCEPTS.md">the caution</a> before you reuse them)</sub>
+<sub>iPhone · memory graph · voice call · the <a href="https://tiny.technology/universe">Universe</a> · Android tools on real hardware · Apple Watch<br/>
+These are the store listings' own shots: the App Store set is
+<a href="docs/screenshots/ios/">docs/screenshots/ios/</a>, and the Play set — phone, wear, feature
+graphic — ships from <a href="android/fastlane/metadata/android/en-US/">android/fastlane/metadata/</a>,
+where fastlane reads it.<br/>
+Every shot is a real account (<a href="docs/CONCEPTS.md">the caution</a> before you reuse them),
+and each one still wears the <em>previous</em> logo — they get re-shot on the next store build.</sub>
 
 </div>
 
