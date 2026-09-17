@@ -510,6 +510,11 @@ private fun DepositCard(
                     value = linkAddr, onValueChange = { linkAddr = it },
                     placeholder = { Text("0xYourAddress") },
                     singleLine = true, textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    // ⚠️ A payout address is the one field where a silently rewritten
+                    // character sends money somewhere unrecoverable. The mono typeface
+                    // above is what the user READS; this is what the keyboard is TOLD
+                    // (iOS Wallet.swift:449).
+                    keyboardOptions = FieldOptions.identifier,
                     modifier = Modifier.weight(1f),
                 )
                 Spacer(Modifier.width(8.dp))
@@ -552,6 +557,7 @@ private fun DepositCard(
                 value = claimTx, onValueChange = { claimTx = it },
                 placeholder = { Text("0xTransactionHash") },
                 singleLine = true, textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                keyboardOptions = FieldOptions.identifier,
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))

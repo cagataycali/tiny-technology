@@ -42,6 +42,13 @@ class PaySettledTest {
         assertNull(PaySettled.of(WalletCore.SettleResult.Failed("network error", needsFunds = false)))
     }
 
+    @Test fun `an unconfirmed payment is NOT persisted — it has no outcome yet`() {
+        // Unknown means the answer was lost, not that an outcome was reached. Freezing
+        // it would bring back a "couldn't confirm" card the user can no longer act on
+        // after the TTL; re-deriving the approval gate is safe by the jti dedup.
+        assertNull(PaySettled.of(WalletCore.SettleResult.Unknown))
+    }
+
     // ── Round-trip back into the card's live state ──
 
     @Test fun `paid seeds the PAID phase and a Paid SettleResult`() {

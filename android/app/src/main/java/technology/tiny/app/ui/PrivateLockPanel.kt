@@ -94,7 +94,11 @@ fun PrivateLockPanel(
                 singleLine = true,
                 shape = RoundedCornerShape(22.dp),
                 visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Go),
+                // ⚠️ Was `KeyboardOptions(imeAction = ImeAction.Go)` — which left
+                // autoCorrectEnabled null, i.e. TRUE, and left the inputType ordinary
+                // despite the mask above. An access key is exactly the string an IME
+                // must not learn.
+                keyboardOptions = FieldOptions.secret(ImeAction.Go),
                 keyboardActions = KeyboardActions(onGo = { if (canUnlock) onUnlock(key) }),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = accent.copy(alpha = 0.55f),

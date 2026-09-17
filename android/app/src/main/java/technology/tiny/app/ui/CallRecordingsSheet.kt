@@ -37,7 +37,155 @@ internal data class CallRecording(
     val tiny: String,
     val startedAt: Long,
     val durationMs: Long,
+    /** How many PCM segments the call journaled (`voice_sessions.segment_count`).
+     *  Carried as a NUMBER, not the `> 0` boolean the filter uses it as: past
+     *  ~30 segments the stitch cannot fit its 40MB cap, so this is the one field
+     *  that predicts a refusal before the person taps play. See
+     *  [CallRecordingRefusal.tooLong]. */
+    val segmentCount: Long,
+    /** ⚠️ Why the call ended, already translated by [CallOutcome] — null on a
+     *  clean hangup. Carried because [CallRecordingsLoad.rows] ADMITS
+     *  `status == "error"` rows and without this a call the voice service
+     *  dropped drew exactly like one the person ended themselves. The reason
+     *  reaches the app already (VOICE_LIST_SQL selects `error`,
+     *  /api/voice/sessions passes rows through verbatim); it was dropped at
+     *  this type. Translated at construction, so the raw worker-tail
+     *  diagnostic (`upstream closed: 1011 …`) never reaches a Composable. */
+    val outcome: String?,
 )
+
+/**
+ * 🔴 Why a call ended, in the language of the person who asks — the Kotlin twin
+ * of `lib/voice/outcome.ts` (iOS `CallOutcome` is the third).
+ *
+ * The recorded reason is a worker-tail diagnostic, and it stays that way in the
+ * column on purpose: the close code and the exception text are what you want
+ * when debugging. Showing one to the owner of the call would be the same
+ * wrong-surface mistake pointing the other way, so the translation happens
+ * here, where the reader is known.
+ *
+ * ⚠️ AN UNRECOGNISED REASON IS NOT SILENCE. A reason this map hasn't seen — a
+ * new teardown arm in the worker, or a row from before the reason was wired —
+ * must still say the call did not end normally, without inventing a cause.
+ * Saying nothing is how the reason lost its reader in the first place.
+ */
+/**
+ * 🔇 Why a recording won't play — the Kotlin twin of `lib/voice/playback.ts`.
+ *
+ * `/voice/recording/:id` is a route that STITCHES segments on first listen, and
+ * it can decline: 409 still live, 413 over the 40MB stitch cap, 404 nothing
+ * journaled, 424 no R2. This sheet handed that URL to `MediaPlayer` with
+ * `setOnPreparedListener` and `setOnCompletionListener` and NO
+ * `setOnErrorListener` — and `prepareAsync` reports failure asynchronously, so
+ * the enclosing `runCatching` cannot see it (nothing throws). The row was left
+ * mid-play forever, with the reason discarded unread.
+ *
+ * ⚠️ This sheet's LOAD path already learned exactly this, and says so: "`app.api`,
+ * not a bare HttpURLConnection. Reaching past the house client is what threw the
+ * status away." The play path then had no error channel at all.
+ */
+internal object CallRecordingRefusal {
+    /** The generic answer for a refusal we can't read — and for a `MediaPlayer`
+     *  error, which carries integer codes and never a body. All three clients
+     *  share this sentence; the pins assert they agree. */
+    const val UNKNOWN = "couldn't play this recording"
+
+    /** ⚠️ KEYED ON THE WORKER'S OWN LITERALS — `voice-playback-refusal.test.ts`
+     *  extracts every `json({ error: … }, 4xx)` that `voiceRecording` can return
+     *  from `src/voice.ts` and proves this list covers them, so a sixth refusal
+     *  added upstream fails a suite instead of quietly falling to the generic
+     *  sentence. */
+    private val REFUSALS = listOf(
+        "call still in progress" to "this call is still going — reload in a moment",
+        "call too long to stitch" to "this call is too long to replay in one piece",
+        "no replay journaled for this session" to "this call wasn't recorded",
+        "no audio journaled" to "this call's audio wasn't saved",
+        "media store not provisioned" to "recordings are unavailable right now",
+        // ⚠️ Needs a client bug to reach (the URL is built from a row id), but the
+        // map's claim is that it covers EVERY refusal — an exception "because that
+        // one can't happen" is how the next arm gets skipped too. Shares the
+        // generic sentence deliberately: there is nothing useful to tell someone
+        // about a malformed URL they never typed.
+        "session id required" to UNKNOWN,
+    )
+
+    /** Worker `SEGMENT_BYTES`, and the stitch's 40MB worker-memory guard. */
+    private const val SEGMENT_BYTES = 1_440_000L
+    private const val STITCH_BYTE_CAP = 40_000_000L
+
+    /**
+     * Will this call's stitch CERTAINLY be refused for size?
+     *
+     * ⚠️ One-sided on purpose: "certainly refused", never "certainly fine".
+     * `segment_count` sums both directions and only the final segment per
+     * direction may be short, so `(n - 2) * SEGMENT_BYTES` is the guaranteed
+     * floor on the stitched bytes. At 30 that floor exceeds the cap; at 29 it
+     * does not. A row under the line is NOT promised a recording — every other
+     * refusal is invisible from here — so this only ever adds a note.
+     */
+    fun tooLong(segmentCount: Long): Boolean {
+        if (segmentCount < 3) return false
+        return (segmentCount - 2) * SEGMENT_BYTES > STITCH_BYTE_CAP
+    }
+
+    /**
+     * What to say when a recording won't play. ALWAYS a sentence.
+     *
+     * ⚠️ Never null, and that is the difference from [CallOutcome.text]: that one
+     * describes a call, where "nothing to say" is the common and correct answer.
+     * This is called only when a play attempt FAILED, and a failed play that says
+     * nothing is the entire defect.
+     */
+    fun text(reason: String?): String {
+        val r = (reason ?: "").trim()
+        if (r.isEmpty()) return UNKNOWN
+        // `contains`, not equality: a reason that reaches a client at all arrives
+        // wrapped in the platform's own description of the failure.
+        for ((needle, sentence) in REFUSALS) if (r.contains(needle)) return sentence
+        return UNKNOWN
+    }
+}
+
+internal object CallOutcome {
+    /** The generic answer for an abnormal end whose reason we can't read. All
+     *  three clients share this sentence; the pins assert they agree. */
+    const val UNKNOWN = "ended unexpectedly"
+
+    /** ⚠️ KEYED ON THE WORKER'S OWN LITERALS — `voice-call-outcome.test.ts`
+     *  extracts every string `VoiceSession.teardown` can receive from
+     *  `src/voice.ts` and proves this list covers them, so a sixth arm added
+     *  upstream fails a suite instead of quietly falling to the generic
+     *  sentence. The two prefix entries drop the diagnostic tail on purpose. */
+    private val REASONS = listOf(
+        Triple("upstream closed:", "the voice service closed the connection", true),
+        Triple("upstream error:", "the voice service dropped", true),
+        Triple("the client socket errored", "this device's connection dropped", false),
+        Triple("the client went silent", "we stopped hearing this device", false),
+        Triple("the call hit the maximum length", "the call hit the maximum length", false),
+    )
+
+    /**
+     * What to say about a finished call, or null when there is nothing to say.
+     *
+     * Null means "this ended the way calls end" — a clean row with no recorded
+     * reason. A badge on every row would say nothing; this one appears exactly
+     * when the call did something the person didn't ask for.
+     *
+     * ⚠️ `status == "error"` with no reason is NOT null: every error row written
+     * before the reason was wired looks like that, and the status alone is more
+     * than the row said yesterday.
+     */
+    fun text(status: String?, error: String?): String? {
+        val reason = (error ?: "").trim()
+        if (reason.isNotEmpty()) {
+            for ((needle, text, isPrefix) in REASONS) {
+                if (if (isPrefix) reason.startsWith(needle) else reason == needle) return text
+            }
+            return UNKNOWN
+        }
+        return if (status == "error") UNKNOWN else null
+    }
+}
 
 /**
  * 🔴 The rows GET /api/voice/sessions yields, or null with a reason — the split
@@ -78,8 +226,14 @@ internal object CallRecordingsLoad {
             val status = o.optString("status")
             val dur = o.optLong("duration_ms")
             // Only finished calls stitch (live ones 409); hide sub-2s pocket dials
-            // and zero-segment rows (no audio journaled — outage casualties; their
-            // stitch 404s, the row is dead).
+            // and zero-segment rows.
+            // ⚠️ A zero count is "nothing we can offer", NOT "no audio exists".
+            // Teardown's counters live only in the Durable Object's memory, so a
+            // teardown on a fresh instance used to overwrite a real count with 0
+            // while the PCM segments sat in R2 intact (fixed worker-side: the row
+            // update is monotonic now). The filter is still right — a 0 row has no
+            // mix markers, so its stitch really does 404 — but do not read it as
+            // proof the call was lost.
             if ((status == "ended" || status == "error") && dur > 2_000 && o.optLong("segment_count") > 0) {
                 out.add(
                     CallRecording(
@@ -87,6 +241,13 @@ internal object CallRecordingsLoad {
                         tiny = o.optString("tiny_name").ifBlank { "tiny" },
                         startedAt = o.optLong("started_at"),
                         durationMs = dur,
+                        // ⚠️ `optString` returns "" for a JSON null AND for an
+                        // absent key, which is exactly what `CallOutcome.text`
+                        // treats as "no reason recorded" — so a legacy row and
+                        // a clean hangup both fall to the status check, which
+                        // is the intent. Do not "fix" this into a null.
+                        outcome = CallOutcome.text(status, o.optString("error")),
+                        segmentCount = o.optLong("segment_count"),
                     ),
                 )
             }
@@ -125,6 +286,10 @@ fun CallRecordingsSheet(app: TinyApp, onDismiss: () -> Unit) {
     var elapsedMs by remember { mutableStateOf(0f) }
     var totalMs by remember { mutableStateOf(0f) }
     var scrubbing by remember { mutableStateOf(false) }
+    // Why a play failed, per call id. `prepareAsync` reports failure into
+    // `setOnErrorListener` — which this sheet did not register, so a refusal
+    // (413 over the stitch cap, 409 still live) left the row mid-play forever.
+    var playError by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
     val player = remember { MediaPlayer() }
     DisposableEffect(Unit) { onDispose { player.release() } }
 
@@ -188,6 +353,24 @@ fun CallRecordingsSheet(app: TinyApp, onDismiss: () -> Unit) {
             player.setDataSource("https://plugin.tiny.technology/voice/recording/${call.id}")
             player.setOnPreparedListener { it.start() }
             player.setOnCompletionListener { playingId = null }
+            // ⚠️ THE ERROR CHANNEL, and it must be registered BEFORE
+            // `prepareAsync`. `prepareAsync` reports a refusal asynchronously —
+            // nothing throws — so the `runCatching` around this block never saw
+            // it and the row stayed mid-play with a pause glyph over a transport
+            // at 0:00. MediaPlayer yields integer codes and no body, so the
+            // sentence here is the generic one; the diagnosis a person can act on
+            // (too long to stitch) comes from `segmentCount` on the row instead.
+            player.setOnErrorListener { _, _, _ ->
+                playError = playError + (call.id to CallRecordingRefusal.text(null))
+                playingId = null
+                // true = handled; false would ALSO invoke the completion
+                // listener, which would report a failed play as a finished one.
+                true
+            }
+            // Cleared BEFORE the prepare, never after: the listener above can
+            // fire during `prepareAsync`, and clearing afterwards would erase the
+            // very sentence it just recorded.
+            playError = playError - call.id
             player.prepareAsync()
             elapsedMs = 0f
             totalMs = call.durationMs.toFloat().coerceAtLeast(1f)
@@ -257,6 +440,41 @@ fun CallRecordingsSheet(app: TinyApp, onDismiss: () -> Unit) {
                                     style = MaterialTheme.typography.labelSmall,
                                     color = TinyGray,
                                 )
+                                // Why the call ended, when it didn't end the way
+                                // calls end. Absent on a clean hangup — a badge on
+                                // every row says nothing. The duration just above
+                                // is why this matters: a 0:20 row reads as a short
+                                // call, so "the service dropped 20 seconds in" has
+                                // to be ON the row. Already translated; the raw
+                                // worker-tail text never reaches here.
+                                call.outcome?.let { why ->
+                                    Text(
+                                        "⚠️ $why",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                }
+                                // ⚠️ Why the play failed — because MediaPlayer
+                                // cannot say. Its refusal arrived in a listener
+                                // this sheet never registered, so the row sat
+                                // mid-play with nothing explaining it.
+                                val why = playError[call.id]
+                                if (why != null) {
+                                    Text(
+                                        "⚠️ $why",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.error,
+                                    )
+                                } else if (CallRecordingRefusal.tooLong(call.segmentCount)) {
+                                    // Knowable before the tap: the count is
+                                    // already on the row and ~30 segments cannot
+                                    // fit the 40MB stitch cap.
+                                    Text(
+                                        "⚠️ this call is too long to replay in one piece",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = TinyGray,
+                                    )
+                                }
                             }
                             // Share the episode — the same public-but-unguessable
                             // WAV URL the player streams (iOS ShareLink parity).

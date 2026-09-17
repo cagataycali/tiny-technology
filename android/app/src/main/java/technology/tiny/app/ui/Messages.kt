@@ -28,7 +28,17 @@ import technology.tiny.app.TinyApp
 import technology.tiny.app.ui.theme.TinyGray
 
 data class DmThread(val login: String, val name: String?, val avatar: String, val unread: Int, val lastBody: String, val lastAt: Long)
-data class DmMessage(val id: String, val direction: String, val body: String, val viaTiny: String?, val created: Long = 0L)
+data class DmMessage(
+    val id: String,
+    val direction: String,
+    val body: String,
+    val viaTiny: String?,
+    val created: Long = 0L,
+    // 📎 Photos / clips / voice notes (migration 0031). Defaulted so nothing that
+    // builds a text-only DM has to say "and no attachments" — and so a message
+    // whose attachments row fails to parse still shows its words.
+    val attachments: List<DmAttachment> = emptyList(),
+)
 
 /**
  * The under-bubble meta line for a DM — relative age, then "· via <tiny>" when the
@@ -298,6 +308,18 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
     var draft by androidx.compose.runtime.saveable.rememberSaveable(login) { mutableStateOf("") }
     var sendError by remember { mutableStateOf<String?>(null) }
     var sending by remember { mutableStateOf(false) }
+    // 📎 Staged photos/clips/voice notes, KEYED BY LOGIN for exactly the reason the
+    // draft is: an unkeyed composer would carry a photo picked for A into a send to
+    // B, and a DM cannot be unsent. NOT rememberSaveable — a Bundle can't hold two
+    // megabytes of JPEG, and re-picking is cheap next to a TransactionTooLarge.
+    val composer = remember(login) { DmComposerState() }
+    val media = rememberDmMedia(app, composer)
+    // Leaving the thread must close the mic. `remember(login)` hands out a FRESH
+    // composer on a peer jump, so without this the old one's AudioRecord keeps the
+    // hardware — a recording nobody can see, still holding the mic.
+    androidx.compose.runtime.DisposableEffect(composer) {
+        onDispose { composer.stopRecording(discard = true) }
+    }
     val scope = rememberCoroutineScope()
     val listState = androidx.compose.foundation.lazy.rememberLazyListState()
     // One clock for every bubble's relative age, taken at composition (a thread
@@ -334,6 +356,7 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
                         body = m.optString("body"),
                         viaTiny = m.optString("viaTiny").takeIf { it.isNotEmpty() },
                         created = m.optLong("created"), // unix seconds (worker messages.ts)
+                        attachments = dmAttachments(m.optJSONArray("attachments")),
                     )
                 }
             }
@@ -341,18 +364,27 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
     }
     fun send() {
         val body = draft.trim()
-        if (body.isEmpty() || sending) return
+        // A photo with no caption IS a message (`decideDmPayload` allows an empty
+        // body when attachments are present), so emptiness alone no longer blocks —
+        // only emptiness of BOTH halves does.
+        if ((body.isEmpty() && composer.staged.isEmpty()) || sending) return
+        // Never while an upload is in flight or has failed: the DM would arrive
+        // without the photo the sender watched themselves attach, and it cannot be
+        // unsent. Says which of the two it is, and what to do about it.
+        composer.blockingReason()?.let { sendError = it; return }
         // State the real reason before the round-trip: the server's 400 would
         // surface as "send failed — try again", inviting a retry that can't work.
         dmSendRefusal(body)?.let { sendError = it; return }
+        val attachments = composer.ready()
         sending = true; sendError = null
         scope.launch {
             val res = runCatching {
-                app.api.postJson("/api/messages", JSONObject().put("to", login).put("message", body))
+                app.api.postJson("/api/messages", dmSendBody(login, body, attachments))
             }.getOrNull()
             sending = false
             if (res != null && res.optInt("_status", 200) < 400) {
                 draft = "" // clear only on success — draft survives failures
+                composer.clear() // and so do the attachments, for the same reason
                 reload()
             } else {
                 sendError = "send failed — try again"
@@ -428,7 +460,15 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier.widthIn(max = 280.dp),
                     ) {
-                        Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
+                        Column(
+                            Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            // 📎 Above the words: with no caption the attachment IS the
+                            // message, and with one the words read as a caption only when
+                            // they follow what they caption (web + iOS both order it this
+                            // way). Renders nothing at all when there are none.
+                            DmAttachmentColumn(m.attachments)
                             // A DM is raw user free-text, NOT markdown, so it skips the
                             // ProseText path that .bidi()'s every line — an Arabic/Hebrew
                             // DM would render forced-LTR (mis-placed trailing punctuation,
@@ -437,7 +477,11 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
                             // Compose twin of web's dir="auto" (c113 MessagesHUD.tsx:513) +
                             // iOS's native AttributedString bidi. Matches the markdown
                             // bubble's own per-line .bidi() (Markdown.kt:190-217).
-                            Text(m.body, style = MaterialTheme.typography.bodyLarge.bidi())
+                            // Skipped when empty: a caption-less photo would otherwise
+                            // carry an invisible line of padding under it.
+                            if (m.body.isNotEmpty()) {
+                                Text(m.body, style = MaterialTheme.typography.bodyLarge.bidi())
+                            }
                             // Meta line "<age> · via <tiny>" (iOS Messages.swift:228 /
                             // web MessagesHUD.tsx:506). 60% of the bubble's own content
                             // color so it reads on both the accent (sent) and surface
@@ -453,11 +497,29 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
             }
         }
         sendError?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.labelSmall) }
+        // 📎 An attachment refusal is not a send failure — it is orange, not red,
+        // because nothing was attempted and nothing was lost. Every one of these
+        // names the file, the number it broke and the fix (see DmMedia.kt).
+        composer.error?.let {
+            Text(
+                it,
+                color = androidx.compose.ui.graphics.Color(0xFFFF9F0A),
+                style = MaterialTheme.typography.labelSmall,
+            )
+        }
+        DmRecordingBar(composer, onDiscard = media.discardRecording, onStop = media.stopRecording)
+        DmStagedStrip(composer, onRetry = media.retry)
         Row(verticalAlignment = Alignment.Bottom) {
+            DmAttachControls(composer, media)
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
                 placeholder = { Text("message @$login…") },
+                // Prose, same as the main composer (MainActivity.kt) — iOS's DM field
+                // (Messages.swift:487) states nothing and so gets SwiftUI's .sentences,
+                // while Compose's default is None: the identical divergence, one screen
+                // over. A DM is a sentence, not an identifier.
+                keyboardOptions = FieldOptions.prose,
                 // Hardware/Bluetooth-keyboard Enter sends; Shift+Enter inserts a newline
                 // (web + the main composer c74 + iOS DM composer 15c30e6 all do this).
                 modifier = Modifier.weight(1f).onPreviewKeyEvent { e ->
@@ -469,7 +531,11 @@ private fun DmThreadView(app: TinyApp, login: String, onOpenProfile: (String) ->
             )
             Spacer(Modifier.width(8.dp))
             Button(
-                enabled = draft.isNotBlank() && !sending,
+                // Enabled for a caption-less attachment too — but NOT while one is
+                // still uploading, so the disabled button and `blockingReason()`
+                // agree instead of the button inviting a tap that only refuses.
+                enabled = (draft.isNotBlank() || composer.staged.isNotEmpty()) &&
+                    !sending && composer.blockingReason() == null,
                 onClick = { send() },
             ) { Text(if (sending) "…" else "send") }
         }

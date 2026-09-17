@@ -1317,7 +1317,12 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             val payload = JSONObject().put("amount_micro", amountMicro)
             normNetwork(network)?.let { payload.put("network", it) }
-            val res = runCatching { tinyApp.api.postJson("/api/wallet/withdraw", payload) }.getOrNull()
+            // postJsonSettle, like WalletRepository.withdraw: the route broadcasts and
+            // waits up to ~105s for the receipt, so the default 30s client hung up
+            // long before the 202 handled just below could ever arrive — turning every
+            // slow-but-successful payout into the "withdrawal failed" line, which is
+            // the double-spend invitation that 202 branch exists to prevent.
+            val res = runCatching { tinyApp.api.postJsonSettle("/api/wallet/withdraw", payload) }.getOrNull()
             // Broadcast succeeded but confirmation timed out (server returns 202,
             // ok:false, pending_confirmation:true and WITHHELD the refund on purpose —
             // the transfer is in the mempool and will likely land). This is NOT a
@@ -2222,12 +2227,35 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 if (content.isNotBlank()) {
                     val tags = ev.input.optJSONArray("tags")
                         ?.let { t -> (0 until t.length()).map { t.optString(it) } } ?: emptyList()
-                    tinyApp.continuity.addMemory(tiny, content, tags)
+                    // Web toasts BOTH ways here (Chat.tsx:1281). Android has no
+                    // success toast per memory — the reply itself says it — but a
+                    // refused write has to be visible, or the fact is silently lost
+                    // after the user was told it was kept.
+                    if (!tinyApp.continuity.addMemory(tiny, content, tags)) {
+                        android.widget.Toast.makeText(
+                            getApplication(),
+                            "couldn't store that memory — storage is full or unavailable",
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    }
                 }
             }
             "forget" -> {
                 val match = ev.input.optString("match")
-                if (match.isNotBlank()) tinyApp.continuity.forgetMemory(tiny, match)
+                if (match.isNotBlank()) {
+                    // Only BLOCKED gets a toast. A no-match is not a failure worth
+                    // alarming anyone over (web Chat.tsx:1290), but a refused write
+                    // must be said out loud: the model has already told the user the
+                    // fact is gone while buildContext keeps injecting it.
+                    val (outcome, _) = tinyApp.continuity.forgetOutcome(tiny, match)
+                    if (outcome == ForgetOutcome.BLOCKED) {
+                        android.widget.Toast.makeText(
+                            getApplication(),
+                            Continuity.forgetLine(outcome),
+                            android.widget.Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                }
             }
             "spawn_agents" -> {
                 // Tasks known at call time; nodes seeded "running", flipped by AfterToolCall.
@@ -2324,10 +2352,36 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
             }
+            // Web's fourth clipboard rule, on the one Android surface that has a
+            // place to put it: a toast QUOTING what landed. The write itself is
+            // the shared decision in DeviceTools; this is the user's only chance
+            // to notice a substituted value before they paste it somewhere else.
+            "copy_to_clipboard" -> {
+                tinyApp.deviceTools.handle(ev.name, ev.input)
+                val write = technology.tiny.app.tools.decideClipboardWrite(ev.input.opt("text"))
+                android.widget.Toast.makeText(
+                    getApplication(),
+                    when (write) {
+                        is technology.tiny.app.tools.ClipboardWrite.Allowed ->
+                            technology.tiny.app.tools.clipboardConfirmToast(write.text, write.truncated)
+                        // The refusal is worth a toast too: the user watched a
+                        // copy be asked for, and silence would read as success.
+                        is technology.tiny.app.tools.ClipboardWrite.Refused ->
+                            "📋 Nothing copied — your clipboard is unchanged"
+                    },
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+                messages[replyIdx] = messages[replyIdx].copy(toolLabel = null)
+            }
             else -> {
                 // Physical device tools (vibrate/flashlight/clipboard/…) act on the phone.
-                val handled = tinyApp.deviceTools.handle(ev.name, ev.input)
-                messages[replyIdx] = messages[replyIdx].copy(toolLabel = ev.name.takeUnless { handled })
+                // The label is the "still working" spinner, so it clears for anything
+                // that finished — including a quiet-hours mute, which is a completed
+                // action and not a tool this build failed to run. Only UNKNOWN_TOOL
+                // leaves the name up, which is what it has always meant here.
+                val outcome = tinyApp.deviceTools.handle(ev.name, ev.input)
+                val unknown = outcome == technology.tiny.app.tools.DeviceTools.Outcome.UNKNOWN_TOOL
+                messages[replyIdx] = messages[replyIdx].copy(toolLabel = ev.name.takeIf { unknown })
             }
         }
     }

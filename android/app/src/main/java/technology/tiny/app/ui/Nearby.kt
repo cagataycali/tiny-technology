@@ -271,13 +271,27 @@ private fun TinySetupDialog(app: TinyApp, beacon: Bluetooth.BleDevice, onDismiss
                         color = TinyGray,
                     )
                     Spacer(Modifier.height(10.dp))
-                    OutlinedTextField(ssid, { ssid = it }, label = { Text("WiFi network") }, singleLine = true)
+                    // ⚠️ An SSID must survive VERBATIM — the board's radio matches bytes,
+                    // and a keyboard that "corrects" one character sends the device to a
+                    // network that does not exist, reported later as a failed pairing.
+                    // iOS says the same thing here (TinySetup.swift:476).
+                    OutlinedTextField(
+                        ssid, { ssid = it },
+                        label = { Text("WiFi network") },
+                        singleLine = true,
+                        keyboardOptions = FieldOptions.identifier,
+                    )
                     Spacer(Modifier.height(6.dp))
                     OutlinedTextField(
                         password, { password = it },
                         label = { Text("WiFi password") },
                         singleLine = true,
                         visualTransformation = PasswordVisualTransformation(),
+                        // ⚠️ The transformation above only DRAWS dots. Without
+                        // KeyboardType.Password the IME sees an ordinary word and may keep
+                        // the user's home WiFi password in its learned dictionary. iOS uses
+                        // SecureField, which implies both.
+                        keyboardOptions = FieldOptions.secret,
                     )
                 }
                 Spacer(Modifier.height(10.dp))

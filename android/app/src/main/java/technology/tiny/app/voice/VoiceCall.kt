@@ -2,9 +2,9 @@ package technology.tiny.app.voice
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -30,6 +30,7 @@ import okhttp3.WebSocketListener
 import okio.ByteString
 import okio.ByteString.Companion.toByteString
 import org.json.JSONObject
+import technology.tiny.app.chat.AudioDuck
 import java.util.concurrent.TimeUnit
 import kotlin.math.min
 import kotlin.math.sqrt
@@ -56,8 +57,14 @@ import kotlin.math.sqrt
  * Self-contained (no ChatViewModel / MainActivity coupling): the caller passes
  * base URL, token, and BYOK headers; state is a StateFlow the Compose surface
  * collects.
+ *
+ * @param appContext only for [AudioDuck] — the user's music must be quieted for
+ *   the duration of the call, the way iOS gets it from `.duckOthers` on this same
+ *   rail (VoiceCall.swift:208). REQUIRED rather than nullable: a new call site
+ *   that forgets it should not compile, because forgetting it is silent — the call
+ *   works, the podcast just plays into the mic and the model transcribes it.
  */
-class VoiceCall {
+class VoiceCall(private val appContext: Context) {
     enum class Phase { IDLE, CONNECTING, LIVE, ENDED, ERROR, BYOK_REQUIRED }
 
     data class State(
@@ -176,6 +183,18 @@ class VoiceCall {
         runCatching { track?.stop() }
         runCatching { track?.release() }
         track = null
+        // ⚠️ The UNDO of startAudio()'s acquire, and it belongs HERE because stop()
+        // is the one funnel every ending goes through — the user hanging up, a WS
+        // failure, onClosing, dispose(), dismiss(), and the mic-open failure inside
+        // start(). Releasing at any single one of those would leave the user's music
+        // ducked for the life of the process after the others. A call that never
+        // reached startAudio() (a BYOK refusal) drops a name that was never added.
+        AudioDuck.release(appContext, DUCK_OWNER)
+        // The UNDO of startAudio()'s route, on the same only-funnel reasoning: a
+        // forced speaker outliving the call would send the NEXT thing the phone
+        // plays in call mode out of the loudspeaker. No-op when nothing was forced
+        // (a headset was connected, or the OS refused).
+        CallAudio.restore(appContext, ROUTE_OWNER)
         if (_state.value.phase != Phase.ERROR && _state.value.phase != Phase.BYOK_REQUIRED) {
             _state.value = _state.value.copy(phase = Phase.ENDED, level = 0f)
         } else {
@@ -325,6 +344,24 @@ class VoiceCall {
             }
         }
 
+        // Quiet the user's music BEFORE the first frame is captured, not after: the
+        // mic opens on the next line, and `VOICE_COMMUNICATION`'s echo canceller
+        // suppresses OUR OWN playback, not a podcast the media stream is playing.
+        // Undone in stop(), which every teardown path calls — including start()'s
+        // own `if (!startAudio())`, so a mic that fails to open never leaves the
+        // phone silent. (iOS: `.duckOthers`, VoiceCall.swift:208.)
+        AudioDuck.acquire(appContext, DUCK_OWNER) { stop() }
+        // Out of the LOUDSPEAKER, not the earpiece — unless a headset is connected,
+        // in which case touch nothing. `USAGE_VOICE_COMMUNICATION` above is right
+        // (it pairs with the VOICE_COMMUNICATION capture source and its echo
+        // canceller) and it is also what routes this track to the earpiece, so the
+        // tiny answered out of the 1-inch driver you hold against your ear — fine at
+        // your face, nearly silent on a desk, which is where a hands-free call
+        // happens. iOS gets both halves from one pair of options on this same rail:
+        // `.allowBluetooth, .defaultToSpeaker` (VoiceCall.swift:207). Undone in
+        // stop(), the one funnel every ending goes through. (See CallAudio.kt for
+        // why forcing the speaker unconditionally would be the harmful version.)
+        CallAudio.route(appContext, ROUTE_OWNER)
         rec.startRecording()
         captureJob = scope.launch(Dispatchers.IO) {
             val buf = ShortArray(FRAME_SAMPLES)
@@ -460,6 +497,11 @@ class VoiceCall {
     }
 
     companion object {
+        /** This rail's name in [AudioDuck]'s holder set — see its acquire warning. */
+        private const val DUCK_OWNER = "voice-call"
+
+        /** This rail's name in [CallAudio]'s holder — same same-string rule. */
+        private const val ROUTE_OWNER = "voice-call"
         private const val SAMPLE_RATE = 24_000
         private const val FRAME_SAMPLES = 1024        // ~43ms per frame at 24kHz
         private const val FRAME_BYTES = FRAME_SAMPLES * 2

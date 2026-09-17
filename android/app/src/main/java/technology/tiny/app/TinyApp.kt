@@ -16,6 +16,7 @@ import technology.tiny.app.chat.Continuity
 import technology.tiny.app.chat.MyShares
 import technology.tiny.app.chat.Speech
 import technology.tiny.app.fleet.FleetManager
+import technology.tiny.app.fleet.PhoneRecorder
 import technology.tiny.app.net.ModelConfigStore
 import technology.tiny.app.net.Net
 import technology.tiny.app.net.TinyApi
@@ -142,6 +143,13 @@ class TinyApp : Application() {
         fleet = FleetManager(this, api, auth, config, speech, continuity, deviceTools)
         updater = Updater(this) { config.updateBase ?: config.serverBase }
         mirrorSessionToWatch()
+        // Bound the necklace's kept audio before anything can add to it. Launch is the
+        // only moment guaranteed to arrive — the process that wrote those segments may
+        // have been killed mid-write — and off the main thread because it stats a
+        // directory. See PhoneRecorder.sweepAudio.
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            runCatching { PhoneRecorder.sweepAudio(this@TinyApp) }
+        }
     }
 
     /**

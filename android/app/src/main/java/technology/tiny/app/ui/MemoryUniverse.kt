@@ -134,7 +134,15 @@ fun MemorySheet(app: TinyApp, tiny: String, onOpenGraph: (() -> Unit)? = null, o
                     if (demo) {
                         local = local.filterNot { it.id == m.id }
                     } else {
-                        app.continuity.forgetMemory(tiny, m.content.take(40))
+                        // ⚠️ By ID, never by content. `forgetMemory` matches a
+                        // SUBSTRING, so the old `m.content.take(40)` deleted every
+                        // memory containing this row's opening 40 chars — and a
+                        // memory shorter than that passed its WHOLE text, so
+                        // "likes coffee" also took out "likes coffee in the
+                        // morning". One tap, two rows gone, no message. iOS has
+                        // always passed `m.id` (Panels.swift); the id arm in
+                        // `Continuity.survivors` exists for exactly this caller.
+                        app.continuity.forgetMemory(tiny, m.id)
                         local = app.continuity.loadMemories(tiny)
                     }
                 }
@@ -324,6 +332,11 @@ fun UniverseSheet(app: TinyApp, onPick: (String) -> Unit, onOpenProfile: (String
                 onValueChange = { query = it },
                 placeholder = { Text("search builders & tinys…") },
                 singleLine = true,
+                // Matches logins and tiny names (line 345, case-insensitive `contains`)
+                // — a handle is not a word, and an autocorrected fragment empties the
+                // directory. iOS Panels.swift:329 uses .searchable, which doesn't
+                // autocorrect.
+                keyboardOptions = FieldOptions.identifier,
                 // A non-empty query is clearable in one tap without dismissing the
                 // sheet — the touch-native twin of iOS .searchable's built-in clear X
                 // (Panels.swift:113) and web's ✕ / Escape-clears-first (UniverseDrawer

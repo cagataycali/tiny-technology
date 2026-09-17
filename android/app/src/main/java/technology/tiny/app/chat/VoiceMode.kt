@@ -8,6 +8,7 @@ import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import technology.tiny.app.fleet.BtMic
 import technology.tiny.app.fleet.askForPunctuation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -30,6 +31,20 @@ class VoiceMode(
     private val speech: Speech,
     private val onSend: (String) -> Unit,
 ) {
+    /** This rail's name in [BtMic]'s holder set — see `BtMic.acquire`'s warning. */
+    private val BT_OWNER = "voice-mode"
+
+    /**
+     * This rail's name in [AudioDuck]'s holder set.
+     *
+     * ⚠️ DIFFERENT from [Speech]'s, deliberately. Voice mode's own TTS speaks the
+     * reply while this mic session rolls — two genuine, overlapping holders. Sharing
+     * one name would make `Speech.stop()` (which `heard()` calls on every barge-in)
+     * drop the mic's duck too, and the music would swell back the moment the user
+     * started talking.
+     */
+    private val DUCK_OWNER = "voice-mode-mic"
+
     enum class Status { IDLE, LISTENING, HEARING, DENIED }
 
     private val _status = MutableStateFlow(Status.IDLE)
@@ -84,10 +99,11 @@ class VoiceMode(
      * (Voice.swift beginSession, :173) and never auto-resumes. Android's mic
      * session doesn't throw — it just errors and our onError re-rolls it every
      * 500ms, fighting the dialer for the microphone for the whole call. Reading
-     * the audio mode needs no permission and, unlike requesting audio focus,
-     * won't collide with the TTS duck/barge-in coordination VoiceMode and Speech
-     * already share. MODE_IN_CALL = cellular, MODE_IN_COMMUNICATION = VoIP,
-     * MODE_RINGTONE = an incoming call still ringing.
+     * the audio mode needs no permission, so this stays the cheap pre-check even
+     * now that [AudioDuck] gives this rail real focus: a duck is not a mic lock,
+     * and MODE_RINGTONE in particular is a call we have not lost focus to YET.
+     * MODE_IN_CALL = cellular, MODE_IN_COMMUNICATION = VoIP, MODE_RINGTONE = an
+     * incoming call still ringing.
      */
     private fun inCall(): Boolean = when (audioManager.mode) {
         AudioManager.MODE_IN_CALL, AudioManager.MODE_IN_COMMUNICATION, AudioManager.MODE_RINGTONE -> true
@@ -110,6 +126,36 @@ class VoiceMode(
         pending = ""
         _partial.value = ""
         _status.value = Status.LISTENING
+        // Hear through the GLASSES when they're worn (BtMic.kt — iOS sets
+        // `.allowBluetooth` on this very rail, Voice.swift:119/185). Android does not
+        // route SpeechRecognizer to a headset on its own, so without this a user
+        // wearing the glasses talks into them and the phone in their hand is what
+        // listens.
+        //
+        // ⚠️ BRACKETS THE MODE, NOT THE SESSION. This class ROLLS a new recognizer on
+        // every final and every error — several per minute. Acquiring in
+        // `startSession()` would raise and drop the SCO link on that cycle, and each
+        // raise costs ~800ms of deaf microphone: the user's next sentence would land
+        // in the gap. So the link comes up once here and goes down in `stop()`, which
+        // is the only exit — every roll happens underneath it.
+        if (BtMic.acquire(context.applicationContext, BT_OWNER)) {
+            // The link needs a beat before it carries audio. Not a `delay` on this
+            // thread: `start()` is called from a tap handler, and blocking here would
+            // freeze the frame the button's press state renders in. The first rolled
+            // session picks up the route regardless — a rolled session is this
+            // class's normal case, not its failure case.
+            Log.i("TinyVoice", "listening through the bluetooth headset")
+        }
+        // Quiet the user's music for as long as the mic is open — iOS sets
+        // `.duckOthers` on this very rail (Voice.swift:119/185) and Android's
+        // recognizer otherwise transcribes the podcast the phone keeps playing.
+        //
+        // ⚠️ BRACKETS THE MODE, exactly like the BtMic acquire above and for a
+        // stronger reason: this class rolls a recognizer several times a minute, and
+        // ducking per SESSION would swell the music back in every gap between them.
+        // A loss halts the whole mode rather than one session — a phone call took
+        // the mic, and the roll would just fight it.
+        AudioDuck.acquire(context.applicationContext, DUCK_OWNER) { stop() }
         startSession()
         watcher = scope.launch { silenceLoop() }
     }
@@ -122,6 +168,15 @@ class VoiceMode(
         generation += 1
         watcher?.cancel(); watcher = null
         recognizer?.destroy(); recognizer = null
+        // ⚠️ The UNDO of start()'s acquire, and this is the ONLY exit — `stop()` is
+        // what every path calls (the user closing voice mode, a denied permission, a
+        // call arriving). Miss it and the glasses hold the phone's audio in call mode
+        // until the process dies. No-op when no headset was routed.
+        BtMic.release(context.applicationContext, BT_OWNER)
+        // The UNDO of start()'s duck, on the same only-exit. ⚠️ Ordered AFTER the
+        // recognizer is destroyed: releasing first would unduck for the instant the
+        // mic is still open, which is audibly worse than either state.
+        AudioDuck.release(context.applicationContext, DUCK_OWNER)
         _status.value = Status.IDLE
         _partial.value = ""
         _level.value = 0f

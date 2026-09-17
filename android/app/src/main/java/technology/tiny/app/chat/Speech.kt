@@ -1,11 +1,6 @@
 package technology.tiny.app.chat
 
 import android.content.Context
-import android.media.AudioAttributes
-import android.media.AudioFocusRequest
-import android.media.AudioManager
-import android.os.Handler
-import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
@@ -18,41 +13,22 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * Ducks the user's background audio (music/podcast) while speaking — the same
  * intent iOS states with AVAudioSession .duckOthers (Speech.swift:34, unduck
- * fixed in 645928e). Android does it via AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK:
- * hold focus for the duration, abandon on natural end/stop so the music swells
- * back. VoiceMode owns its own mic session and never routes through here.
+ * fixed in 645928e) — and YIELDS to a focus LOSS the other way, so a phone call
+ * or another assistant halts our speech instead of being talked over (iOS gets
+ * that free from AVAudioSession interruptions; Android must ask).
  *
- * Also YIELDS to a focus LOSS the other way: a phone call, navigation prompt, or
- * another assistant seizing exclusive focus halts our speech (iOS gets this free
- * from AVAudioSession interruptions — Android must register a change listener or
- * TTS talks straight over the call). AUDIOFOCUS_LOSS/LOSS_TRANSIENT → stop; the
- * MAY_DUCK loss (a nav blip) is left alone since we're the one being ducked.
+ * ⚠️ Both now go through [AudioDuck], which owns the app's ONE focus request, and
+ * this class must NOT build its own again. It used to, and that was correct only
+ * while it was the app's sole requester. iOS asks for `.duckOthers` on three
+ * rails; the moment the mic rails ask too, a second request object in this same
+ * process STEALS focus from the first and fires its listener with
+ * LOSS_TRANSIENT — the arm right below that halts speech. Voice mode opening its
+ * mic would have cut off the tiny's own reply mid-sentence. One holder, joined by
+ * name, is what makes three rails safe.
  */
 class Speech(context: Context) {
 
     private val appContext = context.applicationContext
-    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    // Deliver focus-change callbacks on the main thread — stop() touches the TTS
-    // engine + a StateFlow the UI observes, and the listener can fire from any thread.
-    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        when (change) {
-            // Lost focus to a phone call / another assistant (permanent or transient,
-            // e.g. a call) — halt so we're not talking over it. iOS interruption-began.
-            AudioManager.AUDIOFOCUS_LOSS, AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> stop()
-            // AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: something short wants to duck US
-            // (a nav prompt). We keep speaking, quieter — matches how we duck others.
-        }
-    }
-    private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build(),
-        )
-        .setOnAudioFocusChangeListener(focusListener, Handler(Looper.getMainLooper()))
-        .build()
-    @Volatile private var haveFocus = false
 
     private val _speakingId = MutableStateFlow<String?>(null)
     val speakingId: StateFlow<String?> = _speakingId
@@ -157,18 +133,14 @@ class Speech(context: Context) {
         abandonFocus()
     }
 
-    private fun requestFocus() {
-        // Idempotent: re-requesting while already held keeps the same duck (no blip)
-        // — the back-to-back speak() case iOS handles by keeping the session in halt().
-        if (haveFocus) return
-        haveFocus = audioManager.requestAudioFocus(focusRequest) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED
-    }
+    // Idempotent, as it has to be: re-requesting while this rail already holds the
+    // duck keeps the same duck (no blip) — the back-to-back speak() case iOS handles
+    // by keeping the session in halt(). AudioDuck's holder map gives that for free,
+    // since a name already in it is simply re-put.
+    private fun requestFocus() =
+        AudioDuck.acquire(appContext, DUCK_OWNER) { stop() }
 
-    private fun abandonFocus() {
-        if (!haveFocus) return
-        audioManager.abandonAudioFocusRequest(focusRequest)
-        haveFocus = false
-    }
+    private fun abandonFocus() = AudioDuck.release(appContext, DUCK_OWNER)
 
     fun shutdown() {
         abandonFocus()
@@ -177,6 +149,14 @@ class Speech(context: Context) {
 
     companion object {
         const val PREVIEW_ID = "settings-preview"
+
+        /**
+         * This rail's name in [AudioDuck]'s holder set.
+         *
+         * ⚠️ Distinct from voice mode's mic owner, and the two overlap on purpose —
+         * see `VoiceMode.DUCK_OWNER`. `stop()` here runs on every barge-in.
+         */
+        private const val DUCK_OWNER = "tts"
 
         /** Markdown scrub, mirrors iOS/web: fences replaced, inline noise stripped, 3000 cap. */
         fun scrub(text: String): String = text

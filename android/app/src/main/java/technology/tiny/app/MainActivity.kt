@@ -103,6 +103,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import technology.tiny.app.chat.ChatMessage
 import technology.tiny.app.chat.ChatViewModel
+import technology.tiny.app.chat.ForgetOutcome
 import technology.tiny.app.ui.bidi
 import technology.tiny.app.ui.OnboardingScreen
 import technology.tiny.app.ui.theme.TinyAccent
@@ -496,6 +497,12 @@ class MainActivity : ComponentActivity() {
                         // current session token), A's half-typed composer draft, and A's
                         // activity high-water mark. Device/tiny-level prefs are kept.
                         app.config.scrubIdentity()
+                        // 🎥 A's parked glasses clip / rolling recording. A switch never
+                        // calls logout(), so without this B's next meta_record_video
+                        // collects A's video of A's surroundings (hosted at a
+                        // public-but-unguessable /media/ URL) and the agent narrates it
+                        // as B's. Same identity boundary as the send queue above.
+                        technology.tiny.app.fleet.GlassesRecorderBridge.endSession()
                     }
                     authError = null
                     app.fleet.start()
@@ -728,7 +735,9 @@ fun ChatScreen(
     // typed composer text joins the call, and tool_call frames run on the
     // same device executors chat uses. A slim strip above the composer is
     // the only dedicated UI.
-    val liveCall = remember { technology.tiny.app.voice.VoiceCall() }
+    // `app` is the Application, so the duck it takes on the media stream outlives
+    // no activity — the call itself is what releases it, in stop().
+    val liveCall = remember { technology.tiny.app.voice.VoiceCall(app) }
     // 📞 At the CHAT root we only care about the call's PHASE (a handful of
     // slow, discrete transitions). The full State also carries `level`, which
     // VoiceCall rewrites on every audio frame (~23×/sec during LIVE). Collecting
@@ -870,10 +879,23 @@ fun ChatScreen(
         } else {
             val output = runCatching {
                 when (name) {
-                    "vibrate", "flashlight", "copy_to_clipboard", "set_brightness",
-                    "play_sound", "schedule_alert", "cancel_alerts", "open_url" -> {
+                    // Before the group below: `Outcome` says the arm executed,
+                    // which it does even when the write was refused — and this
+                    // is the surface where the tiny SAYS "copied" aloud.
+                    "copy_to_clipboard" -> {
                         app.deviceTools.handle(name, args)
-                        org.json.JSONObject().put("ok", true)
+                        technology.tiny.app.fleet.DeviceActionAudit.clipboardResult(args.opt("text"))
+                    }
+                    "vibrate", "flashlight", "set_brightness",
+                    "play_sound", "schedule_alert", "cancel_alerts", "open_url" -> {
+                        // ⚠️ NOT a bare ok:true. The tiny SPEAKS this result, so a
+                        // play_sound the phone muted for quiet hours came back as
+                        // success and it told the user a sound had played — the
+                        // relay path's exact bug, on the surface where a person
+                        // hears the claim. voiceResult carries the real outcome.
+                        technology.tiny.app.fleet.DeviceActionAudit.voiceResult(
+                            name, app.deviceTools.handle(name, args),
+                        )
                     }
                     "render_ui" -> {
                         // Native card on the live voice bubble (props-only contract).
@@ -888,8 +910,13 @@ fun ChatScreen(
                         } else {
                             val tags = args.optJSONArray("tags")
                                 ?.let { t -> (0 until t.length()).map { t.optString(it) } } ?: emptyList()
-                            app.continuity.addMemory(vm.tiny, content, tags)
-                            org.json.JSONObject().put("ok", true).put("note", "remembered")
+                            // The claim follows the WRITE, not the attempt: the tiny
+                            // SPEAKS this result, and a false "remembered" is how a
+                            // user loses a fact they were told was kept.
+                            if (app.continuity.addMemory(vm.tiny, content, tags))
+                                org.json.JSONObject().put("ok", true).put("note", "remembered")
+                            else org.json.JSONObject().put("ok", false)
+                                .put("error", "storage is full or unavailable — it was NOT remembered; tell the user")
                         }
                     }
                     "forget" -> {
@@ -897,8 +924,21 @@ fun ChatScreen(
                         if (match.isEmpty()) {
                             org.json.JSONObject().put("ok", false).put("error", "match required")
                         } else {
-                            app.continuity.forgetMemory(vm.tiny, match)
-                            org.json.JSONObject().put("ok", true)
+                            // Three outcomes, three answers (web Chat.tsx:2049). This
+                            // used to discard the result entirely and say `ok:true`,
+                            // so a memory the store refused to drop was reported as
+                            // forgotten — and buildContext kept injecting it forever.
+                            val (outcome, removed) = app.continuity.forgetOutcome(vm.tiny, match)
+                            when (outcome) {
+                                ForgetOutcome.FORGOTTEN -> org.json.JSONObject()
+                                    .put("ok", true).put("removed", removed)
+                                ForgetOutcome.NO_MATCH -> org.json.JSONObject()
+                                    .put("ok", true).put("removed", 0)
+                                    .put("reason", "no memory matched")
+                                ForgetOutcome.BLOCKED -> org.json.JSONObject()
+                                    .put("ok", false).put("removed", 0)
+                                    .put("error", "storage is full or unavailable — the memory is still there; tell the user")
+                            }
                         }
                     }
                     else -> org.json.JSONObject().put("ok", false)
@@ -1195,6 +1235,13 @@ fun ChatScreen(
                         modifier = Modifier.weight(1f).focusRequester(searchFocus),
                         placeholder = { Text("Search this chat") },
                         singleLine = true,
+                        // The filter below is a case-insensitive `contains`, so
+                        // capitalization is moot here — autocorrect is not. A partial
+                        // query is a word fragment the keyboard is happy to "fix", and
+                        // a rewritten substring reports "No messages match" over a chat
+                        // that does. iOS's .searchable field (Views.swift:2369) doesn't
+                        // autocorrect either.
+                        keyboardOptions = technology.tiny.app.ui.FieldOptions.identifier,
                         shape = RoundedCornerShape(12.dp),
                     )
                     IconButton(onClick = { searching = false; searchQuery = "" }) {
@@ -2199,9 +2246,7 @@ fun ChatScreen(
                         // defaults to .sentences) — Compose's TextField defaults to
                         // None, so the Android composer alone left "hello. how are you"
                         // lowercase while the other two clients capitalized. Match them.
-                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
-                            capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.Sentences,
-                        ),
+                        keyboardOptions = technology.tiny.app.ui.FieldOptions.prose,
                         // Content-driven text direction (web textarea dir="auto",
                         // Chat.tsx:2439): resolve LTR/RTL from the first strong
                         // directional character so an Arabic/Hebrew/Persian draft

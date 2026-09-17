@@ -64,6 +64,59 @@ class NiclaVoiceGatewayTest {
         assertEquals("heard “alexa” (#7)", NiclaVoiceGateway.wakeDetail(w))
     }
 
+    // ---- the wake take: the phone records what the board cannot -------------
+
+    @Test fun `a wake take is filed under the word that started it`() {
+        // This is the line the user later reads in Transcripts explaining why
+        // their phone turned its microphone on. iOS: "wake: \(wake.label)".
+        assertEquals("wake: alexa", NiclaVoiceGateway.wakeTakeLabel(VoiceWake("alexa", 1, 0L)))
+        // A label-less match is already defaulted by parseWake, so the take's
+        // label degrades to something legible rather than "wake: ".
+        val w = NiclaVoiceGateway.parseWake("""{"wake":1}""".toByteArray(), 0L)!!
+        assertEquals("wake: wake", NiclaVoiceGateway.wakeTakeLabel(w))
+    }
+
+    @Test fun `the wake take label survives PhoneRecorder's own bounds`() {
+        // handleWake passes this straight to record(), which trims and caps at 200
+        // — so a hostile 400-char label from the board must not be able to make the
+        // recorder's fallback ("web agent") kick in and lose the wake attribution.
+        val long = NiclaVoiceGateway.wakeTakeLabel(VoiceWake("z".repeat(400), 1, 0L))
+        assertEquals(long.take(200), PhoneRecorder.label(long))
+        assertTrue(PhoneRecorder.label(long).startsWith("wake: "))
+    }
+
+    @Test fun `a wake asks for a floor short enough to be an accident`() {
+        // 10s, iOS's number, and it is a FLOOR: the take extends while words keep
+        // arriving (PhoneRecorder.shouldExtend). Long enough to be worth filing,
+        // short enough that a wake word said by accident isn't a long recording of
+        // a room — which is the whole reason it isn't simply MAX_SECONDS.
+        assertEquals(10, NiclaVoiceGateway.WAKE_TAKE_SECONDS)
+        assertTrue(
+            "a wake take asking below the recorder's own minimum would be clamped up silently",
+            NiclaVoiceGateway.WAKE_TAKE_SECONDS >= PhoneRecorder.MIN_SECONDS,
+        )
+        assertTrue(
+            "a wake take that asks for the ceiling has nothing left to extend into",
+            NiclaVoiceGateway.WAKE_TAKE_SECONDS < PhoneRecorder.MAX_SECONDS,
+        )
+        // The clamp must be a no-op on it: a floor that got rewritten on the way in
+        // would make the panel's "at least Ns" label wrong.
+        assertEquals(
+            NiclaVoiceGateway.WAKE_TAKE_SECONDS,
+            PhoneRecorder.clampSeconds(NiclaVoiceGateway.WAKE_TAKE_SECONDS),
+        )
+    }
+
+    @Test fun `a wake take is the one path allowed to outrun its request`() {
+        // Nobody is waiting on a budget for it — no relay poll, no agent counting
+        // seconds — which is exactly why it may extend while the budgeted callers
+        // (relay, manual, memo) may not.
+        assertEquals(
+            PhoneRecorder.MAX_SECONDS,
+            PhoneRecorder.hardCapSeconds(NiclaVoiceGateway.WAKE_TAKE_SECONDS, true),
+        )
+    }
+
     // ---- status notify (short keys, 64-byte budget) --------------------------
 
     @Test fun `status parses the five short keys`() {

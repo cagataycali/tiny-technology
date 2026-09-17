@@ -5,7 +5,9 @@
  * the MP4 finalizes, uploads once as video/mp4, up to 4 sampled frames ride
  * along, and {ok,url,frames,seconds} posts to the mailbox. Auto-stop at 28s
  * (the media store's 6MB cap); an auto-stopped clip waits as `pending` for
- * the agent's second call.
+ * the agent's second call — but only for PENDING_TTL_MS, after which it is
+ * discarded and the agent is TOLD (a clip from an hour ago is not an answer
+ * to a question asked now).
  *
  * The DAT stream hands raw I420 ByteBuffers (+width/height/presentationTimeUs)
  * — they feed MediaCodec's flexible YUV input directly, drained into a
@@ -28,11 +30,7 @@ import com.meta.wearable.dat.camera.types.StreamState
 import com.meta.wearable.dat.camera.types.VideoFrame
 import com.meta.wearable.dat.camera.types.VideoQuality
 import com.meta.wearable.dat.core.Wearables
-import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
-import com.meta.wearable.dat.core.session.DeviceSessionState
-import com.meta.wearable.dat.core.types.Permission
-import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.core.types.RegistrationState
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -59,9 +57,75 @@ object GlassesRecorderBridge {
 
     private val mutex = Mutex()
     private var active: Recording? = null
-    private var pending: JSONObject? = null
+
+    /** A finalized clip held in MEMORY, not yet uploaded (iOS `Finished`). */
+    class Finished(val mp4: ByteArray, val frameJpegs: List<ByteArray>, val seconds: Int)
+
+    /**
+     * What the auto-stop parks for a call that may never come (iOS `Parked`).
+     *
+     * ⚠️ `Clip` is NOT uploaded. Finalizing is forced at MAX_SECONDS (the MP4
+     * has to close), but uploading is not — and the START call was already
+     * answered, so at park time nobody has asked for these bytes. Uploading
+     * then meant a clip nobody collected sat in R2 forever: the worker has
+     * MEDIA.put/head/get and **no delete** (chatgpt-plugin-tinyai/src/media.ts),
+     * so there was no reclaim path even in principle.
+     */
+    sealed class Parked {
+        class Clip(val done: Finished) : Parked()
+        class Failure(val payload: JSONObject) : Parked()
+    }
+
+    /**
+     * What the auto-stop left for the agent's second call — paired with WHEN it
+     * was parked, because it does not wait forever. One value, not two fields,
+     * so no assignment can park unstamped.
+     */
+    private var pending: Pair<Parked, Long>? = null
+
+    /**
+     * How long an auto-stopped clip stays collectable (iOS
+     * `GlassesRecorder.pendingTTL` parity — a test pins them equal).
+     *
+     * ⚠️ NOT derived from the server's poll budget, deliberately: the START
+     * call was already answered, so nobody is polling for this clip. The
+     * deadline that matters is the USER'S. Without one, a clip that
+     * auto-stopped an hour ago answers the next meta_record_video call and the
+     * agent narrates a moment nobody asked about — the same rot as an expired
+     * consent grant, on video. Checked at COLLECT, no timer: nothing is
+     * blocked waiting, so there is no listener to tell early.
+     */
+    const val PENDING_TTL_MS = 180_000L
+
+    /** Verbatim on both phones: expired means DISCARDED, and a new recording started. */
+    const val STALE_NOTE =
+        "⏱️ An earlier recording auto-stopped and expired uncollected, so it was discarded — " +
+            "this call started a NEW recording. Don't describe the old clip; call again to stop this one."
 
     val isRecording: Boolean get() = active != null
+
+    /**
+     * Sign-out: drop everything this object holds for the OUTGOING user (iOS
+     * `GlassesRecorder.endSession()` parity — a test pins both wired).
+     *
+     * A parked clip is hosted video of the previous user's surroundings at a
+     * public-but-unguessable /media/ URL, collectable by whoever signs in next
+     * with one meta_record_video call. A rolling recording is worse: it keeps
+     * the glasses streaming past sign-out and would upload under the NEXT
+     * token to arrive (`authed()` reads tokenProvider() at call time). Nobody
+     * is owed a result — the turn that asked for it is gone with the session.
+     *
+     * ⚠️ Takes the SAME mutex every other path takes. Without it this races
+     * the auto-stop coroutine, which parks its finished clip under
+     * `mutex.withLock` — losing that race re-parks a clip we just dropped, and
+     * the leak comes back with no trace in the diff. That is why the sign-out
+     * caller (`Panels.kt`, already inside `scope.launch`) awaits it.
+     */
+    suspend fun endSession() = mutex.withLock {
+        pending = null
+        active?.teardown()
+        active = null
+    }
 
     suspend fun runTool(app: TinyApp, toolUseId: String) {
         val payload = try {
@@ -83,9 +147,56 @@ object GlassesRecorderBridge {
      * over its own WS (MainActivity runVoiceTool). Caller handles throws.
      */
     internal suspend fun toggle(app: TinyApp): JSONObject = mutex.withLock {
-        pending?.let { done -> pending = null; return done }
+        pending?.let { (parked, parkedAt) ->
+            pending = null
+            // Collect only while it is still THIS conversation's clip; a stale
+            // one is dropped and we fall through to START — and the agent is
+            // TOLD, since otherwise it gets a bare {recording:true} and cannot
+            // know a clip it once asked for was thrown away.
+            if (System.currentTimeMillis() - parkedAt < PENDING_TTL_MS) {
+                // THE UPLOAD HAPPENS HERE, not at park time: this is the first
+                // moment anyone has actually asked for the bytes. An expired
+                // clip therefore never reaches R2 at all — the only reclaim
+                // story available, since the worker cannot delete.
+                return when (parked) {
+                    is Parked.Clip -> upload(app, parked.done)
+                    is Parked.Failure -> parked.payload
+                }
+            }
+            return start(app).put("note", STALE_NOTE)
+        }
         active?.let { rec -> active = null; return rec.stopAndUpload(app) }
         start(app)
+    }
+
+    /**
+     * The upload half (iOS `upload(_:token:)` parity) — runs when someone is
+     * actually waiting for the URL, which is why it lives on the bridge rather
+     * than inside `Recording`: the recording object is long gone by then.
+     */
+    private suspend fun upload(app: TinyApp, done: Finished): JSONObject {
+        val b64 = android.util.Base64.encodeToString(done.mp4, android.util.Base64.NO_WRAP)
+        val up = app.api.postJson(
+            "/api/media",
+            JSONObject().put("data", b64).put("contentType", "video/mp4"),
+        )
+        val url = up.optString("url").takeIf { it.isNotEmpty() }
+            ?: return JSONObject().put("ok", false)
+                .put("error", up.optString("error").ifEmpty { "clip upload failed" })
+        // Frames are best-effort — a clip with no stills is still a clip.
+        val frames = JSONArray()
+        for (jpeg in done.frameJpegs) {
+            runCatching {
+                val fb64 = android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
+                val fu = app.api.postJson(
+                    "/api/media",
+                    JSONObject().put("data", fb64).put("contentType", "image/jpeg"),
+                )
+                fu.optString("url").takeIf { it.isNotEmpty() }?.let { frames.put(it) }
+            }
+        }
+        return JSONObject().put("ok", true).put("url", url)
+            .put("frames", frames).put("seconds", done.seconds)
     }
 
     private suspend fun start(app: TinyApp): JSONObject {
@@ -97,13 +208,14 @@ object GlassesRecorderBridge {
             return JSONObject().put("ok", false)
                 .put("error", "No Meta glasses linked — link them in settings first")
         }
-        val camera = CompletableDeferred<PermissionStatus>()
-        Wearables.checkPermissionStatus(Permission.CAMERA)
-            .onSuccess { camera.complete(it) }
-            .onFailure { error, _ -> camera.completeExceptionally(Exception(error.description)) }
-        if (camera.await() != PermissionStatus.Granted) {
+        // Asks via the Meta AI app when it isn't granted yet (iOS
+        // WearablesRecorder.swift:232 parity). This rail answers the agent in
+        // JSON rather than throwing, so the reason is carried into `error`.
+        try {
+            WearablesBridge.ensureCameraPermission(app)
+        } catch (t: Throwable) {
             return JSONObject().put("ok", false)
-                .put("error", "Glasses camera permission not granted — grant it in settings → meta glasses")
+                .put("error", t.message ?: "the glasses camera isn't granted")
         }
 
         val rec = Recording(app)
@@ -135,14 +247,12 @@ object GlassesRecorderBridge {
         private var lastSampleUs = Long.MIN_VALUE
 
         suspend fun begin() {
-            val sessionDeferred = CompletableDeferred<DeviceSession>()
-            Wearables.createSession(AutoDeviceSelector())
-                .onSuccess { sessionDeferred.complete(it) }
-                .onFailure { error, _ -> sessionDeferred.completeExceptionally(Exception("session: ${error.description}")) }
-            val s = sessionDeferred.await()
+            // One door for the session (WearablesBridge.openSession): it uses
+            // the long-lived selector. A newborn AutoDeviceSelector() here read
+            // as NO_ELIGIBLE_DEVICE by construction, so meta_record_video
+            // answered "session: no eligible device" with the glasses awake.
+            val s = WearablesBridge.openSession(app, startTimeoutMs = 25_000)
             session = s
-            s.start()
-            withTimeout(25_000) { s.state.first { it == DeviceSessionState.STARTED } }
 
             val streamDeferred = CompletableDeferred<Stream>()
             s.addStream(StreamConfiguration(videoQuality = VideoQuality.LOW, frameRate = 24))
@@ -170,7 +280,14 @@ object GlassesRecorderBridge {
                 mutex.withLock {
                     if (active === this@Recording) {
                         active = null
-                        pending = stopAndUpload(app)
+                        // FINALIZE only — no upload. Nobody asked for these bytes
+                        // yet (the START call was answered long ago), and R2 has
+                        // no delete, so a speculative upload is permanent. They
+                        // ride memory until the second call collects them.
+                        //
+                        // Stamped at PARK time: the TTL measures how long the
+                        // clip has sat unclaimed, not how long ago it was asked for.
+                        pending = finalize() to System.currentTimeMillis()
                     }
                 }
             }
@@ -261,9 +378,23 @@ object GlassesRecorderBridge {
          * live on the Pixel, 2026-08-02).
          */
         suspend fun stopAndUpload(app: TinyApp): JSONObject =
-            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { stopAndUploadInner(app) }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) {
+                when (val parked = finalizeInner()) {
+                    is Parked.Clip -> upload(app, parked.done)
+                    is Parked.Failure -> parked.payload
+                }
+            }
 
-        private suspend fun stopAndUploadInner(app: TinyApp): JSONObject {
+        /**
+         * Stop + finalize, NO network (iOS `finalizeClip()` parity). Split out so
+         * the auto-stop can park real bytes without uploading them: the MP4 must
+         * close at MAX_SECONDS, but nobody has asked for the clip yet, and an
+         * upload nobody collects is unreclaimable (no MEDIA.delete in the worker).
+         */
+        suspend fun finalize(): Parked =
+            kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { finalizeInner() }
+
+        private fun finalizeInner(): Parked {
             collectJob?.cancel()
             runCatching { stream?.stop() }
             runCatching { session?.stop() }
@@ -276,35 +407,23 @@ object GlassesRecorderBridge {
             scope.cancel()
             codec = null; muxer = null
 
+            // The temp file dies here either way — the bytes we keep are in
+            // memory, so a parked clip never depends on a cache-dir file
+            // surviving (Android reclaims cacheDir under pressure).
             try {
                 if (finalized.isFailure || !muxerStarted || !file.exists() || file.length() == 0L) {
-                    return JSONObject().put("ok", false)
-                        .put("error", "the recording could not be finalized (no frames arrived?) — try again")
+                    return Parked.Failure(
+                        JSONObject().put("ok", false)
+                            .put("error", "the recording could not be finalized (no frames arrived?) — try again")
+                    )
                 }
                 if (file.length() > MAX_BYTES) {
-                    return JSONObject().put("ok", false)
-                        .put("error", "the clip came out over the 6MB upload cap — record a shorter one")
+                    return Parked.Failure(
+                        JSONObject().put("ok", false)
+                            .put("error", "the clip came out over the 6MB upload cap — record a shorter one")
+                    )
                 }
-                val b64 = android.util.Base64.encodeToString(file.readBytes(), android.util.Base64.NO_WRAP)
-                val up = app.api.postJson(
-                    "/api/media",
-                    JSONObject().put("data", b64).put("contentType", "video/mp4"),
-                )
-                val url = up.optString("url").takeIf { it.isNotEmpty() }
-                    ?: return JSONObject().put("ok", false)
-                        .put("error", up.optString("error").ifEmpty { "clip upload failed" })
-                val frames = JSONArray()
-                for (jpeg in jpegs) {
-                    runCatching {
-                        val fb64 = android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
-                        val fu = app.api.postJson(
-                            "/api/media",
-                            JSONObject().put("data", fb64).put("contentType", "image/jpeg"),
-                        )
-                        fu.optString("url").takeIf { it.isNotEmpty() }?.let { frames.put(it) }
-                    }
-                }
-                return JSONObject().put("ok", true).put("url", url).put("frames", frames).put("seconds", seconds)
+                return Parked.Clip(Finished(file.readBytes(), jpegs.toList(), seconds))
             } finally {
                 file.delete()
             }

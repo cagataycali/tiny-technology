@@ -705,40 +705,74 @@ class WalletCoreTest {
         assertEquals("quote expired", r.error)
     }
 
-    // -- networkFailure: a transport blip must not erase a retry's recovery path (iOS c198fdb) --
+    // -- answerLost: a lost REPLY is not a lost REQUEST. The PUT left the device; the
+    // server may have reserved, signed, settled and debited before the answer dropped.
+    // So NO prior state may turn a missing answer into a Failed — the card that says
+    // "Payment not sent" states the one thing the client cannot know, and its "try
+    // again" reads as "pay again". These four cover every prior approve() can hold.
+    //
+    // Every result below is bound to the WIDE `SettleResult` type on purpose. Against the
+    // narrow declared return type Kotlin decides `is Unknown` at COMPILE time ("Check for
+    // instance is always 'true'") and the assertion stops doing work — so don't drop the
+    // annotations. The narrow signature is worth having and is pinned separately, by
+    // tests/pay-answer-unknown.test.ts.
 
-    @Test fun `networkFailure on a FIRST attempt shows only the inert error, no phantom buttons`() {
-        // prior == null → both flags false → just the "check your connection" error.
-        val f = WalletCore.networkFailure(null)
-        assertFalse(f.needsFunds)
-        assertFalse(f.canReQuote)
-        assertTrue(f.error.contains("connection"))
+    @Test fun `answerLost on a FIRST attempt is Unknown, not a failure`() {
+        val r: WalletCore.SettleResult = WalletCore.answerLost(null)
+        assertTrue("a lost answer must be the third verdict", r is WalletCore.SettleResult.Unknown)
     }
 
-    @Test fun `networkFailure during a retry PRESERVES the funds-shortfall affordance`() {
-        // First attempt learned it was insufficient-balance (needsFunds=true); a blip on
-        // retry must keep Add funds / Retry — the quote moved no money, still spendable.
+    @Test fun `answerLost from a funds-shortfall retry is Unknown — the shortfall is last week's news`() {
+        // The first attempt learned insufficient-balance. If the RETRY's answer is lost,
+        // that older verdict can't be re-asserted: the retry may well have settled after
+        // a top-up. Unknown (→ Check again) is the only honest state, and re-asserting
+        // needsFunds here would put "Add funds" on a payment that may already be paid.
         val prior = WalletCore.SettleResult.Failed("insufficient balance", needsFunds = true)
-        val f = WalletCore.networkFailure(prior)
-        assertTrue("a retry blip must keep needsFunds", f.needsFunds)
-        assertFalse(f.canReQuote)
+        val r: WalletCore.SettleResult = WalletCore.answerLost(prior)
+        assertTrue(r is WalletCore.SettleResult.Unknown)
     }
 
-    @Test fun `networkFailure during a retry PRESERVES the re-quotable affordance`() {
-        // First attempt was expired/terms-changed with a known url (canReQuote=true);
-        // a blip on retry must keep "Get fresh quote".
+    @Test fun `answerLost from a re-quotable retry is Unknown — and must NOT keep Get fresh quote`() {
+        // The load-bearing one. A fresh quote carries a NEW jti, so it is a SECOND
+        // payment — the one affordance an in-doubt payment must never offer. Unknown
+        // holds no flags at all, so the button cannot survive into this state.
         val prior = WalletCore.SettleResult.Failed("this quote expired", needsFunds = false, canReQuote = true)
-        val f = WalletCore.networkFailure(prior)
-        assertTrue("a retry blip must keep canReQuote", f.canReQuote)
-        assertFalse(f.needsFunds)
+        val r: WalletCore.SettleResult = WalletCore.answerLost(prior)
+        assertTrue(r is WalletCore.SettleResult.Unknown)
+        assertFalse("Unknown must not be a Failed carrying canReQuote", r is WalletCore.SettleResult.Failed)
     }
 
-    @Test fun `networkFailure ignores a non-Failed prior (a paid or pending state never retries here)`() {
-        // Defensive: approve() only enters from AWAITING/FAILED, but a Paid/Pending prior
-        // must not project its fields onto the failure — both flags stay false.
-        val f = WalletCore.networkFailure(WalletCore.SettleResult.Paid(50_000L, "base", "0xabc"))
-        assertFalse(f.needsFunds)
-        assertFalse(f.canReQuote)
+    @Test fun `answerLost ignores a terminal prior (a paid or pending state never re-settles here)`() {
+        // Defensive: approve() only enters from AWAITING/FAILED/UNKNOWN, but a Paid prior
+        // must not project its fields onto anything — and a lost answer on a second
+        // Check again stays Unknown rather than degrading.
+        val fromPaid: WalletCore.SettleResult = WalletCore.answerLost(WalletCore.SettleResult.Paid(50_000L, "base", "0xabc"))
+        val fromUnknown: WalletCore.SettleResult = WalletCore.answerLost(WalletCore.SettleResult.Unknown)
+        assertTrue(fromPaid is WalletCore.SettleResult.Unknown)
+        assertTrue(fromUnknown is WalletCore.SettleResult.Unknown)
+    }
+
+    @Test fun `toPersisted drops an Unknown outcome — there is no outcome to persist yet`() {
+        // A recycled/cold-reloaded card must NOT come back as a frozen "couldn't
+        // confirm" it can no longer act on; it re-derives the approval gate, which the
+        // jti dedup makes safe (the same dedup Check again relies on).
+        assertNull(WalletCore.toPersisted(WalletCore.SettleResult.Unknown))
+    }
+
+    @Test fun `the unconfirmed copy never claims an outcome, and splits on whether it can still be checked`() {
+        val checkable = WalletCore.unconfirmedBody(expired = false)
+        val expired = WalletCore.unconfirmedBody(expired = true)
+        // Two distinct bodies, because the ROUTE draws the line: it returns 410
+        // expired BEFORE it reaches the already_spent → already_paid dedup, so past
+        // the TTL "check again" is a promise it can't keep.
+        assertTrue("an unexpired quote is still checkable", checkable.contains("Checking again is safe"))
+        assertTrue("past the TTL, point at the ledger instead", expired.contains("activity"))
+        assertFalse("only the checkable body may promise a re-check", expired.contains("Checking again is safe"))
+        // Neither may assert the thing the client cannot know.
+        for (body in listOf(WalletCore.UNCONFIRMED_TITLE, checkable, expired)) {
+            assertFalse("must not claim the payment failed: $body", body.contains("not sent"))
+            assertFalse("must not name a cause it didn't observe: $body", body.contains("connection"))
+        }
     }
 
     // -- re-quote: expired (410) / terms_changed (409) recover in place (web/iOS parity) --

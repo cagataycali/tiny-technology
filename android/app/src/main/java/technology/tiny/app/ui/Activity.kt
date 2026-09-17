@@ -33,14 +33,10 @@ data class TinyEvent(val id: Long, val kind: String, val detail: String, val cre
  * `job` IS a prefix of it, so it inherited ⏰, the glyph of a job that ran.
  * `iconFor` matches longest-key-first rather than trusting this list's order; a
  * correctness that depends on line position is one reorder away from wrong.
- *
- * 🚫 `device_missed` is that trap again on the device side: `device` is a real
- * prefix, so a task the laptop NEVER picked up would draw 💻 — the glyph for one
- * it FINISHED — on the only surface that reports the loss. Keyed in full.
  */
 private val KIND_ICONS = listOf(
     "job" to "⏰", "job_missed" to "⛔", "telegram" to "✈️", "tiny_visit" to "👀", "learn" to "🧬",
-    "device" to "💻", "device_missed" to "🚫", "pay_alarm" to "🚨",
+    "device" to "💻", "pay_alarm" to "🚨",
     // 🗣️🎙️👁️ Keyed in full rather than behind a shared `nicla` prefix: a wake,
     // the words that followed it, and the Vision seeing motion are three
     // different rows to a reader.
@@ -66,8 +62,17 @@ internal val EMITTED_KINDS = listOf(
     "job_result", "job_error", "dm", "follow", "tiny_visit", "device_result",
     "tool-update", "telegram", "telegram_out", "telegram_button", "pay_alarm",
     "pay_earned", "pay_received", "pay_withdrawn", "pay_refunded",
-    "job_missed", "device_missed",
+    "job_missed",
     "batch_result", // app-emitted via POST /events (spawn_agents wait:false)
+    // 💻 relay.ts RelayTaskResultCall — a daemon's use_tasks completion, the
+    // offloaded half of "trigger and forget on the Mac". It shipped to the WEB
+    // roster only, and the reason is the trap: the `device` prefix key above
+    // already renders it 💻 on all three surfaces, so the glyph cost nothing and
+    // the roster looked like paperwork. But the roster is not what draws the row
+    // — it is the GUARD, and here it is the guard's whole input. Skipping it on
+    // the surfaces where it is *only* a guard leaves the row rendering correctly
+    // and the next kind unprotected.
+    "device_task_result",
     // 🗣️🎙️👁️📝 devices.ts DEVICE_EVENT_KINDS — and THIS app writes two of them
     // (NiclaVoiceGateway posts nicla_wake, PhoneRecorder posts device_note).
     // Grepping `emitEvent(` in the worker cannot find a kind the PHONES emit,

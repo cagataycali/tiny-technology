@@ -23,7 +23,12 @@
  *      having to be the one asked.
  *
  * Deliberately does NOT carry audio: the board has no audio characteristic
- * (64KB of RAM), so a wake is an EVENT, not a recording.
+ * (64KB of RAM), so what arrives over BLE is an EVENT, never a recording.
+ *
+ * Which is why there is a third job, and it belongs to the PHONE rather than to
+ * the board: a wake starts a take on the phone's own microphone (PhoneRecorder,
+ * gated on `Config.recordOnWake`). Otherwise the necklace hears you say its name
+ * and the words you actually came to say go nowhere.
  */
 package technology.tiny.app.fleet
 
@@ -86,6 +91,13 @@ object NiclaVoiceGateway {
 
     private const val WAKES_MAX = 20
     private const val BEAT_SECONDS = 30L
+
+    /**
+     * What a wake take asks for — a FLOOR, not its length (see [handleWake] and
+     * `PhoneRecorder.shouldExtend`). iOS's 10s: long enough to be worth filing,
+     * short enough that a wake word said by accident does not sit on the mic.
+     */
+    internal const val WAKE_TAKE_SECONDS = 10
     internal val CAPABILITIES = listOf("mic", "wake", "imu", "ble")
 
     /** A Voice unit this phone has paired and speaks for. */
@@ -442,6 +454,9 @@ object NiclaVoiceGateway {
     /** The event line the agent later reads (iOS forward() parity, verbatim). */
     internal fun wakeDetail(wake: VoiceWake): String = "heard “${wake.label}” (#${wake.count})"
 
+    /** The label a wake take is filed under — what the user reads in Transcripts. */
+    internal fun wakeTakeLabel(wake: VoiceWake): String = "wake: ${wake.label}"
+
     private fun handleWake(value: ByteArray) {
         val wake = parseWake(value, System.currentTimeMillis()) ?: return
         _wakes.value = (listOf(wake) + _wakes.value).take(WAKES_MAX)
@@ -449,6 +464,29 @@ object NiclaVoiceGateway {
         // while it's on your chest, so the phone is where "it heard you" lands.
         app?.let { runCatching { it.deviceTools.handle("vibrate", JSONObject().put("pattern", "tap")) } }
         scope.launch(Dispatchers.IO) { forward(wake) }
+        // 🎙️ The recorder half: the wake word IS the record button.
+        //
+        // The board cannot carry audio (see the header — 64KB of RAM, BLE only), so
+        // a wake was an EVENT and nothing more: the necklace heard you say its name
+        // and then the words you actually came to say went nowhere. The PHONE
+        // captures what follows and transcribes on-device, which is the same
+        // amputation PhoneRecorder already documents — a transcript, no audio file.
+        //
+        // PhoneRecorder refuses to double-start (MicClaim), so a wake landing
+        // mid-take is just the haptic and the event, and a wake during voice chat
+        // loses the mic to the conversation the user is already having.
+        app?.takeIf { it.config.recordOnWake }?.let { a ->
+            scope.launch {
+                // 10s is a FLOOR, not the take's length: someone who says the wake
+                // word and then talks for thirty kept only the first ten, and
+                // nothing in the stored row said it had been cut. Nobody is waiting
+                // on a budget for a wake take — no relay poll, no agent counting
+                // seconds — so this is the one path that extends.
+                PhoneRecorder.record(
+                    a, WAKE_TAKE_SECONDS, wakeTakeLabel(wake), extendWhileSpeaking = true,
+                )
+            }
+        }
     }
 
     /**

@@ -30,6 +30,9 @@ import technology.tiny.app.TinyApp
 
 object WearablesListenerBridge {
 
+    /** This rail's name in [BtMic]'s holder set — see `acquire`'s warning. */
+    private const val BT_OWNER = "meta_listen"
+
     suspend fun runTool(app: TinyApp, toolUseId: String, seconds: Int) {
         val payload = try {
             listen(app, seconds.coerceIn(3, 30))
@@ -74,7 +77,7 @@ object WearablesListenerBridge {
         // so recognition hears THEIR mic — otherwise "what the glasses heard"
         // would really be the phone's mic (iOS `.allowBluetooth` parity;
         // BtMic.kt explains why Android needs the device-wide knob).
-        val viaBt = BtMic.acquire(app)
+        val viaBt = BtMic.acquire(app, BT_OWNER)
         if (viaBt) delay(800) // SCO takes a beat to come up
 
         // SpeechRecognizer is main-thread-only, start to finish.
@@ -97,7 +100,7 @@ object WearablesListenerBridge {
                 }
             } finally {
                 runCatching { recognizer.destroy() }
-                BtMic.release(app)
+                BtMic.release(app, BT_OWNER)
             }
 
             // micRoute keeps the agent honest about WHICH microphone heard

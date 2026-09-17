@@ -99,6 +99,16 @@ dependencies {
     // Coil needs SvgDecoder or the logo errors out and hides). Version literal
     // for the same toml-ownership reason as coil-gif above.
     implementation("io.coil-kt:coil-svg:2.7.0")
+    // 🎥 DM video clips: a phone camera makes 4K at ~50Mbit and /api/media is an
+    // edge route capped near 2.6MB of decoded bytes, so a clip has to be
+    // transcoded ON DEVICE or it can only ever be refused. Android has no public
+    // transcoder — `MediaTranscodingManager` never shipped as public API — and
+    // the alternative is a hand-rolled MediaCodec↔MediaMuxer surface pipeline.
+    // Media3's Transformer IS that pipeline, maintained by the people who own the
+    // codecs. Version literal for the same toml-ownership reason as coil above.
+    implementation("androidx.media3:media3-transformer:1.4.1")
+    implementation("androidx.media3:media3-effect:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
     implementation(libs.androidx.glance.appwidget)
     implementation(libs.androidx.glance.material3)
     implementation(libs.androidx.exifinterface)

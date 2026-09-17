@@ -484,6 +484,15 @@ class FleetManager(
                         deviceTools.handle(name, input)
                         audit += DeviceActionAudit.openUrlLine(raw, resolved, fg)
                     }
+                    // Special-cased for open_url's reason: the arm runs either
+                    // way, so the tool's outcome can't say whether the text was
+                    // actually copied — and a refused write is the one that keeps
+                    // the user's clipboard intact, which the model must not
+                    // report as a successful copy.
+                    "copy_to_clipboard" -> {
+                        deviceTools.handle(name, input)
+                        audit += DeviceActionAudit.clipboardLine(input.opt("text"))
+                    }
                     // 🔁 Round-trip tools (use_device P5, iOS 943e7294 parity):
                     // the proxied turn's server callback is blocked polling the
                     // chat's tool-result mailbox — run the SAME executors main
@@ -520,7 +529,11 @@ class FleetManager(
                             audit += DeviceActionAudit.dispatchedLine(name)
                         }
                     }
-                    else -> audit += DeviceActionAudit.toolLine(name, deviceTools.handle(name, input))
+                    // ⚠️ The EXECUTION's own verdict. `handle` used to return a
+                    // Boolean that collapsed "ran", "threw" and "muted by quiet
+                    // hours" onto one value, and this audit line is the ONLY
+                    // ground truth the web agent gets about the phone.
+                    else -> audit += DeviceActionAudit.outcomeLine(name, deviceTools.handle(name, input))
                 }
             },
         )

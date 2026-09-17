@@ -15,6 +15,9 @@ Kotlin + Jetpack Compose throughout. Two Gradle modules:
 
 - **JDK 21** (Gradle toolchain expects it; on macOS: `brew install openjdk@21`)
 - **Android SDK** with API 35 (`compileSdk = 35`, `minSdk = 29`, `targetSdk = 35`)
+- **`GITHUB_TOKEN`** with `read:packages` in the environment (`export GITHUB_TOKEN=$(gh auth token)`):
+  the Meta Wearables SDK is resolved from GitHub Packages (`settings.gradle.kts`, scoped to
+  `com.meta.wearable`). Never hardcode one — a test pins that.
 - Point Gradle at the SDK either with `ANDROID_HOME` or a local `local.properties`:
 
 ```properties

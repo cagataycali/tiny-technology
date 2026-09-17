@@ -69,7 +69,7 @@ fun VoiceCallScreen(
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as TinyApp
-    val call = remember { VoiceCall() }
+    val call = remember { VoiceCall(app) }
     val state by call.state.collectAsState()
 
     LaunchedEffect(Unit) {

@@ -25,6 +25,8 @@ import androidx.compose.material.icons.outlined.DocumentScanner
 import androidx.compose.material.icons.outlined.Extension
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.KeyboardCommandKey
+import androidx.compose.material.icons.outlined.GridOn
+import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material.icons.outlined.MonitorHeart
 import androidx.compose.material.icons.outlined.Mouse
 import androidx.compose.material.icons.outlined.MusicNote
@@ -59,6 +61,7 @@ import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.material.icons.outlined.SettingsRemote
 import androidx.compose.material.icons.outlined.SmartToy
 import androidx.compose.material.icons.outlined.Straighten
+import androidx.compose.material.icons.outlined.ViewInAr
 import androidx.compose.material.icons.outlined.VolumeUp
 import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -188,6 +191,15 @@ internal fun capabilityIcon(c: String): ImageVector? = when (c) {
     // Endpoint devices
     "print" -> Icons.Outlined.Print
     "telemetry" -> Icons.Outlined.MonitorHeart
+    "led" -> Icons.Outlined.GridOn
+    "mcu" -> Icons.Outlined.Memory
+    // A model to BUILD, not a build in progress. Mirrors iOS `view.3d` — NOT
+    // `cube.transparent`, which iOS already spends on the "endpoint" device KIND.
+    // ⚠️ The live printer declares this (["chat","telemetry","print","cad"]) and
+    // all four phone tables missed it — byte-equal to each other and both wrong,
+    // because the parity suite compares the phones and nothing compared either to
+    // what a device SENDS.
+    "cad" -> Icons.Outlined.ViewInAr
     // No glyph rather than a stand-in one (iOS 96da0dfc): an icon that is
     // the same on every unknown chip reads as a rendering fault, not
     // information — the word alone carries the meaning.
@@ -259,6 +271,11 @@ internal val CAPABILITY_LABELS: Map<String, String> = mapOf(
     // ── Endpoint robots ──
     "print" to "prints",
     "telemetry" to "telemetry",
+    "led" to "LED matrix",
+    "mcu" to "MCU",
+    // Same word as iOS, which the parity suite requires. The web's own hint for
+    // this token says "accepts a CAD/model file to build".
+    "cad" to "3D models",
 )
 
 /**
@@ -388,6 +405,10 @@ enum class DevicePresence { ONLINE, OFFLINE, UNKNOWN }
 internal val DEVICE_PLATFORM_NAME: List<Pair<String, String>> = listOf(
     "nicla-vision" to "Nicla Vision",
     "nicla-voice" to "Nicla Voice",
+    // The Sense ME (beacon version 3) is relayed by iOS today; Android names
+    // its row the same so a fleet reads identically from both phones.
+    "nicla-sense" to "Nicla Sense",
+    "q-the-brain" to "UNO Q",
     "darwin" to "Mac",
     "mac" to "Mac",
     "ipad" to "iPad",
@@ -483,7 +504,7 @@ internal fun presenceLine(d: DeviceRow, nowSec: Long): String {
  * when it may not?
  *
  * The worker's own definition of a dial-in device answers it. `PULL_KINDS`
- * (worker/src/devices.ts) is documented as the kinds that "hold a
+ * (chatgpt-plugin-tinyai/src/devices.ts) is documented as the kinds that "hold a
  * `tind_` token, heartbeat, poll the relay" — one loop, both jobs. A device
  * outside the 60s `PRESENCE_WINDOW_S` is therefore not reading the relay either,
  * so an invoke posted to it can only wait out the caller's own poll budget.
@@ -547,7 +568,7 @@ internal fun presenceLine(d: DeviceRow, nowSec: Long): String {
  *
  * It is REACHABLE, not theoretical, and the chain is worth keeping written down:
  * the worker answers `404 {error:"peer not found"}` for a peer it can't resolve
- * (`worker/src/messages.ts:300`), and `/api/messages` forwards the
+ * (`chatgpt-plugin-tinyai/src/messages.ts:300`), and `/api/messages` forwards the
  * worker's status **verbatim** (`route.ts:34` — `new Response(await res.text(),
  * { status: res.status })`, as do `/api/jobs:21` and `/api/graph:31`). So opening a
  * thread with a peer the worker no longer resolves says "that tiny doesn't exist"
@@ -707,8 +728,44 @@ internal object LoadFailure {
  * the rule derives the status itself rather than trusting a caller to remember.
  */
 internal object RevokeFailure {
-    /** The outcome clause, before any reason. Byte-identical on iOS and web (pinned). */
+    /** The outcome clause for a DECISION. Byte-identical on iOS and web (pinned). */
     const val lead = "Not revoked — its token still works."
+
+    /**
+     * The outcome clause when there was no decision — also byte-identical across the
+     * three surfaces.
+     *
+     * It states the same FACT the other lead does (what is true of the device's token)
+     * rather than describing the HTTP call, and mirrors its shape, so a reader who has
+     * seen "its token still works" notices at a glance that this one is hedged. And it
+     * carries the action, because here there is one.
+     */
+    const val unconfirmedLead =
+        "Not confirmed — its token may or may not still work, and revoking again is safe."
+
+    /**
+     * Is this status a decision about the revoke — proof it did not happen?
+     *
+     * Only a 4xx. Every 4xx on this path refuses BEFORE anything is written:
+     * `/api/devices` answers 401 with no session and 400 with no deviceId, both before
+     * it calls the worker, and its 424 arm fires only for a worker 4xx — whose own
+     * 401/400 arms precede `DEVICE_REVOKE_SQL`.
+     *
+     * Nothing else is, and [lead] used to be said about all of them:
+     *
+     *  - **0** — the request threw, so nothing answered. The DELETE may have been
+     *    received and executed; the ANSWER is what was lost.
+     *  - **5xx** — it broke mid-decision. The route's transient arm never reached the
+     *    worker, but a worker 5xx can land after the UPDATE has run.
+     *  - **a 2xx that is not a success** — a mid-redeploy HTML page or an intermediary
+     *    answering 200 with something that isn't this route's body.
+     *
+     * [unconfirmedLead] can promise a safe retry because `DEVICE_REVOKE_SQL` is an
+     * idempotent `UPDATE … SET revoked = 1` with no `revoked = 0` guard, and
+     * `DEVICE_LIST_SQL` filters `revoked = 0` — so the list is the answer and asking
+     * twice is free. Both are pinned in tests/revoke-message.test.ts.
+     */
+    fun decided(status: Int): Boolean = status in 400..499
 
     /**
      * The status a response actually represents.
@@ -749,11 +806,14 @@ internal object RevokeFailure {
      * always agree — the route's own comment says a false success "would hide a
      * still-live device token from the user", and the row is dropped optimistically
      * on the strength of this answer.
+     *
+     * ⚠️ The LEAD is chosen by the status, not fixed — see [decided].
      */
     fun message(res: JSONObject?): String? {
         val status = statusOf(res)
         if (status in 200..299 && res?.optBoolean("ok") == true) return null
-        return lead + " " + statusLine(status, res?.optString("error")?.takeIf { it.isNotEmpty() })
+        val opening = if (decided(status)) lead else unconfirmedLead
+        return opening + " " + statusLine(status, res?.optString("error")?.takeIf { it.isNotEmpty() })
     }
 }
 
@@ -1831,6 +1891,38 @@ internal fun VoiceDevicePanel(app: TinyApp, deviceId: String) {
             // take, because with a Stop the window costs nothing — you end it
             // when you stop talking, and the take reports its REAL length.
             HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            // 🎙️ …and the hands-free way in: the wake word as the record button.
+            //
+            // The OFF switch, not an opt-in gate (default ON, iOS parity): a
+            // necklace whose whole job is hearing you is not much use if hearing
+            // you does nothing. It lives HERE, beside the wake list it acts on,
+            // rather than in Settings — this is where a person is when they wonder
+            // what saying the wake word actually does.
+            var recordOnWake by remember { mutableStateOf(app.config.recordOnWake) }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Mic, contentDescription = null, tint = TinyGray, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    // "at least", because the take EXTENDS while you are still
+                    // talking (PhoneRecorder.shouldExtend). Saying "record 10s"
+                    // would promise the truncation this closes.
+                    // Read off the gateway constant rather than typed as a literal,
+                    // so the sentence cannot drift from the seconds handleWake asks
+                    // for — a label promising 10s over a 5s take is a lie no test
+                    // comparing two literals would catch.
+                    "record on wake (at least ${technology.tiny.app.fleet.NiclaVoiceGateway.WAKE_TAKE_SECONDS}s, longer while you talk)",
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = recordOnWake,
+                    onCheckedChange = { on -> recordOnWake = on; app.config.recordOnWake = on },
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = MaterialTheme.colorScheme.primary,
+                        checkedThumbColor = Color.Black,
+                    ),
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 OutlinedButton(
                     onClick = {
@@ -1924,6 +2016,9 @@ fun SettingsSheet(app: TinyApp, onReplayTour: () -> Unit = {}, onDismiss: () -> 
                 label = { Text("default tiny") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
+                // A tiny's @login, not prose — iOS guards the same field
+                // (Settings.swift:117).
+                keyboardOptions = FieldOptions.identifier,
             )
             Spacer(Modifier.height(12.dp))
 
@@ -1982,6 +2077,8 @@ fun SettingsSheet(app: TinyApp, onReplayTour: () -> Unit = {}, onDismiss: () -> 
                 label = { Text("server override (blank = tiny.technology)") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
+                // A hostname the app will dial — iOS guards it too (Settings.swift:432).
+                keyboardOptions = FieldOptions.identifier,
             )
             Spacer(Modifier.height(16.dp))
 
@@ -2047,6 +2144,12 @@ fun SettingsSheet(app: TinyApp, onReplayTour: () -> Unit = {}, onDismiss: () -> 
                         // User-scoped tiny_config channels (offline send queue, composer
                         // draft, activity high-water mark) — same boundary as the switch.
                         app.config.scrubIdentity()
+                        // 🎥 A glasses clip parked for the agent's next call is video of
+                        // THIS user's surroundings on a public-but-unguessable /media/
+                        // URL, and a rolling recording would upload under the next token
+                        // to arrive (authed() reads tokenProvider() at call time). Drop
+                        // both before the token goes — same boundary as the send queue.
+                        technology.tiny.app.fleet.GlassesRecorderBridge.endSession()
                         app.auth.logout()
                         onDismiss()
                     }
@@ -2370,6 +2473,11 @@ private fun ModelConfigSection(app: TinyApp) {
             placeholder = { Text(preset.keyPlaceholder, style = MaterialTheme.typography.bodySmall) },
             singleLine = true,
             visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+            // ⚠️ `secret` regardless of `showKey`: the reveal toggle changes what the SCREEN
+            // draws, and the IME's learned-words dictionary is not a drawing. Sending the
+            // ordinary inputType while "show" is on would leak exactly the same string —
+            // and the footer below promises this key is stored encrypted on this device.
+            keyboardOptions = FieldOptions.secret,
             trailingIcon = {
                 if (apiKey.isNotEmpty()) {
                     TextButton(onClick = { showKey = !showKey }) {
@@ -2391,6 +2499,10 @@ private fun ModelConfigSection(app: TinyApp) {
             label = { Text("model") },
             placeholder = { Text(preset.modelPlaceholder, style = MaterialTheme.typography.bodySmall) },
             singleLine = true,
+            // A model id is matched byte-for-byte by the provider
+            // ("claude-opus-4-5-20251101"); an autocorrected one comes back as a
+            // 404 the user reads as "my key is broken".
+            keyboardOptions = FieldOptions.identifier,
             modifier = Modifier.fillMaxWidth(),
         )
 
@@ -2422,6 +2534,7 @@ private fun ModelConfigSection(app: TinyApp) {
                 label = { Text("base URL") },
                 placeholder = { Text("https://api.example.com/v1", style = MaterialTheme.typography.bodySmall) },
                 singleLine = true,
+                keyboardOptions = FieldOptions.identifier,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -2443,6 +2556,9 @@ private fun ModelConfigSection(app: TinyApp) {
             onValueChange = { additionalFields = it },
             label = { Text("additional request fields (JSON, optional)") },
             placeholder = { Text("{\"anthropic_beta\": [\"context-1m-2025-08-07\"]}", style = MaterialTheme.typography.bodySmall) },
+            // Hand-typed JSON: a capitalised key or a "corrected" flag name is a
+            // parse error or, worse, a request field the provider silently ignores.
+            keyboardOptions = FieldOptions.identifier,
             modifier = Modifier.fillMaxWidth(),
         )
     } else {
@@ -2535,6 +2651,7 @@ private fun VoiceKeySection(app: TinyApp) {
         placeholder = { Text("sk-...", style = MaterialTheme.typography.bodySmall) },
         singleLine = true,
         visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+        keyboardOptions = FieldOptions.secret,
         trailingIcon = {
             if (key.isNotEmpty()) {
                 TextButton(onClick = { showKey = !showKey }) {

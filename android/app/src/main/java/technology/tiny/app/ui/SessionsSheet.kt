@@ -65,7 +65,10 @@ fun SessionsSheet(vm: ChatViewModel, onDismiss: () -> Unit) {
                         modifier = Modifier.weight(1f),
                         singleLine = true,
                         placeholder = { Text("Name this conversation…") },
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        // A human-written title, so prose — but stated, because a bare
+                        // `KeyboardOptions(imeAction = …)` reads as "considered and
+                        // declined" when it is really "only the Enter key was thought about".
+                        keyboardOptions = FieldOptions.prose(ImeAction.Done),
                     )
                     Spacer(Modifier.width(8.dp))
                     val canSave = name.isNotBlank() && vm.messages.isNotEmpty()

@@ -263,6 +263,23 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
 
+        <!-- 🕶️🔐 Glasses-camera ASK: DAT 0.8.0 exposes the camera grant ONLY as
+             Wearables.RequestPermissionContract, an ActivityResultContract, so a
+             transparent activity owns the launcher and the prompt the user sees
+             belongs to the Meta AI app. Without it a capture asked for from web
+             chat or a voice call could only say "grant it in settings".
+             ⚠️ No android:noHistory here, unlike the screenshot consent above:
+             this one waits on a result from an activity in ANOTHER app, and a
+             no-history activity can be finished as soon as that screen covers
+             it — taking the result callback with it. It finishes itself in the
+             callback instead, so a grant answered minutes later still lands and
+             still closes the window. -->
+        <activity
+            android:name=".fleet.GlassesCameraConsentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true" />
+
         <!-- Live 📞 call: carries the mic+playback foreground privilege while a
              call runs so screen-off/backgrounding can't cut AudioRecord.
              VoiceCall owns the actual WS + audio; this is privilege + the

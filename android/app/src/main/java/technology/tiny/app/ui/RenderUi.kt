@@ -6,7 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Public
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -28,17 +28,25 @@ import technology.tiny.app.ui.theme.TinyGray
  *  array would allocate a view per element on the main thread (hang/OOM). */
 private const val RENDER_LIST_CAP = 100
 
+/** Table caps — ≤6 columns, ≤30 rows, iOS parseTable/tableFromRows parity. Same
+ *  reason as RENDER_LIST_CAP: every cell is an eager Compose Text. */
+private const val RENDER_TABLE_COLS = 6
+private const val RENDER_TABLE_ROWS = 30
+
 /**
  * The shape a render_ui `props` blob resolves to — the PURE half of RenderUiCard,
  * extracted so the classification (iOS parseRenderUi parity) is unit-testable
  * without Compose. Deliberately mirrors iOS's decision ORDER: explicit shapes
  * (markdown/text, table, items) first because the agent chose them on purpose,
- * then chart candidates, then a scalar-dict key/value fallback, then raw.
+ * then chart candidates, then those same rows as a keyed table, then a scalar-dict
+ * key/value fallback, then raw.
  */
 internal sealed interface RenderContent {
-    data class Chart(val entries: List<JSONObject>) : RenderContent // → DataRows (chart or kv)
+    data class Chart(val entries: List<JSONObject>) : RenderContent // rows chartPoints ACCEPTED
     data class Items(val items: JSONArray) : RenderContent
     data class Table(val columns: JSONArray, val rows: JSONArray) : RenderContent
+    /** A resolved table: rows that did NOT chart, headed by their own keys. */
+    data class Rows(val columns: List<String>, val rows: List<List<String>>) : RenderContent
     data class Md(val text: String) : RenderContent
     data class KeyValues(val pairs: List<Pair<String, String>>) : RenderContent
     data class StringList(val items: List<String>) : RenderContent
@@ -52,6 +60,44 @@ private fun objectRows(arr: JSONArray?): List<JSONObject>? {
     val out = ArrayList<JSONObject>(arr.length())
     for (i in 0 until arr.length()) out.add(arr.optJSONObject(i) ?: return null)
     return out
+}
+
+/**
+ * One table cell (iOS `cellString`). A MISSING key and an explicit JSON `null`
+ * both read as blank; anything else is stringified, because a cell the app can't
+ * pretty-print is still evidence there is something there.
+ *
+ * ⚠️ `org.json` returns the `JSONObject.NULL` SENTINEL for an explicit null, and
+ * its `toString()` is the four characters `null` — so the object-keyed table path
+ * used to print a literal "null" where iOS and web print an empty cell. Never
+ * `.toString()` a cell without coming through here.
+ */
+internal fun cellString(cell: Any?): String =
+    if (cell == null || cell == JSONObject.NULL) "" else cell.toString()
+
+/**
+ * Rows the chart path rejected, drawn as a table headed by the rows' OWN keys
+ * (iOS `tableFromRows`). Null when the rows carry no keys at all.
+ *
+ * ⚠️ NO KEY-NAME GUESSING. This replaced a fallback that read `label|name|x` for
+ * the label and `value|y|count` for the value, which silently dropped every other
+ * column: `{"name":"a","status":"ok"}` drew "a" beside a BLANK cell, losing the
+ * one thing the row was about, and `{"foo":"bar"}` drew a visible row of two
+ * empty strings. The app does not know which key is "the label", so it shows
+ * every column under its own name — the shape iOS `b61c7afe` chose, and the
+ * reason that commit flagged this side as the lossy one.
+ *
+ * Columns are the sorted union of the CAPPED rows' keys — sorted for the same
+ * reason iOS sorts (no insertion order to trust), and the union so a row missing
+ * a key gets a blank cell instead of shifting its neighbours' cells left.
+ */
+private fun tableFromRows(rows: List<JSONObject>): RenderContent.Rows? {
+    val capped = rows.take(RENDER_TABLE_ROWS)
+    val keys = sortedSetOf<String>()
+    for (row in capped) row.keys().forEach { keys.add(it) }
+    val columns = keys.take(RENDER_TABLE_COLS)
+    if (columns.isEmpty()) return null
+    return RenderContent.Rows(columns, capped.map { row -> columns.map { cellString(row.opt(it)) } })
 }
 
 /**
@@ -80,10 +126,10 @@ internal fun classifyRenderUi(propsJson: String): RenderContent {
         // array-of-objects regardless: given e.g. {a:[{x:"one"}], b:[{m,v},…]} it
         // charted `a` (which can't chart — 1 row / no numeric column) and rendered
         // its degenerate label/value rows, never surfacing `b`'s real chart. Collect
-        // candidates and prefer the first that charts. If NONE chart, keep the first
-        // array-of-objects as a Chart so DataRows still renders it as label/value rows
-        // — Android's fallback iOS lacks (iOS drops it: a container value is skipped by
-        // the scalar-dict path below, so it would land on .empty).
+        // candidates and prefer the first that charts. If NONE chart, the first
+        // array-of-objects is still ROWS — drawn as a table headed by its own keys
+        // (iOS parseRenderUi's tableFromRows), because rows in hand that merely fail
+        // to chart are rows, not nothing.
         val candidates = ArrayList<List<JSONObject>>()
         objectRows(obj.optJSONArray("data"))?.let { candidates.add(it) }
         val keys = obj.keys()
@@ -91,7 +137,9 @@ internal fun classifyRenderUi(propsJson: String): RenderContent {
             objectRows(obj.optJSONArray(keys.next()))?.let { candidates.add(it) }
         }
         candidates.firstOrNull { chartPoints(it) != null }?.let { return RenderContent.Chart(it) }
-        candidates.firstOrNull()?.let { return RenderContent.Chart(it) }
+        // BEFORE the scalar key/value path below, like iOS: the array is the data,
+        // and the loose scalars beside it are usually the caption/meta around it.
+        candidates.firstOrNull()?.let { rows -> tableFromRows(rows)?.let { return it } }
         // Scalar dict → sorted key/value rows (iOS :78-83) — NOT a raw JSON dump.
         // Skip nested objects/arrays/null; stringify scalars; sort by key; cap.
         val pairs = obj.keys().asSequence().mapNotNull { k ->
@@ -102,10 +150,14 @@ internal fun classifyRenderUi(propsJson: String): RenderContent {
         if (pairs.isNotEmpty()) return RenderContent.KeyValues(pairs)
         return RenderContent.Empty
     }
-    // Top-level array (iOS :86-92): array-of-objects → chart, array-of-strings → list.
+    // Top-level array (iOS :102-112): array-of-objects → chart, then the same row
+    // fallback one level up, then array-of-strings → list.
     val arr = runCatching { JSONArray(propsJson) }.getOrNull()
     if (arr != null) {
-        objectRows(arr)?.let { return RenderContent.Chart(it) }
+        objectRows(arr)?.let { rows ->
+            if (chartPoints(rows) != null) return RenderContent.Chart(rows)
+            tableFromRows(rows)?.let { return it }
+        }
         val strings = (0 until arr.length()).mapNotNull { arr.opt(it) as? String }.take(RENDER_LIST_CAP)
         if (strings.isNotEmpty()) return RenderContent.StringList(strings)
     }
@@ -116,9 +168,9 @@ internal fun classifyRenderUi(propsJson: String): RenderContent {
 /**
  * render_ui tool → native card from `props` ONLY. The componentCode field is
  * React source for the web client and is NEVER evaluated here (iOS parity).
- * Shapes: {data:[…]}/top-level array → chart/rows · {items:[…]} → list ·
- * {columns,rows}/{table:{…}} → table · {markdown|text} → markdown · scalar dict
- * → key/value rows · else raw text.
+ * Shapes: {data:[…]}/top-level array → chart, or a table headed by the rows' own
+ * keys when they don't chart · {items:[…]} → list · {columns,rows}/{table:{…}} →
+ * table · {markdown|text} → markdown · scalar dict → key/value rows · else raw text.
  */
 @Composable
 fun RenderUiCard(title: String?, propsJson: String) {
@@ -134,6 +186,7 @@ fun RenderUiCard(title: String?, propsJson: String) {
             }
             when (content) {
                 is RenderContent.Chart -> DataRows(content.entries)
+                is RenderContent.Rows -> KeyedTable(content.columns, content.rows)
                 is RenderContent.Items -> ItemList(content.items)
                 is RenderContent.Table -> SimpleTable(content.columns, content.rows)
                 is RenderContent.Md -> MarkdownText(content.text)
@@ -145,23 +198,28 @@ fun RenderUiCard(title: String?, propsJson: String) {
                     color = TinyGray,
                 )
                 // Unclassifiable props (empty {}, or a componentCode-only call the
-                // model emitted despite the native props-required tool contract): iOS
-                // shows a "view on web" fallback card (RenderUi.swift .empty) rather
-                // than nothing — Android used to `return` here, so the SAME call drew
-                // a card on iOS/web but a blank void on this phone (the "render_ui
-                // renders nothing" report). Match iOS: a titled fallback, never empty.
+                // model emitted despite the native props-required tool contract).
+                // Android used to `return` here, so the SAME call drew a card on
+                // iOS/web but a blank void on this phone (the "render_ui renders
+                // nothing" report): a fallback, never empty.
+                //
+                // ⚠️ The words used to be "Interactive version on the web app" on both
+                // native clients, and neither can know that: componentCode is never
+                // sent to them (renderUiNativeTool documents it as "Ignored on this
+                // client — omit it"), so there is no web version of THIS payload to
+                // go and see. Same copy as iOS's .empty — say only what the app knows.
                 RenderContent.Empty -> Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Icon(
-                        Icons.Outlined.Public,
+                        Icons.Outlined.Info,
                         contentDescription = null,
                         tint = TinyGray,
                         modifier = Modifier.size(16.dp),
                     )
                     Text(
-                        "Interactive version on the web app",
+                        "No data in this card",
                         style = MaterialTheme.typography.labelSmall,
                         color = TinyGray,
                     )
@@ -234,26 +292,40 @@ private fun chartPoints(entries: List<JSONObject>): Pair<List<ChartPoint>, Int>?
     return points to seriesKeys.size
 }
 
+/**
+ * Rows that DID chart. `RenderContent.Chart` is only produced when `chartPoints`
+ * already succeeded, so there is no non-charting branch here any more — rows that
+ * don't chart become `RenderContent.Rows` and are drawn by [KeyedTable].
+ *
+ * ⚠️ Nothing in here may guess a key name. The fallback that used to live here
+ * read label|name|x and value|y|count and dropped every other column.
+ */
 @Composable
 private fun DataRows(entries: List<JSONObject>) {
-    val chart = chartPoints(entries)
-    if (chart != null) {
-        val (points, seriesCount) = chart
-        val labelCount = points.map { it.label }.distinct().size
-        // Few categories, one series → bars; dense or multi-series → lines (iOS parity).
-        if (seriesCount == 1 && labelCount <= 10) BarChart(points) else LineChart(points, seriesCount)
-        return
+    val (points, seriesCount) = chartPoints(entries) ?: return
+    val labelCount = points.map { it.label }.distinct().size
+    // Few categories, one series → bars; dense or multi-series → lines (iOS parity).
+    if (seriesCount == 1 && labelCount <= 10) BarChart(points) else LineChart(points, seriesCount)
+}
+
+/** Rows drawn under their OWN column names — the already-stringified [tableFromRows]. */
+@Composable
+private fun KeyedTable(columns: List<String>, rows: List<List<String>>) {
+    Row(Modifier.fillMaxWidth()) {
+        columns.forEach { c ->
+            Text(
+                c,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.weight(1f),
+            )
+        }
     }
-    // No numeric column across every row → key-value rows (agent-varied label keys).
-    fun labelOf(e: JSONObject) = e.optString("label")
-        .ifEmpty { e.optString("name") }
-        .ifEmpty { e.optString("x") }
-    fun valueOf(e: JSONObject): Any? = e.opt("value") ?: e.opt("y") ?: e.opt("count")
-    entries.forEach { e ->
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-            Text(labelOf(e), style = MaterialTheme.typography.labelSmall,
-                color = TinyGray, modifier = Modifier.weight(1f))
-            Text(valueOf(e)?.toString().orEmpty(), style = MaterialTheme.typography.bodyMedium)
+    rows.forEach { cells ->
+        Row(Modifier.fillMaxWidth()) {
+            cells.forEach { cell ->
+                Text(cell, style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1f))
+            }
         }
     }
 }
@@ -380,7 +452,10 @@ private fun SimpleTable(columns: JSONArray, rows: JSONArray) {
                 val cell = if (arr != null) arr.opt(c)
                            else obj!!.opt(columns.opt(c)?.toString().orEmpty())
                 Text(
-                    cell?.toString().orEmpty(),
+                    // ONE stringifier for both table paths (iOS cellString), so the
+                    // two cannot diverge — and `opt` hands back JSONObject.NULL for an
+                    // explicit null, whose toString() is the word "null".
+                    cellString(cell),
                     style = MaterialTheme.typography.labelSmall,
                     modifier = Modifier.weight(1f),
                 )

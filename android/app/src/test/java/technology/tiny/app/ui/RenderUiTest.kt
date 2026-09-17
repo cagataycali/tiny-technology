@@ -9,6 +9,11 @@ import org.junit.Test
  * Guards the two blank-card regressions this replaced: a top-level JSON array
  * (rendered NOTHING) and a scalar dict (dumped raw JSON instead of key/value
  * rows). Pure Kotlin + org.json — runs on the local JVM, no Compose.
+ *
+ * ⚠️ The classifier is the whole testable surface, so a shape that resolves must
+ * resolve to something a composable actually DRAWS — asserting the columns and the
+ * cells, not just the case. A `Rows` whose cells were all blank would satisfy
+ * `is RenderContent.Rows` and render an empty table.
  */
 class RenderUiTest {
 
@@ -68,13 +73,102 @@ class RenderUiTest {
         assertEquals(2, (c as RenderContent.Chart).entries.size) // charted `b`, not `a`
     }
 
-    @Test fun `when no candidate charts the first array-of-objects is still a Chart for row fallback`() {
-        // Neither array charts (each 1 row / no numeric column). iOS drops both and
-        // lands on .empty; Android keeps the first as a Chart so DataRows renders it
-        // as label/value rows — the fallback iOS lacks. Guards that fallback survives.
+    @Test fun `when no candidate charts the first array-of-objects is still drawn, as rows`() {
+        // Neither array charts (each 1 row / no numeric column). The rows are still
+        // rows: the FIRST candidate becomes a keyed table. iOS reaches the identical
+        // shape through parseRenderUi's tableFromRows.
         val c = classifyRenderUi("""{"a":[{"label":"x","value":"hi"}],"b":[{"label":"y","value":"lo"}]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        c as RenderContent.Rows
+        assertEquals(listOf("label", "value"), c.columns)
+        assertEquals(listOf(listOf("x", "hi")), c.rows)   // candidate `a`, not `b`
+    }
+
+    // ---- rows that don't chart are still rows (iOS b61c7afe parity) ------------
+
+    @Test fun `a record list keeps EVERY column, not a guessed label and value`() {
+        // 🔴 THE DEFECT. This drew "a" beside a BLANK cell: the old fallback read
+        // label|name|x for the label and value|y|count for the value, so `status` —
+        // the only thing either row was about — was silently dropped. There is no
+        // key here the app could have guessed, which is exactly why it must not try.
+        val c = classifyRenderUi("""{"data":[{"name":"a","status":"ok"},{"name":"b","status":"fail"}]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        c as RenderContent.Rows
+        assertEquals(listOf("name", "status"), c.columns)
+        assertEquals(listOf(listOf("a", "ok"), listOf("b", "fail")), c.rows)
+    }
+
+    @Test fun `a row whose keys are all unguessable is not a pair of empty strings`() {
+        // `{"foo":"bar"}` used to draw a visible, contentless line — two blank cells,
+        // because neither alias chain matched. Worse than dropping it: it looked like
+        // the data had arrived and was empty.
+        val c = classifyRenderUi("""{"data":[{"foo":"bar"}]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        c as RenderContent.Rows
+        assertEquals(listOf("foo"), c.columns)
+        assertEquals(listOf(listOf("bar")), c.rows)
+    }
+
+    @Test fun `a chartable candidate still wins — the fallback did not take over`() {
+        // The row fallback is reached only after the chart loop fails for EVERY
+        // candidate. If it ran first, every chart on the phone would become a table.
+        val c = classifyRenderUi("""{"data":[{"m":"jan","v":1},{"m":"feb","v":2}]}""")
         assertTrue("expected Chart, got $c", c is RenderContent.Chart)
-        assertEquals(1, (c as RenderContent.Chart).entries.size)
+    }
+
+    @Test fun `rows are drawn ahead of the scalar key-value path, like iOS`() {
+        // The array is the data; the loose scalars beside it are the caption. Ordered
+        // the other way, `title` alone would win and the rows would never be seen.
+        val c = classifyRenderUi("""{"title":"Runs","data":[{"id":"a","state":"ok"}]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        assertEquals(listOf("id", "state"), (c as RenderContent.Rows).columns)
+    }
+
+    @Test fun `columns are the sorted UNION of the rows' keys, blank where a row lacks one`() {
+        // A row missing a key must get a blank cell, not shift its neighbours' cells
+        // left under the wrong headers. Sorted so the same payload draws the same
+        // table every time — org.json's key order is a hash order, not insertion.
+        val c = classifyRenderUi("""{"data":[{"b":"1"},{"a":"2","c":"3"}]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        c as RenderContent.Rows
+        assertEquals(listOf("a", "b", "c"), c.columns)
+        assertEquals(listOf(listOf("", "1", ""), listOf("2", "", "3")), c.rows)
+    }
+
+    @Test fun `a JSON null cell is blank, not the word null`() {
+        // org.json hands back the JSONObject.NULL sentinel, whose toString() is the
+        // four characters "null" — so a bare .toString() PRINTS it where iOS and web
+        // print an empty cell.
+        val c = classifyRenderUi("""{"data":[{"k":"a","v":null}]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        assertEquals(listOf(listOf("a", "")), (c as RenderContent.Rows).rows)
+    }
+
+    @Test fun `a top-level array that cannot chart is drawn too, not dropped`() {
+        // Same rule one level up. This shape reached no path at all: it isn't a
+        // string list, and the object branch never sees it.
+        val c = classifyRenderUi("""[{"name":"a","status":"ok"},{"name":"b","status":"fail"}]""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        assertEquals(listOf("name", "status"), (c as RenderContent.Rows).columns)
+    }
+
+    @Test fun `the table caps hold — 6 columns and 30 rows, like the columns-rows path`() {
+        // Untrusted agent JSON, and every cell is an eager Compose Text.
+        val rows = (1..40).joinToString(",") { i ->
+            (1..9).joinToString(",", "{", "}") { k -> """"k$k":"v$i-$k"""" }
+        }
+        val c = classifyRenderUi("""{"data":[$rows]}""")
+        assertTrue("expected Rows, got $c", c is RenderContent.Rows)
+        c as RenderContent.Rows
+        assertEquals(6, c.columns.size)
+        assertEquals(30, c.rows.size)
+        assertTrue("every row is as wide as the header", c.rows.all { it.size == 6 })
+    }
+
+    @Test fun `rows with no keys at all fall through instead of drawing a headerless table`() {
+        // `[{}]` carries no columns; a Rows with an empty header would be a blank
+        // surface wearing a table's clothes. The scalar path then gets its turn.
+        assertEquals(RenderContent.Empty, classifyRenderUi("""{"data":[{}]}"""))
     }
 
     @Test fun `flat columns and rows is a table`() {

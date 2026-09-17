@@ -34,11 +34,7 @@ import com.meta.wearable.dat.camera.types.StreamState
 import com.meta.wearable.dat.camera.types.VideoFrame
 import com.meta.wearable.dat.camera.types.VideoQuality
 import com.meta.wearable.dat.core.Wearables
-import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
-import com.meta.wearable.dat.core.session.DeviceSessionState
-import com.meta.wearable.dat.core.types.Permission
-import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.core.types.RegistrationState
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
@@ -53,6 +49,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 
 object GlassesLive {
+    /** This rail's name in [BtMic]'s holder set — see `acquire`'s warning. */
+    private const val BT_OWNER = "hud-transcript"
+
     private val _frame = MutableStateFlow<Bitmap?>(null)
     val frame: StateFlow<Bitmap?> = _frame
 
@@ -99,22 +98,17 @@ object GlassesLive {
             if (Wearables.registrationState.first() != RegistrationState.REGISTERED) {
                 throw WearablesCaptureException("No Meta glasses linked — link them in settings first")
             }
-            val camera = CompletableDeferred<PermissionStatus>()
-            Wearables.checkPermissionStatus(Permission.CAMERA)
-                .onSuccess { camera.complete(it) }
-                .onFailure { error, _ -> camera.completeExceptionally(WearablesCaptureException(error.description)) }
-            if (camera.await() != PermissionStatus.Granted) {
-                throw WearablesCaptureException("Glasses camera permission not granted — grant it in settings → meta glasses")
-            }
+            // Asks via the Meta AI app when it isn't granted yet (iOS
+            // WearablesLive.swift:111 parity) — the 🕶 tap that opens this card
+            // used to fail with "grant it in settings" and no way to say yes.
+            WearablesBridge.ensureCameraPermission(context)
 
-            val sessionDeferred = CompletableDeferred<DeviceSession>()
-            Wearables.createSession(AutoDeviceSelector())
-                .onSuccess { sessionDeferred.complete(it) }
-                .onFailure { error, _ -> sessionDeferred.completeExceptionally(WearablesCaptureException("session: ${error.description}")) }
-            val s = sessionDeferred.await()
+            // One door for the session (WearablesBridge.openSession): it uses
+            // the long-lived selector. A newborn AutoDeviceSelector() here read
+            // as NO_ELIGIBLE_DEVICE by construction — the HUD's "session: no
+            // eligible device" with the glasses awake on your face.
+            val s = WearablesBridge.openSession(context, startTimeoutMs = 25_000)
             session = s
-            s.start()
-            withTimeout(25_000) { s.state.first { it == DeviceSessionState.STARTED } }
 
             val streamDeferred = CompletableDeferred<Stream>()
             s.addStream(StreamConfiguration(videoQuality = VideoQuality.LOW, frameRate = 24))
@@ -250,7 +244,7 @@ object GlassesLive {
         transcriptionJob = scope.launch(Dispatchers.Main) {
             // Hear through the GLASSES when they're connected (BtMic.kt —
             // iOS `.allowBluetooth` parity); phone mic otherwise, as before.
-            val viaBt = BtMic.acquire(app)
+            val viaBt = BtMic.acquire(app, BT_OWNER)
             if (viaBt) kotlinx.coroutines.delay(800)
             val (recognizer, _) = WearablesListenerBridge.newRecognizer(app)
             try {
@@ -263,7 +257,7 @@ object GlassesLive {
                 }
             } finally {
                 runCatching { recognizer.destroy() }
-                BtMic.release(app)
+                BtMic.release(app, BT_OWNER)
             }
         }
     }

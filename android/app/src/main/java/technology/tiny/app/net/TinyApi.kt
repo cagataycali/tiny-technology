@@ -147,6 +147,33 @@ class TinyApi(
         .callTimeout(120, TimeUnit.SECONDS)
         .build()
 
+    /**
+     * PUT /api/x402/pay — the app's ONE money-moving call, and the longest server
+     * route we talk to. It needs its own class because BOTH clients above are
+     * shorter than the route is allowed to run:
+     *
+     *   route `maxDuration = 180`, and its own header spells out the SEQUENTIAL
+     *   internal budget it spends before it can answer gracefully —
+     *   re-probe (30s) → sign → paid fetch (90s) → reconcile-log → 202 return.
+     *
+     * So `jsonClient`'s 30s hangs up during the route's FIRST internal step, and
+     * even [settleClient]'s 120s (sized for withdraw's ~105s, still correct there)
+     * gives up right when the route is logging the reconcile marker and returning
+     * the **202 pending_confirmation** — the one reply designed to stop a
+     * double-pay. Hanging up early doesn't cancel the payment; it just means we
+     * never hear the answer, and [WalletCore.parsePayResult]'s null lands the card
+     * on "not sent" for a payment that may well have settled.
+     *
+     * 195s is web's number for the same call (`lib/deadlines.ts` → `/api/x402/pay`,
+     * chosen "deliberately ABOVE the route's maxDuration=180"), so all three
+     * clients now outlast the server rather than racing it. Pinned in
+     * tests/pay-deadline-above-route.test.ts, which reads `maxDuration` out of the
+     * route itself — raise that and the pin fails here.
+     */
+    private val payClient = client.newBuilder()
+        .callTimeout(195, TimeUnit.SECONDS)
+        .build()
+
     private fun authed(builder: Request.Builder): Request.Builder {
         tokenProvider()?.let { builder.header("Authorization", "Bearer $it") }
         return builder
@@ -193,6 +220,18 @@ class TinyApi(
             Request.Builder().url(base + path).put(body.toString().toRequestBody(JSON_MEDIA))
         ).build()
         return executeJson(req)
+    }
+
+    /**
+     * PUT the x402 settlement on [payClient]. Deliberately NOT a longer default for
+     * [putJson]: the other PUT caller is the devices relay long-poll, which runs on
+     * a 5s cadence and wants the short cap.
+     */
+    suspend fun putJsonPay(path: String, body: JSONObject): JSONObject {
+        val req = authed(
+            Request.Builder().url(base + path).put(body.toString().toRequestBody(JSON_MEDIA))
+        ).build()
+        return executeJson(req, payClient)
     }
 
     suspend fun patchJson(path: String, body: JSONObject): JSONObject {

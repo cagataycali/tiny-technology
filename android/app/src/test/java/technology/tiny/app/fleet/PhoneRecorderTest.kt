@@ -55,6 +55,62 @@ class PhoneRecorderTest {
         assertFalse("an audioUrl here would be a lie about hosted audio", r.has("audioUrl"))
     }
 
+    // ── WHICH microphone heard it ─────────────────────────────────────────────
+    //
+    // c66 routed this rail through the glasses; nothing said so. A take made
+    // through a headset on the user's face and a take made through the phone in
+    // their pocket produced byte-identical replies, and the tool's own text told
+    // the agent the phone "records through its own mic" either way. The words
+    // arrive in both cases — only the ROOM differs, and nothing else in the reply
+    // can reveal it.
+
+    @Test fun `the reply says WHICH microphone heard the take`() {
+        val r = PhoneRecorder.reply(ok("buy milk").copy(micRoute = "bluetooth"))
+        assertEquals("bluetooth", r.optString("micRoute"))
+    }
+
+    @Test fun `the phone's own mic is reported just as explicitly`() {
+        // Not an absence. "phone" is a POSITIVE answer — the agent may say the
+        // phone heard it — and it must be distinguishable from "nobody knows".
+        val r = PhoneRecorder.reply(ok("buy milk").copy(micRoute = "phone"))
+        assertEquals("phone", r.optString("micRoute"))
+    }
+
+    @Test fun `a take that never opened a mic reports NO route, rather than guessing`() {
+        // The failure constructors leave it null: no recognizer, no permission, mic
+        // busy. A defaulted "phone" there would claim the built-in mic heard the
+        // silence of a take that never ran — and the tool would pass that on.
+        assertFalse(
+            "an unknown route must be absent, not defaulted",
+            PhoneRecorder.reply(ok("buy milk")).has("micRoute"),
+        )
+        val failed = PhoneRecorder.reply(
+            PhoneRecorder.Take(false, "", "tr-1", 0, "microphone permission is not granted on this phone"),
+        )
+        assertFalse(failed.has("micRoute"))
+    }
+
+    @Test fun `the route words are meta_listen's words, exactly`() {
+        // The agent compares this field across rails by string equality, so the
+        // SPELLING is the contract: WearablesListener posts "bluetooth"/"phone"
+        // and iOS's MicRoute.current() returns the same two. "bt" or "headset"
+        // would be a different fact to any reader — and would look correct in
+        // every file that produced it.
+        assertEquals("bluetooth", PhoneRecorder.route(viaBluetooth = true))
+        assertEquals("phone", PhoneRecorder.route(viaBluetooth = false))
+    }
+
+    @Test fun `the route follows the LINK, not the rail that raised it`() {
+        // `route()` is asked about BtMic's state, not about this rail's own
+        // "did I call acquire" flag — a take that rode a link the HUD had already
+        // raised hears the headset just as much as one that raised it itself.
+        BtMic.clearHolders()
+        assertEquals("phone", PhoneRecorder.route(BtMic.active))
+        BtMic.noteHolder("hud-transcript") // another rail's link
+        assertEquals("bluetooth", PhoneRecorder.route(BtMic.active))
+        BtMic.clearHolders()
+    }
+
     @Test fun `a failed take carries BOTH error and result`() {
         // `error` is what makes the tool return ok:false. `result` is the belt:
         // a reply with neither field falls through the tool's parse to its "did
@@ -198,6 +254,125 @@ class PhoneRecorderTest {
         assertTrue("a zero/negative tick would spin the CPU", PhoneRecorder.STOP_TICK_MS > 0)
     }
 
+    // ── A take that ends when the SPEAKER does, not when a guess runs out ───
+    //
+    // `seconds` became a FLOOR for the wake path: someone who says the wake word
+    // and then talks for thirty seconds used to keep the first ten, with nothing
+    // in the stored row saying it had been cut. These pin the whole stop rule,
+    // which is why it is pure and takes its clock as a parameter — a microphone
+    // is not available here and never will be.
+
+    /** t=0 start, a 10s floor, extension allowed to the 120s ceiling. */
+    private fun extend(
+        nowMs: Long,
+        lastGrowthMs: Long = 0L,
+        stop: Boolean = false,
+        floorS: Int = 10,
+        capS: Int = PhoneRecorder.MAX_SECONDS,
+    ) = PhoneRecorder.shouldExtend(nowMs, floorS * 1000L, capS * 1000L, lastGrowthMs, stop)
+
+    @Test fun `the take runs its full window before extension is even a question`() {
+        // Inside the floor, growth is irrelevant: a take asked for 10s gets 10s
+        // whether or not anyone spoke. Held at 9.9s, the last tick that matters.
+        assertTrue(extend(0))
+        assertTrue("a silent take was cut short of what it asked for", extend(9_900))
+    }
+
+    @Test fun `words still arriving carry the take past its deadline`() {
+        // 🔴 THE GAP. At the 10s deadline with a word 0.5s ago, the old loop
+        // stopped and the rest of the sentence was never recorded.
+        assertTrue(extend(10_000, lastGrowthMs = 9_500))
+        assertTrue("a take stopped mid-sentence", extend(40_000, lastGrowthMs = 39_000))
+    }
+
+    @Test fun `silence past the deadline ends the take`() {
+        // The other half: without this it is an open microphone. 3s of no NEW
+        // words is the speaker being done, so the take must not linger.
+        assertFalse(extend(14_000, lastGrowthMs = 10_000))
+        // And the boundary itself is closed — exactly the grace is already over.
+        assertFalse(extend(13_000, lastGrowthMs = 10_000))
+        assertTrue("the grace ended a beat too early", extend(12_900, lastGrowthMs = 10_000))
+    }
+
+    @Test fun `the hard cap outranks words that never stop`() {
+        // ⚠️ A noisy room produces words forever. A take that never ends never
+        // uploads, never transcribes and never gives the mic back — worse than a
+        // truncated one. So growth 0.1s ago still loses at the ceiling.
+        assertFalse(
+            "an extending take outlived the ceiling",
+            extend(120_000, lastGrowthMs = 119_900),
+        )
+        assertFalse(extend(600_000, lastGrowthMs = 599_900))
+    }
+
+    @Test fun `the user's Stop beats every other rule`() {
+        // Checked FIRST, so it wins even inside the floor, where the take is
+        // otherwise unconditionally allowed to continue.
+        assertFalse("Stop was ignored inside the requested window", extend(1_000, stop = true))
+        assertFalse(extend(10_500, lastGrowthMs = 10_400, stop = true))
+    }
+
+    @Test fun `a take that never extends stops exactly at its window`() {
+        // The default path (relay, manual, memo): floor == cap, so the take ends
+        // at its deadline no matter how much is being said. This is the contract
+        // nicla_voice_record depends on — it polls for `seconds + 25`.
+        assertTrue(extend(9_900, lastGrowthMs = 9_800, floorS = 10, capS = 10))
+        assertFalse(
+            "a take nobody opted in for ran past its window",
+            extend(10_000, lastGrowthMs = 9_900, floorS = 10, capS = 10),
+        )
+    }
+
+    // ── The opt-in gate, which is a function precisely so it can be pinned ──
+
+    @Test fun `only an opted-in take may outrun what it asked for`() {
+        // ⚠️ iOS's own harness lesson, ported with the code: with this decision
+        // inline in record(), a mutation that let EVERY take extend passed the
+        // whole suite. The gate was unreachable from a test, so it was unprotected
+        // — and it is the gate that keeps the relay's budget honest.
+        assertEquals(10, PhoneRecorder.hardCapSeconds(10, extendWhileSpeaking = false))
+        assertEquals(120, PhoneRecorder.hardCapSeconds(10, extendWhileSpeaking = true))
+    }
+
+    @Test fun `extension is OFF by default — the budgeted callers are untouched`() {
+        // nicla_voice_record polls the relay for only `seconds + 25`. A take that
+        // extended to two minutes would answer an agent that had already given up:
+        // the transcript stored, the caller told it timed out. Only the wake path,
+        // with nobody waiting, opts in — and it does so explicitly.
+        assertEquals(30, PhoneRecorder.hardCapSeconds(30, false))
+    }
+
+    @Test fun `an extended take can never outlast one that asked for the maximum`() {
+        // The ceiling is the SAME number in both directions, so "extend" can only
+        // ever reach a length some caller could have requested outright.
+        assertEquals(
+            PhoneRecorder.hardCapSeconds(PhoneRecorder.MAX_SECONDS, false),
+            PhoneRecorder.hardCapSeconds(5, true),
+        )
+        assertEquals(PhoneRecorder.MAX_SECONDS, PhoneRecorder.hardCapSeconds(5, true))
+    }
+
+    @Test fun `the grace crosses a pause between sentences without holding the mic`() {
+        // Measured around 1s in normal speech, so anything under ~2s would cut
+        // people off mid-thought; anything approaching the floor itself would
+        // make every take an extended one.
+        assertTrue("too short to cross a breath", PhoneRecorder.SILENCE_GRACE_MS >= 2_000L)
+        assertTrue("the mic sits open after the room goes quiet", PhoneRecorder.SILENCE_GRACE_MS <= 5_000L)
+        // And it must be far coarser than the tick that samples it, or growth
+        // would be judged on a single slice of recognizer latency.
+        assertTrue(PhoneRecorder.SILENCE_GRACE_MS > PhoneRecorder.STOP_TICK_MS * 5)
+    }
+
+    @Test fun `an extended take still reports the length it really ran`() {
+        // The window passed to actualSeconds is the HARD CAP now, not what was
+        // asked for: clamped to `secs`, every 40-second wake take would be filed,
+        // replied and stored as 10 — the same lie a fixed 10s take used to tell.
+        val cap = PhoneRecorder.hardCapSeconds(10, extendWhileSpeaking = true)
+        assertEquals(40, PhoneRecorder.actualSeconds(40_000, cap))
+        // …while the un-extended take is still bounded by its own window.
+        assertEquals(10, PhoneRecorder.actualSeconds(40_000, PhoneRecorder.hardCapSeconds(10, false)))
+    }
+
     // ── The meter: proof the mic is really hearing something ────────────────
 
     @Test fun `silence and loud speech land at opposite ends of the meter`() {
@@ -258,5 +433,115 @@ class PhoneRecorderTest {
         } finally {
             MicClaim.release("voice")
         }
+    }
+
+    // ── The fallback rail's budget ────────────────────────────────────────────
+    //
+    // The rail that files NO row, so anything the worker truncates is gone with no
+    // id to fetch the rest with. These are the only tests in the app that assert
+    // against a cap living in someone else's repo, so they say WHERE it lives:
+    // worker `devices.ts` DeviceEventCall slices a client's detail to 240 BEFORE
+    // prepending the device name, which is why 240 binds and `emitEvent`'s 300 —
+    // the number the route advertises, and the number iOS budgets against — is
+    // never reached.
+
+    /** What the worker keeps of a client's detail, transcribed from devices.ts. */
+    private fun railKeeps(detail: String) = detail.take(PhoneRecorder.NOTE_DETAIL_MAX)
+
+    @Test fun `the note line survives the ring at the worst label the agent can send`() {
+        // 200 chars is not a synthetic input: it is exactly what PhoneRecorder.label
+        // permits, and `reason` is free text written by an agent.
+        val d = PhoneRecorder.noteDetail(PhoneRecorder.label("r".repeat(500)), "x".repeat(4000))
+        assertEquals(
+            "the worker cuts ${d.length - PhoneRecorder.NOTE_DETAIL_MAX} chars off the tail, " +
+                "and this rail files no row to fetch them from",
+            d, railKeeps(d),
+        )
+    }
+
+    @Test fun `the speech is what the budget is spent on, not the label`() {
+        val d = PhoneRecorder.noteDetail("r".repeat(500), "the roof guy comes tuesday at nine")
+        assertTrue(
+            "the words were pushed out by a label the agent already knows: $d",
+            d.contains("the roof guy comes tuesday at nine"),
+        )
+        assertFalse(
+            "the label ran past its own bound",
+            d.contains("r".repeat(PhoneRecorder.NOTE_LABEL_MAX + 1)),
+        )
+    }
+
+    @Test fun `a long take SPENDS the room the budget found, not a fixed 180`() {
+        // ⚠️ THIS IS THE HALF A ">= 180" ASSERTION CANNOT SEE, and a mutant proved
+        // it: with the label bounded at 40, `text.take(180)` never OVERFLOWS the
+        // ring — it just silently leaves 13–49 chars of the budget unspent, every
+        // time, on every label this app actually generates. So the assertion has to
+        // be that the room is USED, not merely that 180 survived. Measured:
+        //   memo → 229 chars of speech fit, manual → 227, web agent → 224,
+        //   wake: hey tiny → 219, necklace-live → 220.
+        for (label in listOf("memo", "manual", "web agent", "wake: hey tiny", "necklace-live")) {
+            val d = PhoneRecorder.noteDetail(label, "x".repeat(4000))
+            assertEquals("$label overshot the ring", d, railKeeps(d))
+            val words = d.count { it == 'x' }
+            assertTrue(
+                "$label left ${PhoneRecorder.NOTE_DETAIL_MAX - d.length} chars of the " +
+                    "budget unspent — the words were cut at $words, not at what fits",
+                d.length == PhoneRecorder.NOTE_DETAIL_MAX,
+            )
+            assertTrue("$label carries fewer words than the old take(180) did", words > 180)
+        }
+    }
+
+    @Test fun `the emoji is counted in the units the worker slices in`() {
+        // 🎙️ is U+1F399 U+FE0F — ONE grapheme, THREE utf-16 units. Kotlin's `take`
+        // and the worker's String.slice are both utf-16, so a budget computed here
+        // agrees with the cut there by construction. iOS budgets in graphemes and
+        // is 2 chars over its own cap for this exact reason.
+        assertEquals("🎙️ is no longer 3 utf-16 units — re-measure the shell", 3, "🎙️".length)
+        val d = PhoneRecorder.noteDetail("memo", "é".repeat(4000))
+        assertEquals("a multi-byte take overshot the ring", d, railKeeps(d))
+    }
+
+    @Test fun `a short take passes through unaltered`() {
+        // No padding, no truncation, and the shape the agent's prompt already reads.
+        assertEquals("🎙️ memo: “hello”", PhoneRecorder.noteDetail("memo", "hello"))
+    }
+
+    @Test fun `no label, however long, can take the speech below its floor`() {
+        // ⚠️ THE PROPERTY THE DEAD `maxOf` FLOOR ONLY LOOKED LIKE IT PROVIDED. Two
+        // mutants — deleting the floor, and setting it to 0 — both left every test
+        // green, because with the label bounded FIRST the room can never fall to 40
+        // from any input. So the guarantee is structural, and this asserts it
+        // against the bound rather than against a guard nothing reaches: iOS needs a
+        // real floor because its line reserves an unbounded audio URL; this line has
+        // no URL, so the label bound alone fixes the arithmetic.
+        for (label in listOf("", "memo", "r".repeat(40), "r".repeat(200), "r".repeat(5000))) {
+            val d = PhoneRecorder.noteDetail(label, "x".repeat(4000))
+            assertTrue(
+                "a ${label.length}-char label squeezed the speech to ${d.count { it == 'x' }}",
+                d.count { it == 'x' } >= PhoneRecorder.MIN_NOTE_PREVIEW,
+            )
+            assertEquals("a ${label.length}-char label overshot the ring", d, railKeeps(d))
+        }
+        // And the number that bound buys is worth stating: 193 chars of speech at the
+        // very worst label, against the 180 the old fixed slice gave at the best one.
+        // 192 chars of speech at the very worst label, against the 180 the old fixed
+        // slice gave at the BEST one. ⚠️ 192, not 193: 🎙️ is THREE utf-16 units (a
+        // surrogate pair plus U+FE0F), and counting it as two is how this constant was
+        // first written — caught here, which is the point of measuring in a test.
+        assertEquals("the label bound moved — re-measure what it costs the speech", 192, PhoneRecorder.MIN_NOTE_PREVIEW)
+        assertTrue("the worst case now carries less than the old fixed 180", PhoneRecorder.MIN_NOTE_PREVIEW > 180)
+    }
+
+    @Test fun `the budget defends the cap that BINDS, not the one advertised`() {
+        // ⚠️ THE FINDING, pinned as arithmetic so it cannot be "corrected" back to
+        // 300 by reading events.ts alone. The chain is route(300) →
+        // DeviceEventCall(`name: ` + detail.slice(0,240)) → emitEvent(300).
+        assertEquals("the binding cap moved — re-measure the whole chain", 240, PhoneRecorder.NOTE_DETAIL_MAX)
+        // Why step 3 can never bind: the longest thing it can ever see.
+        assertTrue(
+            "40-char name + separator + 240 now exceeds emitEvent's 300",
+            40 + 2 + PhoneRecorder.NOTE_DETAIL_MAX <= 300,
+        )
     }
 }

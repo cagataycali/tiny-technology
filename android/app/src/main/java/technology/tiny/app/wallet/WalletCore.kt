@@ -793,6 +793,8 @@ object WalletCore {
      * Pending (sent, NOT retryable — a retry could double-pay); else → Failed, with
      * [needsFunds] when payment_required (recoverable: the quote wrote no ledger row,
      * so a top-up + retry settles it, not a double-charge).
+     *
+     * [Unknown] is the fourth, and it is not a reply at all — see [answerLost].
      */
     sealed interface SettleResult {
         /** [explorer] is the network-correct BaseScan link the execute route derives from
@@ -813,28 +815,53 @@ object WalletCore {
          * Web parity: PayReceipt canReQuote; iOS PayQuoteCard canReQuote.
          */
         data class Failed(val error: String, val needsFunds: Boolean, val canReQuote: Boolean = false) : SettleResult
+
+        /**
+         * 🎲 THE THIRD ANSWER: the approval left us and no answer came back, so we do
+         * not know whether the money moved. Carries no fields on purpose — there is
+         * nothing to report except the absence of a report, and the card's one action
+         * ([UNCONFIRMED_TITLE] → "Check again") re-asks the server, whose reply then
+         * sets every flag authoritatively.
+         */
+        data object Unknown : SettleResult
     }
 
     /**
-     * The [SettleResult.Failed] for a NETWORK failure during settle (no server reply),
-     * PRESERVING the recovery flags a prior attempt earned. iOS c198fdb: a blip during a
-     * RETRY — where the first attempt already learned it was a funds shortfall
-     * (needsFunds) or re-quotable (canReQuote) — must NOT erase the Add funds / Retry /
-     * Get fresh quote affordance, because the quote moved no money and is still spendable.
-     * On a FIRST attempt [prior] is null (or not a Failed), so both flags are false → only
-     * the inert error shows, no phantom buttons. Web parity: PayReceipt re-derives both
-     * from the retained `settled` and its catch leaves `settled` untouched. (A REAL server
-     * reply is authoritative and goes through [parseSettleResult] instead — this is only
-     * the transport-error path.)
+     * The settle PUT left us and no reply came back. **A lost ANSWER is not a lost
+     * REQUEST** — by the time the transport gave up, the server may have reserved,
+     * signed, settled and debited. So this is [SettleResult.Unknown], never a Failed:
+     * "Payment not sent" is a claim about an outcome this client cannot see, and its
+     * "try again" reads as "pay again" — the exact double-pay the 409 branch exists to
+     * prevent. Server-side `chain/settle-outcome.mjs` has carried the same three-way
+     * verdict (SETTLED / NOT_SETTLED / UNKNOWN) all along; the card had room for two.
+     *
+     * [prior] is accepted and deliberately IGNORED. It exists so the call site reads as
+     * the successor of networkFailure (which preserved a prior attempt's recovery
+     * flags), and to make the omission explicit: **`canReQuote` must never survive into
+     * this state.** A fresh quote carries a NEW jti, so offering it here is how one
+     * doubtful payment becomes two. The only safe action is re-PUTting the SAME quote,
+     * which the route dedups on `q.jti` → 409 `already_paid` → "Payment sent".
+     *
+     * A REAL server reply is authoritative and goes through [parseSettleResult] instead
+     * — this is only the no-answer path. Web parity: PayReceipt's outer catch leaves
+     * `settled` untouched and sets phase "unknown"; iOS: PayQuote's `guard let r else`.
      */
-    fun networkFailure(prior: SettleResult?): SettleResult.Failed {
-        val f = prior as? SettleResult.Failed
-        return SettleResult.Failed(
-            error = "No response — check your connection and try again.",
-            needsFunds = f?.needsFunds ?: false,
-            canReQuote = f?.canReQuote ?: false,
-        )
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun answerLost(prior: SettleResult?): SettleResult.Unknown = SettleResult.Unknown
+
+    // -- The words for an answer that never came --
+    // The title may say we couldn't confirm. The body may say the approval was SENT
+    // (it was) and that checking again is safe (the jti makes it so). Neither may name
+    // a cause (no "connection"), and neither may claim an outcome (no "not sent").
+    // Byte-identical to iOS PayQuote.unconfirmedTitle/unconfirmedBody and web
+    // PayReceipt UNCONFIRMED_TITLE/unconfirmedBody — one payment, one set of words.
+
+    const val UNCONFIRMED_TITLE = "Couldn’t confirm this payment"
+
+    fun unconfirmedBody(expired: Boolean): String = if (expired)
+        "Your approval was sent but no answer came back, and this quote has expired — so it can’t be checked from here. Your wallet’s activity list will show it if it settled."
+    else
+        "Your approval was sent but no answer came back, so we can’t tell whether the payment went through. Checking again is safe — the same approval settles at most once."
 
     /** Fold the execute reply + the originating [quote] into a [SettleResult]. The
      *  quote's price is the last fallback so a paid card never reads "$0" (409 carries
@@ -945,6 +972,11 @@ object WalletCore {
         is SettleResult.Paid -> PaySettled("paid", r.paidMicro, r.network, r.payee, explorer = r.explorer, transfer = r.transfer)
         is SettleResult.Pending -> PaySettled("pending", message = r.message)
         is SettleResult.Failed -> null
+        // An unconfirmed payment has no terminal outcome to persist, and `phase` is a
+        // CODEC shared with web + iOS — a new value there is a three-client wire
+        // change. A reload re-derives the approval gate, exactly as Failed does, and
+        // that is safe for the same reason Check again is: the same quote's jti.
+        is SettleResult.Unknown -> null
     }
 
     // -- paywall (HTTP 402 body → an actionable payment card) --

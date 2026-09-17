@@ -235,6 +235,160 @@ class CallRecordingsLoadTest {
         assertNotNull(CallRecordingsLoad.message(res))
     }
 
+    // ── Why the call ended ───────────────────────────────────────────────────
+    // 🔴 `voice_sessions.error` carries a reason for every abnormal end, and the
+    // worker's own docstring says what for: "the row is what the person still has
+    // tomorrow when they ask why." [CallRecording] had no such field, so the reason
+    // arrived and was dropped one line before the render — and because [rows]
+    // deliberately ADMITS `status == "error"` rows, a call the voice service killed
+    // 20 seconds in drew `📞 ada · 0:20`, identical to a 20-second call the person
+    // ended themselves. The duration is what makes them indistinguishable.
+
+    @Test
+    fun `a dropped call no longer reads like a short one`() {
+        val res = ok(
+            row(id = "dropped", durationMs = 20_000).put("error", "upstream closed: 1011 going away"),
+            row(id = "clean", durationMs = 20_000),
+        )
+        val rows = CallRecordingsLoad.rows(res)!!
+        // The badge must not become a filter — both calls are the person's.
+        assertEquals(listOf("dropped", "clean"), rows.map { it.id })
+        assertEquals("the voice service closed the connection", rows[0].outcome)
+        // An ordinary hangup gets nothing: a badge on every row says nothing.
+        assertNull(rows[1].outcome)
+    }
+
+    @Test
+    fun `the worker-tail diagnostic never reaches the person`() {
+        // ⚠️ The reason is written for the worker tail — a close code, or an
+        // arbitrary upstream exception message. Keeping the column diagnostic is
+        // right; painting it onto someone's call list would be the same
+        // wrong-surface mistake pointing the other way.
+        val closed = CallOutcome.text("ended", "upstream closed: 1011 going away")!!
+        assertFalse(closed.contains("1011"))
+        assertFalse(closed.contains("going away"))
+        val errored = CallOutcome.text("error", "upstream error: TypeError: x is not a function")
+        assertEquals("the voice service dropped", errored)
+        assertFalse(errored!!.contains("TypeError"))
+    }
+
+    @Test
+    fun `the arms that measured their own cause say what they measured`() {
+        assertEquals("we stopped hearing this device", CallOutcome.text("ended", "the client went silent"))
+        assertEquals("the call hit the maximum length", CallOutcome.text("ended", "the call hit the maximum length"))
+        assertEquals("this device's connection dropped", CallOutcome.text("error", "the client socket errored"))
+    }
+
+    @Test
+    fun `an unrecognised reason still says the call broke, and names no cause`() {
+        // A teardown arm added upstream, or a row from a build this map predates.
+        // ⚠️ Falling back to SILENCE here is the original defect returning: the
+        // reason would once again have no reader. UNKNOWN is the honest middle.
+        val out = CallOutcome.text("ended", "the flux capacitor desynced")
+        assertEquals(CallOutcome.UNKNOWN, out)
+        assertFalse("it echoed the diagnostic it did not understand", out!!.contains("flux"))
+    }
+
+    @Test
+    fun `an error row from before the reason was wired is not treated as clean`() {
+        // Every error row written before the wiring has status='error', error=NULL.
+        // ⚠️ And the JSON path matters as much as the function: `optString` returns
+        // "" for a JSON null AND for an absent key, so both legacy shapes must land
+        // on the status check rather than reading as a clean hangup.
+        assertEquals(CallOutcome.UNKNOWN, CallOutcome.text("error", null))
+        val rows = CallRecordingsLoad.rows(ok(row(id = "legacy", status = "error")))!!
+        assertEquals(CallOutcome.UNKNOWN, rows.single().outcome)
+    }
+
+    @Test
+    fun `an ordinary call is not badged`() {
+        assertNull(CallOutcome.text("ended", null))
+        assertNull(CallOutcome.text("ended", ""))
+        // ⚠️ Whitespace is not a reason: `"upstream closed: "` with an empty code
+        // and reason trims to a bare prefix, and a row of blanks must not raise a
+        // warning on a call that ended fine.
+        assertNull(CallOutcome.text("ended", "   "))
+        assertNull(CallRecordingsLoad.rows(ok(row()))!!.single().outcome)
+    }
+
+    // ── 🔇 Why a recording won't play (lib/voice/playback.ts's Kotlin twin) ──
+    // `/voice/recording/:id` STITCHES a call's PCM on first listen and can decline
+    // six ways, each a JSON body with a stated reason. This sheet registered
+    // `setOnPreparedListener` and `setOnCompletionListener` and NO
+    // `setOnErrorListener` — and because `prepareAsync` reports asynchronously,
+    // the enclosing `runCatching` could not see it: nothing throws. The row was
+    // left mid-play forever, its reason unread.
+
+    @Test
+    fun `a refusal always says something`() {
+        // The difference from CallOutcome.text, which returns null for a clean call:
+        // this is called ONLY when a play failed, so silence is the frozen row again.
+        for (input in listOf(null, "", "   ", "who knows")) {
+            assertTrue("a failed play said nothing for ${input}",
+                       CallRecordingRefusal.text(input).isNotEmpty())
+        }
+    }
+
+    @Test
+    fun `each refusal the route gives has its own sentence`() {
+        assertTrue(CallRecordingRefusal.text("call still in progress").contains("still going"))
+        assertTrue(CallRecordingRefusal.text("call too long to stitch").contains("too long"))
+        assertTrue(CallRecordingRefusal.text("no replay journaled for this session")
+                       .contains("wasn't recorded"))
+        assertTrue(CallRecordingRefusal.text("no audio journaled").contains("audio wasn't saved"))
+        assertTrue(CallRecordingRefusal.text("media store not provisioned")
+                       .contains("unavailable right now"))
+        // None of the five falls back to the generic line — that would be a covered
+        // refusal rendered as an unknown one.
+        for (r in listOf("call still in progress", "call too long to stitch",
+                         "no replay journaled for this session", "no audio journaled",
+                         "media store not provisioned")) {
+            assertFalse("$r rendered as the generic sentence",
+                        CallRecordingRefusal.text(r) == CallRecordingRefusal.UNKNOWN)
+        }
+    }
+
+    @Test
+    fun `a wrapped reason is still recognised`() {
+        // ⚠️ MediaPlayer never hands over a body at all — `onError` carries two ints.
+        // `text` matches by CONTAINS so that the one channel which can carry a reason
+        // (a status probe, or a platform that embeds the origin's body) still lands on
+        // the right sentence. An equality match would pass every test written with
+        // bare strings and drop every real refusal.
+        val wrapped = "server said: call too long to stitch"
+        assertTrue(CallRecordingRefusal.text(wrapped).contains("too long"))
+    }
+
+    @Test
+    fun `an unreadable refusal names no cause`() {
+        val out = CallRecordingRefusal.text("the flux capacitor desynced")
+        assertEquals(CallRecordingRefusal.UNKNOWN, out)
+        assertFalse("the raw diagnostic reached the person", out.contains("flux"))
+    }
+
+    @Test
+    fun `the size refusal is knowable before the tap`() {
+        // (n - 2) * 1_440_000 > 40_000_000 — two segments exempt because
+        // segment_count sums both directions and only the final segment per
+        // direction may be short.
+        assertTrue("30 segments cannot stitch", CallRecordingRefusal.tooLong(30))
+        assertFalse("29 may still stitch", CallRecordingRefusal.tooLong(29))
+        // One-sided: a small count is never a promise the call WILL play.
+        for (n in listOf(0L, 1L, 2L, 4L)) {
+            assertFalse("count $n read as too long", CallRecordingRefusal.tooLong(n))
+        }
+    }
+
+    @Test
+    fun `the segment count survives the decode as a number`() {
+        // ⚠️ All three clients read `segment_count` and used it ONLY as `> 0`, so the
+        // number that predicts the 413 was on the row and thrown away at the decode.
+        // A `Boolean hasAudio` field here would pass every other test in this file.
+        val rows = CallRecordingsLoad.rows(ok(row(id = "long", segments = 30)))!!
+        assertEquals(30L, rows.single().segmentCount)
+        assertTrue(CallRecordingRefusal.tooLong(rows.single().segmentCount))
+    }
+
     @Test
     fun `rows and caption never both exist, and never both miss`() {
         // The two halves cannot disagree: exactly one of "here are the rows" and

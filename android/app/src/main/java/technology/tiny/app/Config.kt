@@ -49,6 +49,15 @@ class Config(context: Context) {
         get() = prefs.getBoolean("cfg_location_context", false)
         set(v) = prefs.edit().putBoolean("cfg_location_context", v).apply()
 
+    /** 🎙️ Nicla Voice wake → this phone records and transcribes what follows
+     *  (iOS `cfg_record_on_wake` parity). The necklace has no audio path of its
+     *  own (64KB of RAM, BLE only), so the phone's mic is the only way a wake word
+     *  can become words. ON by default: recording is the necklace's whole job, so
+     *  the toggle in the Voice panel is the OFF switch, not an opt-in gate. */
+    var recordOnWake: Boolean
+        get() = prefs.getBoolean("cfg_record_on_wake", true)
+        set(v) = prefs.edit().putBoolean("cfg_record_on_wake", v).apply()
+
     /** Always-on fleet node: run a foreground service so heartbeat + 5s relay stay
      *  alive when the app is backgrounded (Android-only edge — iOS dies when locked). */
     var alwaysOn: Boolean

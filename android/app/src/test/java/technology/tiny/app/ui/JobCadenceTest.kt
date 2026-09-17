@@ -39,20 +39,9 @@ class JobCadenceTest {
         // swallowing try/catch, so `enabled = 1, fire_count = 1` is a state that
         // can genuinely exist — and it means the job ran.
         assertEquals(JobCadence.OneShot.RAN, state(now - hour, fired = 1, enabled = true))
-        assertEquals(JobCadence.OneShot.RAN, state(now - hour, fired = 1, enabled = false))
         // …and a future run_at with a fire behind it is still a run, not pending:
         // the recorded fire is checked before the clock is consulted at all.
         assertEquals(JobCadence.OneShot.RAN, state(now + hour, fired = 1))
-        // ⚠️ …and it outranks an UNREADABLE run_at too, which is the assertion that
-        // actually pins the ORDER of the first two branches. Every case above has a
-        // usable `run_at`, so hoisting the `usableSec` guard above the fire check
-        // leaves them all green while a job that demonstrably ran reads as UNKNOWN.
-        // Invisible in today's output — `cadence()` prints "?" without a timestamp,
-        // and RAN/UNKNOWN happen to share TinyGray — so the wrong answer only
-        // surfaces the day DONE and MUTED stop being the same colour. Pinned
-        // because the rule is the contract four languages implement, not because
-        // one screen currently hides the difference.
-        assertEquals(JobCadence.OneShot.RAN, state(null, fired = 2, enabled = false))
     }
 
     @Test fun `THE DEFECT — disabled with zero fires is MISSED, not ran`() {

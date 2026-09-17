@@ -24,7 +24,10 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 # Files this repo deliberately changed for open-sourcing (template hygiene,
 # layout fixes, scrubbed fixtures). Extend when a cycle adds one ON PURPOSE.
 DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$'
-JUNK='\.gradle|/build/|node_modules|\.wrangler'
+# `(^|/)\.gradle/` — the CACHE dir, not build.gradle.kts / settings.gradle.kts:
+# the old `\.gradle` matched both and the gradle files were never compared,
+# which is how a ported DmMedia.kt met a build.gradle.kts without media3.
+JUNK='(^|/)\.gradle/|/build/|node_modules|\.wrangler'
 
 # SCRUB — the mechanical part of open-sourcing, applied to every upstream blob
 # BEFORE comparing (the port applies the same rules, so a scrubbed file is not

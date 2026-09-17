@@ -47,6 +47,9 @@ internal class LiveScribe(private val app: TinyApp) {
     private val main = Handler(Looper.getMainLooper())
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    /** The open segment's audio, or null when this phone couldn't open a file. */
+    private var audio: SegmentAudio? = null
+
     private var recognizer: SpeechRecognizer? = null
     private var sink: ParcelFileDescriptor.AutoCloseOutputStream? = null
 
@@ -105,6 +108,13 @@ internal class LiveScribe(private val app: TinyApp) {
         } else if (LiveTranscribe.shouldRestart(ended, deliveredUtterance, now - sessionStartedAt)) {
             restart()
         }
+
+        // Keep a copy of the SAME bytes the recognizer is about to read, so the row
+        // this segment files is playable. Opened here rather than in open(): a
+        // segment outlives its sessions (several are stitched into one), so opening
+        // per session would leave one file per restart, most of them orphans.
+        if (audio == null) audio = PhoneRecorder.audioDir(app)?.let { SegmentAudio.pending(it) }
+        audio?.write(chunk, chunk.size)
 
         runCatching { sink?.write(chunk) }.onFailure {
             // A broken pipe means the recognizer closed its read end — the session
@@ -292,15 +302,37 @@ internal class LiveScribe(private val app: TinyApp) {
         preroll.clear(); prerollBytes = 0
         segmentStartedAt = 0L
         TinyLiveScribeBridge.publish("")
-        if (startedAt == 0L || !LiveTranscribe.worthStoring(text)) return
+        val seg = audio
+        audio = null
+        if (startedAt == 0L || !LiveTranscribe.worthStoring(text)) {
+            // No row will ever reference it, so nothing else would ever delete it —
+            // and it is still PENDING, so the byte budget cannot see it either.
+            seg?.discard()
+            return
+        }
+        // Close the file BEFORE anything reads it: an unfinished one has no sizes in
+        // its header, so a row pointing at it would have a Play button that fails.
+        // ONE call, not a close plus a separate name: the tool description promises
+        // every agent that this row's audio is playable in the app, and "closed the
+        // file, then filed no pointer to it" must not be expressible in two lines
+        // that each look right (SegmentAudio.finishAndName).
+        val keptAudio = seg?.finishAndName()
         // Same rail as a phone-mic take: the transcripts list AND the agent's
         // context. Labelled by SOURCE so the model can tell the necklace's own
         // microphone from a take the phone recorded — and filed by the PHONE's
         // token, because attributing Vision-heard words to the Voice would put
         // them in the mouth of hardware that was not in the room.
+        //
+        // The label is the shared constant, not a literal: [LiveTranscribe.audioEvictions]
+        // keys off it, so a typo here would make live audio permanent (iOS's own
+        // reason for hoisting it).
         scope.launch {
-            runCatching { PhoneRecorder.storeHeard(app, text, "necklace-live", seconds) }
-                .onFailure { Log.w("TinyScribe", "store failed: ${it.message}") }
+            runCatching {
+                PhoneRecorder.storeHeard(
+                    app, text, LiveTranscribe.LIVE_LABEL, seconds,
+                    audioFile = keptAudio,
+                )
+            }.onFailure { Log.w("TinyScribe", "store failed: ${it.message}") }
         }
     }
 

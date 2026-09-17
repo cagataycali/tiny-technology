@@ -22,6 +22,15 @@ import technology.tiny.app.net.friendlyHttpError
  *
  * Neither half said the fact that matters: **a failed revoke leaves the token
  * working.** That is what someone revoking a laptop they just lost needs to know.
+ *
+ * ⚠️ …and then that sentence was said about answers that never came. A dropped
+ * connection, a worker 5xx and a 200 that isn't this route's body are not
+ * decisions: the revoke UPDATE may have run and only the reply been lost. Claiming
+ * a live token there is the same error as the sentence it replaced — it says the
+ * question is settled — and it errs in the expensive direction, telling someone
+ * their lost laptop still has access. See [RevokeFailure.decided]; the rule and
+ * both leads are byte-shared with iOS and web (pinned in
+ * web tests/revoke-message.test.ts).
  */
 class RevokeFailureTest {
 
@@ -36,12 +45,17 @@ class RevokeFailureTest {
     // ── the outcome clause ──────────────────────────────────────────────────
 
     @Test
-    fun `every failure leads with what it left behind`() {
+    fun `a DECIDED failure leads with what it left behind`() {
         // The whole point of the increment, and the one sentence that is byte-shared
         // with iOS and web: the device being revoked is very often the OTHER one, so
         // this outcome is read on whichever surface is in the user's hand.
+        //
+        // 4xx only. Each of these refuses before anything is written — the route
+        // answers 401 with no session and 400 with no deviceId before it reaches the
+        // worker, the worker answers 401/400 before its revoke SQL, and the route's
+        // 424 arm now fires only for a worker 4xx.
         assertEquals("Not revoked — its token still works.", RevokeFailure.lead)
-        for (res in listOf(null, failure(400, "deviceId required"), failure(401), failure(424), failure(503))) {
+        for (res in listOf(failure(400, "deviceId required"), failure(401), failure(424))) {
             val m = RevokeFailure.message(res)
             assertNotNull("a failure with no message at all", m)
             assertTrue("does not lead with the outcome: $m", m!!.startsWith(RevokeFailure.lead))
@@ -52,6 +66,45 @@ class RevokeFailureTest {
             assertTrue("clauses not joined by one space: $m", m.startsWith(RevokeFailure.lead + " "))
             assertFalse("doubled space in the joint: $m", m.contains("  "))
         }
+    }
+
+    @Test
+    fun `only a decision may claim the token survived`() {
+        // ⚠️ The other half of the same sentence, and the half that was wrong: for
+        // these the DELETE may have been received and executed — what was lost is the
+        // ANSWER. `null` is a thrown request, 503 is the route's degraded arm, and a
+        // 502 with no parseable body is an HTML error page.
+        assertEquals(
+            "Not confirmed — its token may or may not still work, and revoking again is safe.",
+            RevokeFailure.unconfirmedLead,
+        )
+        val unknown = listOf(
+            null,
+            failure(503, "aborted"),
+            failure(500, "worker 500"),
+            failure(502),
+            JSONObject().put("ok", false),          // a 2xx that isn't this route's body
+        )
+        for (res in unknown) {
+            val m = RevokeFailure.message(res)
+            assertNotNull("a failure with no message at all", m)
+            assertTrue("claims a settled outcome: $m", m!!.startsWith(RevokeFailure.unconfirmedLead + " "))
+            assertFalse("claims the token survived: $m", m.contains("still works"))
+            assertFalse("claims the token survived: $m", m.contains("Not revoked"))
+            assertFalse("doubled space in the joint: $m", m.contains("  "))
+        }
+        // The rule at its edges — 399 and 500 are not decisions, and neither is 0.
+        assertFalse(RevokeFailure.decided(399))
+        assertTrue(RevokeFailure.decided(400))
+        assertTrue(RevokeFailure.decided(499))
+        assertFalse(RevokeFailure.decided(500))
+        assertFalse(RevokeFailure.decided(0))
+        // Two outcomes must not read as one sentence, and the hedge must offer the
+        // action that is actually safe — licensed by the worker's unguarded
+        // idempotent UPDATE (read in web tests/revoke-message.test.ts).
+        assertFalse(RevokeFailure.lead == RevokeFailure.unconfirmedLead)
+        assertTrue(RevokeFailure.unconfirmedLead.endsWith("."))
+        assertTrue(RevokeFailure.unconfirmedLead.contains("again is safe"))
     }
 
     @Test
@@ -185,8 +238,11 @@ class RevokeFailureTest {
         // The lead already states the outcome; a second "revoke failed" style clause
         // would be the app disagreeing with itself in one line. Exactly one period
         // (the lead's own) and no second failure verb.
-        val m = RevokeFailure.message(failure(401))!!
-        assertEquals("more than one sentence-ending period: $m", 1, m.count { it == '.' })
-        assertFalse("a second failure verdict: $m", m.lowercase().contains("failed to"))
+        // Both leads, since each is a terminated sentence carrying an appended clause.
+        for (res in listOf(failure(401), failure(503, "boom"))) {
+            val m = RevokeFailure.message(res)!!
+            assertEquals("more than one sentence-ending period: $m", 1, m.count { it == '.' })
+            assertFalse("a second failure verdict: $m", m.lowercase().contains("failed to"))
+        }
     }
 }

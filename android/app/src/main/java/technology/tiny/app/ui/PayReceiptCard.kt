@@ -46,14 +46,19 @@ import technology.tiny.app.wallet.WalletCore
  * press this button, so a runaway agent can never drain the wallet unattended.
  *
  * States: awaiting (quote + Approve/Decline) → paying (spinner) → paid (receipt) /
- * pending (sent, confirming — NOT retryable) / failed (reason, + Add funds/Retry
- * when recoverable) / declined. A settled receipt, a free "no payment needed" 200,
- * or a tool failure short-circuit to the right terminal state.
+ * pending (sent, confirming — NOT retryable) / unknown (no answer came back, +
+ * Check again) / failed (reason, + Add funds/Retry when recoverable) / declined. A
+ * settled receipt, a free "no payment needed" 200, or a tool failure short-circuit
+ * to the right terminal state.
  *
  * Before this, Android mis-read a quote (ok:false) as "Payment not sent" — a
  * runaway agent's quote showed as a failed charge AND there was no way to approve.
  */
-internal enum class PayPhase { AWAITING, PAYING, PAID, PENDING, FAILED, DECLINED }
+/** [UNKNOWN] is the third answer to "did the money move?" — see
+ *  [WalletCore.answerLost]. Adding a case here is load-bearing as a GATE: Kotlin
+ *  requires the `when (phase)` render below to be exhaustive, so a state can't be
+ *  introduced and left un-rendered (web's if-chain has no such protection). */
+internal enum class PayPhase { AWAITING, PAYING, PAID, PENDING, UNKNOWN, FAILED, DECLINED }
 
 /**
  * The terminal, PERSISTED result of an approved (or declined) quote — the Android
@@ -93,6 +98,10 @@ internal class PaySettled(
             is WalletCore.SettleResult.Paid -> PaySettled("paid", r.paidMicro, r.network, r.payee, explorer = r.explorer, transfer = r.transfer)
             is WalletCore.SettleResult.Pending -> PaySettled("pending", message = r.message)
             is WalletCore.SettleResult.Failed -> null
+            // Nothing to persist: an unconfirmed payment has no outcome yet, and a
+            // recycled card re-derives the approval gate — safe by the same jti dedup
+            // that makes Check again safe. See WalletCore.toPersisted.
+            is WalletCore.SettleResult.Unknown -> null
         }
     }
 }
@@ -209,14 +218,23 @@ fun PayReceiptCard(call: ToolCall, onSettled: (WalletCore.PaySettled) -> Unit = 
     val quote = fresh ?: streamed
 
     fun approve() {
-        // One PUT per tap: allow the first approval and a retry after a recoverable
-        // failure, but never while in flight or after a terminal success/decline.
-        if (phase != PayPhase.AWAITING && phase != PayPhase.FAILED) return
+        // One PUT per tap: allow the first approval, a retry after a recoverable
+        // failure, and the UNKNOWN card's "Check again" — but never while in flight or
+        // after a terminal success/decline. The unknown re-PUT is safe by the same jti
+        // dedup a retry relies on, and it is the only way the user can learn what
+        // happened.
+        if (phase != PayPhase.AWAITING && phase != PayPhase.FAILED && phase != PayPhase.UNKNOWN) return
         if (inFlight) return
         // Re-check expiry at tap-time (web re-reads Date.now() in approve, not render).
         // An expired quote we hold the url for is re-quotable in place, so the failed
         // card offers "Get fresh quote" rather than dead-ending.
         if (WalletCore.isQuoteExpired(quote.expiresAt, System.currentTimeMillis())) {
+            // From UNKNOWN a lapsed TTL must NOT become FAILED. The answer we never
+            // received may have been a settlement; the quote expiring since only means
+            // we can no longer ASK. Staying unconfirmed swaps in the expired wording
+            // (unconfirmedBody reads the same clock) instead of upgrading "we don't
+            // know" into "not sent" as time passes — the original defect on a delay.
+            if (phase == PayPhase.UNKNOWN) return
             settled = WalletCore.SettleResult.Failed(
                 "This quote expired — ask again for a fresh price.",
                 needsFunds = false,
@@ -230,18 +248,24 @@ fun PayReceiptCard(call: ToolCall, onSettled: (WalletCore.PaySettled) -> Unit = 
         val prior = settled // the FAILED we're retrying from (null on a first attempt)
         scope.launch {
             val r = runCatching {
-                app.api.putJson("/api/x402/pay", WalletCore.x402PayBody(quote.quote, quote.message))
+                // putJsonPay, not putJson: the settlement route may legitimately run
+                // to its 180s maxDuration, and the default 30s client hung up during
+                // its FIRST internal step — turning a live payment into a null and a
+                // "not sent" card. See TinyApi.payClient.
+                app.api.putJsonPay("/api/x402/pay", WalletCore.x402PayBody(quote.quote, quote.message))
             }.getOrNull()
-            // A null reply is a TRANSPORT failure — don't run it through parseSettleResult
-            // (which would read needsFunds/canReQuote=false off the absent body and erase a
-            // retry's recovery path). Preserve the prior attempt's flags instead (iOS c198fdb
-            // / web PayReceipt re-derives from retained settled). A real reply is authoritative.
-            val outcome = if (r == null) WalletCore.networkFailure(prior)
+            // A null reply means we got NO ANSWER — not that nothing was sent. Don't run
+            // it through parseSettleResult, which would read a definitive-looking
+            // "payment could not be completed" off an absent body. answerLost reports the
+            // third verdict instead (iOS PayQuote.swift's `guard let r else` / web's
+            // catch). A real reply is authoritative.
+            val outcome = if (r == null) WalletCore.answerLost(prior)
                 else WalletCore.parseSettleResult(r, quote)
             settled = outcome
             phase = when (outcome) {
                 is WalletCore.SettleResult.Paid -> PayPhase.PAID
                 is WalletCore.SettleResult.Pending -> PayPhase.PENDING
+                is WalletCore.SettleResult.Unknown -> PayPhase.UNKNOWN
                 is WalletCore.SettleResult.Failed -> PayPhase.FAILED
             }
             // Persist the MONEY-MOVED terminal states only. A failed attempt moved
@@ -312,6 +336,32 @@ fun PayReceiptCard(call: ToolCall, onSettled: (WalletCore.PaySettled) -> Unit = 
             body = "You declined this payment. Nothing was charged.",
             live = LiveRegionMode.Polite)
 
+
+        PayPhase.UNKNOWN -> {
+            // Accent + Polite, NOT err + Assertive: this is not a failure, and both an
+            // alarm colour and an interrupting announcement are themselves claims about
+            // an outcome nobody has. Past the TTL the route 410s before it reaches the
+            // jti dedup, so there is nothing left to ask — the button goes and the body
+            // points at the wallet ledger instead.
+            val expired = WalletCore.isQuoteExpired(quote.expiresAt, System.currentTimeMillis())
+            ShellContent(tone = accent, live = LiveRegionMode.Polite) {
+                Header(tone = accent, title = WalletCore.UNCONFIRMED_TITLE,
+                    body = WalletCore.unconfirmedBody(expired))
+                if (!expired) {
+                    // ONE action, and it is a question rather than a payment: re-PUTting
+                    // the same quote either settles it once or collides on its jti and
+                    // comes back already_paid → "Payment sent". Deliberately NOT "Get
+                    // fresh quote" — a fresh quote carries a NEW jti, so it is a second
+                    // payment, and offering it here is how an in-doubt payment becomes two.
+                    Spacer(Modifier.height(10.dp))
+                    Button(
+                        onClick = { approve() },
+                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = MaterialTheme.colorScheme.onPrimary),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                    ) { Text("↻ Check again", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
+                }
+            }
+        }
         PayPhase.FAILED -> {
             val f = settled as? WalletCore.SettleResult.Failed
             // An insufficient-balance failure is recoverable: the quote wrote no

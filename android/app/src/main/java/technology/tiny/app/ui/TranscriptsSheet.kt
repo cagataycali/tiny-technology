@@ -1,5 +1,7 @@
 package technology.tiny.app.ui
 
+import android.media.AudioAttributes
+import android.media.MediaPlayer
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -8,6 +10,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.GraphicEq
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material.icons.outlined.Notes
+import androidx.compose.material.icons.outlined.PauseCircle
+import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material.icons.outlined.StopCircle
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -48,14 +52,24 @@ import java.util.Locale
  * existed.
  *
  * There is no local index here, deliberately, and that is the one real divergence
- * from iOS. iOS keeps `index.json` in Documents because it owns an audio FILE per
- * take; Android has none to own — `SpeechRecognizer` captures inside Google's
- * recognition-service process, so this app never sees the samples ([PhoneRecorder]'s
- * header states that amputation). With no audio to cache, a local index would only
- * be a second copy of text the server already holds, and the failure it invites is
- * the one iOS hit twice (a stale row that shadows the server's, and a schema change
- * that silently wipes the store). The server IS the list; a load failure says so
- * rather than showing an empty archive.
+ * from iOS. iOS keeps `index.json` in Documents because its rows carry a local
+ * `audioFile` pointer; this app puts that pointer in the FILE NAME instead
+ * (`<serverId>.wav`, see `PhoneRecorder.claimAudio`), so `audioFor` resolves it with
+ * the id the row already has. A local index would then be only a second copy of text
+ * the server already holds, and the failure it invites is the one iOS hit twice (a
+ * stale row that shadows the server's, and a schema change that silently wipes the
+ * store). The server IS the list; a load failure says so rather than showing an
+ * empty archive.
+ *
+ * ▶️ Which rows own audio is therefore not something the server tells us — it is
+ * probed per row from the audio dir. A **take** owns none by platform constraint
+ * ([PhoneRecorder]'s header: `SpeechRecognizer` captures inside Google's
+ * recognition-service process, so this app never sees a take's samples). A
+ * **necklace-live** segment does: that audio arrives over the network and passes
+ * through `LiveScribe.feed` in this app's own memory. The `nicla_voice_transcripts`
+ * tool tells every agent to say "open the tiny app to listen" for exactly those
+ * rows, so the player below is what makes that sentence true on Android rather than
+ * a pointer at a screen with nothing to press.
  */
 internal data class TranscriptRow(
     val id: String,
@@ -217,6 +231,15 @@ fun TranscriptsSheet(app: TinyApp, onDismiss: () -> Unit) {
     // the reason a row scrolling off and back on cannot start the same fetch twice.
     var hydrating by remember { mutableStateOf<Set<String>>(emptySet()) }
     var recordError by remember { mutableStateOf<String?>(null) }
+    // Which rows own audio on THIS phone, by id → file. Probed from the rows rather
+    // than carried on them: there is no local index here (see the header), so the
+    // filename IS the pointer and `audioFor` is the whole lookup.
+    var localAudio by remember { mutableStateOf<Map<String, java.io.File>>(emptyMap()) }
+    var playingId by remember { mutableStateOf<String?>(null) }
+    val player = remember { MediaPlayer() }
+    // Released on dismiss — the call-recordings idiom. A MediaPlayer that outlives
+    // the sheet keeps an audio focus request and a file handle open.
+    DisposableEffect(Unit) { onDispose { player.release() } }
     val recording by PhoneRecorder.isRecording.collectAsState()
     val level by PhoneRecorder.level.collectAsState()
     val heard by PhoneRecorder.partial.collectAsState()
@@ -239,6 +262,46 @@ fun TranscriptsSheet(app: TinyApp, onDismiss: () -> Unit) {
         }
         error = null
         rows = fetched
+        // One stat per row, off the main thread, and only after a load succeeded: a
+        // Play button is only ever shown for a file this actually found, so a row can
+        // never offer audio that isn't there.
+        localAudio = withContext(Dispatchers.IO) {
+            fetched.mapNotNull { r -> PhoneRecorder.audioFor(app, r.id)?.let { r.id to it } }.toMap()
+        }
+    }
+
+    /**
+     * Play or pause one row's kept audio.
+     *
+     * ⚠️ One player for the sheet, so starting a second row STOPS the first — two
+     * overlapping recordings of the same room is not a state anyone wants, and it is
+     * what a per-row player would produce.
+     */
+    fun toggleAudio(id: String, file: java.io.File) {
+        if (playingId == id) {
+            runCatching { player.pause() }
+            playingId = null
+            return
+        }
+        runCatching {
+            player.reset()
+            player.setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build(),
+            )
+            player.setDataSource(file.absolutePath)
+            player.setOnPreparedListener { it.start() }
+            player.setOnCompletionListener { playingId = null }
+            player.prepareAsync()
+            playingId = id
+        }.onFailure {
+            // A file that won't open is a file that isn't playable, so stop claiming it
+            // is: the button disappears rather than sitting there doing nothing.
+            playingId = null
+            localAudio = localAudio - id
+        }
     }
 
     /**
@@ -448,6 +511,39 @@ fun TranscriptsSheet(app: TinyApp, onDismiss: () -> Unit) {
                                             style = MaterialTheme.typography.labelSmall,
                                         )
                                     }
+                                }
+                            }
+                            // ▶️ Kept audio, for the rows that own some. A necklace-live
+                            // segment's samples pass through this app's memory on their
+                            // way to the recognizer, so the phone keeps a copy — and
+                            // this is the button the `nicla_voice_transcripts` tool
+                            // description points at when it tells an agent to say
+                            // "open the tiny app to listen". Until it existed that
+                            // sentence sent Android users to a screen with no player.
+                            //
+                            // Absent when the row owns no file, rather than disabled:
+                            // a take has none by platform constraint (PhoneRecorder's
+                            // header), and a dead Play button reads as broken audio
+                            // instead of as audio that was never kept.
+                            localAudio[t.id]?.let { file ->
+                                Spacer(Modifier.width(10.dp))
+                                TextButton(
+                                    onClick = { toggleAudio(t.id, file) },
+                                    contentPadding = PaddingValues(0.dp),
+                                ) {
+                                    Icon(
+                                        if (playingId == t.id) Icons.Outlined.PauseCircle
+                                        else Icons.Outlined.PlayCircle,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(15.dp),
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        if (playingId == t.id) "Pause" else "Listen",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
                                 }
                             }
                             Spacer(Modifier.weight(1f))

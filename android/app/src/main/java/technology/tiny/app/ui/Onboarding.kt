@@ -10,7 +10,6 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -24,7 +23,6 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -157,10 +155,11 @@ fun OnboardingScreen(
                                 onValueChange = { tinyName = it.trim(); onTinyNameChange(tinyName) },
                                 placeholder = { Text("tiny") },
                                 singleLine = true,
-                                keyboardOptions = KeyboardOptions(
-                                    capitalization = KeyboardCapitalization.None,
-                                    imeAction = ImeAction.Done,
-                                ),
+                                // ⚠️ Was `capitalization = None` alone, which is the value an
+                                // unset field already resolves to — so this said nothing and
+                                // left autocorrect ON over a tiny's handle (iOS
+                                // Onboarding.swift:335 disables both).
+                                keyboardOptions = FieldOptions.identifier(ImeAction.Done),
                                 shape = RoundedCornerShape(12.dp),
                                 modifier = Modifier.fillMaxWidth(),
                             )

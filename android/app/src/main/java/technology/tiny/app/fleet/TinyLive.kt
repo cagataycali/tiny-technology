@@ -161,7 +161,20 @@ object TinyLive {
     /** [LiveScribe]'s way in for a refusal — see TinyLiveScribeBridge. */
     internal fun publishScribeNote(why: String?) { _scribeNote.value = why }
 
-    /** Turn reading the necklace's audio on or off for the stream in progress. */
+    /**
+     * Turn reading the necklace's audio on or off for the stream in progress.
+     *
+     * Only the FLAG moves here. Acting on it belongs to the audio loop, which
+     * owns the recognizer and is the only place that can file a segment before
+     * tearing one down — see [LiveTranscribe.scribeAction]. This used to be the
+     * whole implementation, and it blanked the caption while the recognizer kept
+     * reading the room.
+     *
+     * The overlay is still cleared on the way off, because the loop can be
+     * several hundred milliseconds from its next chunk (or between streams, with
+     * no loop at all) and a caption left on screen after the switch reads as
+     * still-listening.
+     */
     fun toggleTranscribe() {
         _transcribe.value = !_transcribe.value
         if (_transcribe.value) _scribeNote.value = null else _liveText.value = ""
@@ -533,7 +546,12 @@ object TinyLive {
         }.getOrNull() ?: return
         track.play()
         val app = liveApp
-        val scribe = if (app != null && _transcribe.value) LiveScribe(app) else null
+        // ⚠️ NOT `if (_transcribe.value) LiveScribe(app) else null` — that read the
+        // switch ONCE, for the whole stream. See LiveTranscribe.scribeAction: the
+        // switch is re-read every chunk below, so turning captions off actually
+        // stops the recognizer (and files what it heard) and turning them back on
+        // starts one. `var`, because both transitions replace it.
+        var scribe: LiveScribe? = null
         val floats = FloatArray(4096)
         val out = ByteArray(8192)
         var peakHold = 0f
@@ -562,7 +580,21 @@ object TinyLive {
                     out[i * 2 + 1] = ((s shr 8) and 0xFF).toByte()
                 }
                 track.write(out, 0, samples * 2)
-                scribe?.feed(out, samples * 2)
+                // The switch, honoured mid-stream. Playing continues either way —
+                // switching captions off must not end the video, which is the
+                // whole reason it is a separate control.
+                when (LiveTranscribe.scribeAction(_transcribe.value && app != null, scribe != null)) {
+                    LiveTranscribe.Scribe.FEED -> scribe?.feed(out, samples * 2)
+                    LiveTranscribe.Scribe.START -> {
+                        // app is non-null here: it is part of the `wanted` test above.
+                        scribe = app?.let { LiveScribe(it) }
+                        scribe?.feed(out, samples * 2)
+                    }
+                    // close() files the segment before tearing down, so the words
+                    // heard before the switch survive it.
+                    LiveTranscribe.Scribe.STOP -> { scribe?.close(); scribe = null }
+                    LiveTranscribe.Scribe.IDLE -> {}
+                }
             }
             conn.disconnect()
         }
