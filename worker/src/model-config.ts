@@ -147,6 +147,9 @@ export class ModelConfigSetCall extends OpenAPIRoute {
     // the user reverted to the free tier; nothing to sync.
     if (!provider || provider === "default") {
       await env.DB.prepare("DELETE FROM model_config WHERE user_id = ?").bind(userId).run();
+      // Free tier = no ACTIVE provider; the configured rows stay (the point of
+      // the multi-provider store is that a revert doesn't cost you your keys).
+      try { await env.DB.prepare("UPDATE model_providers SET is_active = 0 WHERE user_id = ?").bind(userId).run(); } catch { /* pre-0034 */ }
       return json({ ok: true, cleared: true });
     }
 
@@ -184,6 +187,37 @@ export class ModelConfigSetCall extends OpenAPIRoute {
            additional_fields=excluded.additional_fields, updated_at=unixepoch()`
       ).bind(userId, provider, modelId, baseUrl, region, maxTokens, additional).run();
     }
+
+    // Write-through to the multi-provider store ("pizza selection"): a save on
+    // the single-slot channel (web settings / tiny_model_config) is by
+    // definition the ACTIVE provider — keep model_providers in step so the
+    // CLI's sync pull sees the same world the web wrote. Key clause mirrors
+    // the one above (omit = keep whatever that row already has). try/catch:
+    // a deployment that hasn't run migration 0034 yet must not fail the save.
+    try {
+    if (apiKeyEncValue !== null) {
+      await env.DB.prepare(
+        `INSERT INTO model_providers (user_id, provider, model_id, base_url, region, max_tokens, additional_fields, api_key_enc, is_active, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, unixepoch())
+         ON CONFLICT(user_id, provider) DO UPDATE SET model_id=excluded.model_id,
+           base_url=excluded.base_url, region=excluded.region, max_tokens=excluded.max_tokens,
+           additional_fields=excluded.additional_fields, api_key_enc=excluded.api_key_enc,
+           is_active=1, updated_at=unixepoch()`
+      ).bind(userId, provider, modelId, baseUrl, region, maxTokens, additional, apiKeyEncValue).run();
+    } else {
+      await env.DB.prepare(
+        `INSERT INTO model_providers (user_id, provider, model_id, base_url, region, max_tokens, additional_fields, is_active, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 1, unixepoch())
+         ON CONFLICT(user_id, provider) DO UPDATE SET model_id=excluded.model_id,
+           base_url=excluded.base_url, region=excluded.region, max_tokens=excluded.max_tokens,
+           additional_fields=excluded.additional_fields, is_active=1, updated_at=unixepoch()`
+      ).bind(userId, provider, modelId, baseUrl, region, maxTokens, additional).run();
+    }
+    await env.DB.prepare(
+      "UPDATE model_providers SET is_active = 0 WHERE user_id = ? AND provider != ?"
+    ).bind(userId, provider).run();
+    } catch { /* model_providers absent (pre-0034) — legacy save already landed */ }
+
     return json({ ok: true });
   }
 }

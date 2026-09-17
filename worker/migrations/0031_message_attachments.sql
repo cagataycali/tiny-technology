@@ -1,0 +1,55 @@
+-- 📷🎥🎤 DMs carry media, not just text.
+--
+-- The DM rail (migration 0011) stored `body TEXT` and nothing else, so the one
+-- thing people actually send each other on a phone — a photo — had no
+-- representation anywhere in the stack. The agent-chat rail already had
+-- attachments end-to-end (lib/file-attachments.ts, iOS Attachments.swift,
+-- Android SentAttachments.kt), and the R2 media store (src/media.ts) already
+-- allowlisted images, four audio formats AND video/mp4. Only user↔user messages
+-- were text-only.
+--
+-- WHY A JSON COLUMN AND NOT A `message_attachments` TABLE:
+--
+--   Attachments have no independent lifetime. They are never queried without
+--   their message, never listed across messages, and never updated — a DM
+--   cannot be edited, and deleting the message deletes them. The thread read is
+--   ONE statement whose cost this must not change: `MessagesListCall` is polled
+--   (~60s per open page for the badge) and `INBOX_SQL` is already a single
+--   JOINed statement specifically because a per-thread lookup was an N+1. A
+--   child table would add a second query or a join to both, to model a
+--   relationship nothing ever traverses on its own.
+--
+--   The thread is also PRUNED to 500 per pair by row id (0011's THREAD_CAP
+--   DELETE). With a child table that prune silently orphans attachment rows —
+--   D1 does not enforce ON DELETE CASCADE unless `PRAGMA foreign_keys` is on
+--   per-connection, which the worker never sets. Inlining makes the prune
+--   correct by construction: the media reference dies with its row.
+--
+-- WHAT IS IN HERE: a JSON array, `[]` when there is none. Shape is pinned by
+-- lib/messages/attachments.ts (`DmAttachment`) and validated on the way IN, by
+-- both the app route and this worker independently — same doctrine as the
+-- 2000-code-point body cap, which is enforced in three places because four
+-- callers can reach the send endpoint and only one of them ran the check.
+--
+--   [{ kind: "image"|"video"|"audio",   -- DERIVED from contentType, never
+--                                       --   taken from the caller
+--      url: "<worker>/media/<uuid>.<ext>",  -- media store ONLY (SSRF guard:
+--                                       --   the read path fetches these bytes
+--                                       --   and feeds them to the model)
+--      contentType, bytes,
+--      transcript?,                     -- 🎤 voice notes: the on-device
+--                                       --   transcript, so the AGENT can read
+--                                       --   what was said (there is no Workers
+--                                       --   AI binding — phones transcribe, as
+--                                       --   `transcripts` in 0030 already does)
+--      durationMs?, width?, height? }]  -- layout without fetching the bytes
+--
+-- NOT NULL DEFAULT '[]' rather than nullable: every reader does JSON.parse, and
+-- a NULL would make "no attachments" a second empty case to remember at each
+-- call site. Existing rows read as `[]` with no backfill needed.
+ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
+
+-- No new index. Attachments are never a search key — there is no "show me my
+-- photos" query on this rail (that would be the media store's job, and it owns
+-- the owner in R2 customMetadata). The existing idx_msg_inbox / idx_msg_from
+-- still serve every read, and an unused index would only slow the write.

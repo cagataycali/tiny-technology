@@ -10,7 +10,8 @@
  * All endpoints are INTERNAL (X-Internal-Key). The app resolves the sender
  * from its session JWT — fromUserId is never client-supplied end-to-end.
  *
- *   POST   /message            { fromUserId, toUserId?, toLogin?, toTiny?, body, viaTiny? }
+ *   POST   /message            { fromUserId, toUserId?, toLogin?, toTiny?, body,
+ *                                attachments?, viaTiny? }
  *                              → { ok, id, delivered: { telegram, push, stored } }
  *   GET    /messages?userId=&with=<peerUserId>&limit=  → thread (marks the
  *                              peer→user direction read)
@@ -24,6 +25,19 @@
  * Guardrails: 2000-CODE-POINT body cap (over it is a 400 — a DM cannot be
  * unsent, so it is never truncated), 100 sends/day/sender (D1 count), no
  * self-DM, thread pruned to last 500 messages per pair.
+ *
+ * 📷🎥🎤 ATTACHMENTS (migration 0031): a message may carry ≤4 photos / short
+ * video clips / voice notes as a JSON array in `attachments`. The bytes live in
+ * the R2 media store (src/media.ts) and the row carries only URLs, so a DM
+ * costs the same to read whether or not it has a photo. Rules, all enforced
+ * HERE and not merely at the app (see decideAttachments): the URL must be one of
+ * this worker's own `/media/<uuid>.<ext>` (the recipient's AGENT fetches these
+ * bytes and hands them to a model — an arbitrary URL is SSRF), `kind` is derived
+ * from the allowlisted contentType rather than believed, a transcript rides only
+ * on audio, and an empty BODY becomes legal the moment media is attached (a
+ * caption-less photo is a real message). Every media-less surface — Telegram,
+ * web push, the event ring, the inbox row — previews through `messagePreview`,
+ * so a photo never renders as an empty line.
  */
 import { OpenAPIRoute, Query, Str } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
@@ -65,6 +79,166 @@ export function clipToCodePoints(text: string, max: number): string {
   return cps.length <= max ? text : cps.slice(0, max).join("");
 }
 
+/** 📷🎥🎤 Attachment contentType → kind (migration 0031). This is the same
+ *  table as `lib/chat/dm-attachments.ts` DM_ATTACHMENT_TYPES and a subset of the
+ *  media store's own `EXT` (src/media.ts) — a type absent here is refused. The
+ *  kind is DERIVED from it and never read off the caller's object: a client that
+ *  could label an mp4 "image" would decide which bytes the agent's read path
+ *  later tries to hand the model as a picture. */
+const ATTACHMENT_TYPES: Record<string, "image" | "video" | "audio"> = {
+  "image/jpeg": "image",
+  "image/png": "image",
+  "image/webp": "image",
+  "image/gif": "image",
+  "video/mp4": "video",
+  "audio/mp4": "audio",
+  "audio/mpeg": "audio",
+  "audio/wav": "audio",
+  "audio/ogg": "audio",
+};
+
+const MAX_ATTACHMENTS = 4;
+
+export type DmAttachment = {
+  kind: "image" | "video" | "audio";
+  url: string;
+  contentType: string;
+  bytes?: number;
+  transcript?: string;
+  durationMs?: number;
+  width?: number;
+  height?: number;
+};
+
+export type AttachmentsDecision =
+  | { ok: true; attachments: DmAttachment[] }
+  | { ok: false; error: string };
+
+/**
+ * The worker's OWN copy of the attachment rule — deliberately not shared code.
+ *
+ * `/message` has four doors (web route, agent tool, MCP, mobile) and the 2000-char
+ * truncation bug shipped precisely because only one of them ran the check. The
+ * app validates too (better errors, sooner); this is the one that actually
+ * guards D1.
+ *
+ * `origin` is THIS worker's origin (`new URL(request.url).origin`) — the same
+ * value MediaUploadCall stamps into the URLs it hands out. Pinning attachment
+ * URLs to it is the load-bearing check: the agent's read path fetches these
+ * bytes and feeds them to the model as trusted image content, so an arbitrary
+ * URL stored here is an SSRF primitive with a credulous reader on the end.
+ *
+ * Refuses rather than filters, for the same reason the body is refused rather
+ * than trimmed: a DM cannot be unsent, so a silently-dropped photo is a loss the
+ * sender is told nothing about.
+ */
+export function decideAttachments(raw: any, origin: string): AttachmentsDecision {
+  if (raw === undefined || raw === null || raw === "") return { ok: true, attachments: [] };
+  let list = raw;
+  // Mobile clients post JSON bodies through several relays; accept a
+  // JSON-encoded array as well as a real one rather than silently reading a
+  // string as "no attachments".
+  if (typeof list === "string") {
+    try { list = JSON.parse(list); } catch { return { ok: false, error: "attachments must be an array" }; }
+  }
+  if (!Array.isArray(list)) return { ok: false, error: "attachments must be an array" };
+  if (list.length > MAX_ATTACHMENTS) {
+    return { ok: false, error: `${list.length} attachments is over the ${MAX_ATTACHMENTS} limit — nothing was sent` };
+  }
+
+  let base: string;
+  try { base = new URL(origin).origin; } catch { return { ok: false, error: "attachments unavailable" }; }
+
+  const out: DmAttachment[] = [];
+  for (let i = 0; i < list.length; i++) {
+    const a = list[i];
+    if (!a || typeof a !== "object") return { ok: false, error: `attachment ${i + 1} is not an object` };
+
+    const contentType = String(a.contentType || "").toLowerCase().trim();
+    const kind = ATTACHMENT_TYPES[contentType];
+    if (!kind) {
+      return {
+        ok: false,
+        error: `attachment ${i + 1} contentType "${contentType || "(missing)"}" not supported — allowed: ${Object.keys(ATTACHMENT_TYPES).join(", ")}`,
+      };
+    }
+
+    const url = String(a.url || "");
+    let ok = false;
+    try {
+      const u = new URL(url);
+      // https, our own origin, and the media store's UUID key shape (which also
+      // rules out traversal and listing probes).
+      ok = u.protocol === "https:" && u.origin === base &&
+        /^\/media\/[0-9a-f-]{36}\.[a-z0-9]{2,4}$/.test(u.pathname);
+    } catch { ok = false; }
+    if (!ok) return { ok: false, error: `attachment ${i + 1} must be a ${base}/media/... URL` };
+
+    const num = (v: any): number | undefined => {
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? Math.round(n) : undefined;
+    };
+    const bytes = num(a.bytes), durationMs = num(a.durationMs), width = num(a.width), height = num(a.height);
+    // A transcript is meaningful only on audio. Accepting one on an image would
+    // let a sender attach arbitrary text that the recipient's agent reads back as
+    // if their own device had heard it spoken.
+    const transcript = kind === "audio" && typeof a.transcript === "string" && a.transcript.trim()
+      ? clipToCodePoints(a.transcript.trim(), MAX_BODY)
+      : undefined;
+
+    // Built field-by-field: anything the caller invented (an `owner`, an
+    // `isTrusted`) is dropped rather than stored in D1 and echoed to every
+    // client as though the server had vouched for it.
+    out.push({
+      kind, url, contentType,
+      ...(bytes !== undefined ? { bytes } : {}),
+      ...(transcript ? { transcript } : {}),
+      ...(durationMs !== undefined ? { durationMs } : {}),
+      ...(width !== undefined ? { width } : {}),
+      ...(height !== undefined ? { height } : {}),
+    });
+  }
+  return { ok: true, attachments: out };
+}
+
+/** Parse a stored `attachments` cell back to a list. Corrupt or legacy-NULL
+ *  cells read as `[]` — a thread must render even if one row's JSON is bad. */
+export function parseAttachments(raw: any): DmAttachment[] {
+  if (!raw) return [];
+  try {
+    const v = typeof raw === "string" ? JSON.parse(raw) : raw;
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+/**
+ * The one-line summary for a surface that renders no media: the inbox row, the
+ * push body, the Telegram fan-out, the agent's event ring.
+ *
+ * Mirrors `dmPreview` in lib/chat/dm-attachments.ts. The rule that matters: a
+ * caption-less photo must NEVER preview as an empty string, which is exactly
+ * what these four surfaces produced before attachments had a label — an inbox
+ * row and a push notification that look like nothing happened.
+ */
+export function messagePreview(body: string, attachments: DmAttachment[]): string {
+  const text = String(body || "").trim();
+  if (!attachments.length) return text;
+
+  const kinds = new Set(attachments.map((a) => a.kind));
+  const n = attachments.length;
+  let label: string;
+  if (kinds.size > 1) label = `📎 ${n} attachments`;
+  else if (attachments[0].kind === "image") label = n === 1 ? "📷 Photo" : `📷 ${n} photos`;
+  else if (attachments[0].kind === "video") label = n === 1 ? "🎥 Video" : `🎥 ${n} videos`;
+  else label = n === 1 ? "🎤 Voice note" : `🎤 ${n} voice notes`;
+
+  if (!text) {
+    const spoken = n === 1 && attachments[0].kind === "audio" ? String(attachments[0].transcript || "").trim() : "";
+    return spoken ? `🎤 ${spoken}` : label;
+  }
+  return `${label} ${text}`;
+}
+
 export type BodyDecision = { ok: true; body: string } | { ok: false; error: string };
 
 /**
@@ -101,6 +275,9 @@ export const INBOX_SQL = `SELECT g.peer, g.last_at, g.unread,
        (SELECT body FROM messages m2
          WHERE (m2.from_user = ?1 AND m2.to_user = g.peer) OR (m2.from_user = g.peer AND m2.to_user = ?1)
          ORDER BY m2.id DESC LIMIT 1) AS last_body,
+       (SELECT attachments FROM messages m3
+         WHERE (m3.from_user = ?1 AND m3.to_user = g.peer) OR (m3.from_user = g.peer AND m3.to_user = ?1)
+         ORDER BY m3.id DESC LIMIT 1) AS last_attachments,
        u.github_login AS login, u.name AS name, u.avatar AS avatar
  FROM (
    SELECT CASE WHEN from_user = ?1 THEN to_user ELSE from_user END AS peer,
@@ -166,7 +343,8 @@ export class MessageSendCall extends OpenAPIRoute {
       toUserId: new Str({ required: false, description: "Recipient user id (exact)." }),
       toLogin: new Str({ required: false, description: "Recipient GitHub login." }),
       toTiny: new Str({ required: false, description: "A tiny slug — resolves to its owner." }),
-      body: new Str({ required: true, description: `Message body (≤${MAX_BODY} characters, counted as code points — longer is REFUSED with a 400, not truncated).` }),
+      body: new Str({ required: true, description: `Message body (≤${MAX_BODY} characters, counted as code points — longer is REFUSED with a 400, not truncated). May be empty when attachments are present.` }),
+      attachments: new Str({ required: false, description: `JSON array (≤${MAX_ATTACHMENTS}) of { kind, url, contentType, bytes?, transcript?, durationMs?, width?, height? }. url must be one of this worker's /media/<uuid>.<ext> URLs (upload via /media/upload first); kind is derived from contentType.` }),
       viaTiny: new Str({ required: false, description: "Which tiny brokered the send." }),
     },
     responses: { "200": { description: "Sent", schema: { response: "Sent" } } },
@@ -174,13 +352,34 @@ export class MessageSendCall extends OpenAPIRoute {
 
   async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
-    const { fromUserId, toUserId, toLogin, toTiny, body, viaTiny } = data.body;
+    const { fromUserId, toUserId, toLogin, toTiny, body, attachments, viaTiny } = data.body;
     if (!fromUserId) return json({ error: "fromUserId and body required" }, 400);
+
+    // 📷 Attachments are decided FIRST: bad media must stop the whole send, not
+    // let the text go out with the photo quietly missing. Pinned to THIS
+    // worker's origin — see decideAttachments for why that check is load-bearing.
+    const media = decideAttachments(attachments, new URL(request.url).origin);
+    if (!media.ok) return json({ ok: false, error: media.error }, 400);
+
     // Refuse over-length instead of cutting it — see decideBody. The 400 carries
     // the overrun so the caller (agent tool, MCP, mobile composer) can split.
-    const decided = decideBody(body);
-    if (!decided.ok) return json({ ok: false, error: decided.error }, 400);
-    const text = decided.body;
+    //
+    // The one exception is BLANKNESS, and only with media attached: a
+    // caption-less photo is the commonest message anyone sends from a phone, so
+    // an empty body stops being a misfire the moment there is something else to
+    // deliver. Over-length is still refused whole, photo or not — a DM must
+    // never arrive half-said.
+    let text: string;
+    if (!String(body ?? "").trim() && media.attachments.length) {
+      text = "";
+    } else {
+      const decided = decideBody(body);
+      if (!decided.ok) return json({ ok: false, error: decided.error }, 400);
+      text = decided.body;
+    }
+    // What a media-less surface (Telegram, push, the event ring, the inbox row)
+    // shows for this message. Never "" for a caption-less photo.
+    const preview = messagePreview(text, media.attachments);
 
     try {
       const sender = await env.DB.prepare("SELECT * FROM users WHERE id = ?")
@@ -200,8 +399,13 @@ export class MessageSendCall extends OpenAPIRoute {
       }
 
       const row = await env.DB.prepare(
-        "INSERT INTO messages (from_user, to_user, via_tiny, body) VALUES (?, ?, ?, ?) RETURNING id"
-      ).bind(sender.id, recipient.id, String(viaTiny || "").slice(0, 40), text).first();
+        "INSERT INTO messages (from_user, to_user, via_tiny, body, attachments) VALUES (?, ?, ?, ?, ?) RETURNING id"
+      ).bind(
+        sender.id, recipient.id, String(viaTiny || "").slice(0, 40), text,
+        // Always a JSON array, never NULL (migration 0031) — so no reader has to
+        // remember a second empty case.
+        JSON.stringify(media.attachments),
+      ).first();
 
       // Prune thread beyond cap (both directions of this pair)
       await env.DB.prepare(
@@ -228,9 +432,34 @@ export class MessageSendCall extends OpenAPIRoute {
           for (const chatId of chats) {
             const res: any = await tg(bot.token, "sendMessage", {
               chat_id: chatId,
-              text: `💬 New message from ${senderLabel}${senderLogin ? ` (@${senderLogin})` : ""}${viaTiny ? ` via tiny/${viaTiny}` : ""}:\n\n${clipToCodePoints(text, 3500)}\n\n↩️ Reply at https://tiny.technology/${viaTiny || "tiny"}`,
+              text: `💬 New message from ${senderLabel}${senderLogin ? ` (@${senderLogin})` : ""}${viaTiny ? ` via tiny/${viaTiny}` : ""}:\n\n${clipToCodePoints(preview, 3500)}\n\n↩️ Reply at https://tiny.technology/${viaTiny || "tiny"}`,
             });
             if (res?.ok) delivered.telegram = true;
+
+            // 📷 Then the media ITSELF. Telegram fetches public URLs, and
+            // /media/<uuid> is exactly that — so a photo arrives as a photo
+            // rather than as the word "Photo" beside a link the recipient has to
+            // tap out of the app to see. Best-effort per file and per chat: the
+            // text above has already landed, so a failure here costs a preview,
+            // never the message. Voice notes send their transcript as the caption
+            // so the text is readable without playing anything.
+            for (const a of media.attachments) {
+              const caption = a.kind === "audio" && a.transcript
+                ? clipToCodePoints(`🎤 ${a.transcript}`, 1000)
+                : undefined;
+              const method = a.kind === "image" ? "sendPhoto"
+                : a.kind === "video" ? "sendVideo"
+                  // sendVoice demands OGG/OPUS; anything else (m4a from the
+                  // phones, mp3) is an audio document to Telegram.
+                  : a.contentType === "audio/ogg" ? "sendVoice" : "sendAudio";
+              const field = a.kind === "image" ? "photo" : a.kind === "video" ? "video"
+                : method === "sendVoice" ? "voice" : "audio";
+              await tg(bot.token, method, {
+                chat_id: chatId,
+                [field]: a.url,
+                ...(caption ? { caption } : {}),
+              });
+            }
           }
         }
       } catch (err) { console.log(err, "dm telegram fanout"); }
@@ -239,7 +468,7 @@ export class MessageSendCall extends OpenAPIRoute {
       try {
         const push = await sendPushToUser(env, recipient.id, {
           title: `💬 ${senderLabel}${senderLogin ? ` (@${senderLogin})` : ""}`,
-          body: clipToCodePoints(text, 300),
+          body: clipToCodePoints(preview, 300),
           url: `/${viaTiny || "tiny"}?dm=${encodeURIComponent(senderLogin || sender.id)}`,
           tag: `dm-${sender.id}`,
         });
@@ -248,7 +477,7 @@ export class MessageSendCall extends OpenAPIRoute {
 
       // Event ring — the recipient's next agent turn sees it
       await emitEvent(env, recipient.id, "dm",
-        `${senderLabel}${senderLogin ? ` (@${senderLogin})` : ""}: ${clipToCodePoints(text, 200)}`);
+        `${senderLabel}${senderLogin ? ` (@${senderLogin})` : ""}: ${clipToCodePoints(preview, 200)}`);
 
       // 🕸️ Social graph: messaged edge — PRIVATE (who DMs whom is not
       // public signal; the guardrail is visibility scoping, stage 6)
@@ -300,7 +529,7 @@ export class MessagesListCall extends OpenAPIRoute {
         if (!peer) return json({ error: "peer not found" }, 404);
 
         const { results } = await env.DB.prepare(
-          `SELECT id, from_user, to_user, via_tiny, body, read, created FROM messages
+          `SELECT id, from_user, to_user, via_tiny, body, attachments, read, created FROM messages
            WHERE (from_user = ?1 AND to_user = ?2) OR (from_user = ?2 AND to_user = ?1)
            ORDER BY id DESC LIMIT ?3`
         ).bind(userId, peer.id, limit).all();
@@ -316,6 +545,10 @@ export class MessagesListCall extends OpenAPIRoute {
             id: m.id,
             direction: m.from_user === userId ? "sent" : "received",
             body: m.body,
+            // 📷 Always an array — the clients render off `.length`, so a NULL
+            // here (a row written before migration 0031) would crash a `forEach`
+            // rather than render as "no attachments".
+            attachments: parseAttachments(m.attachments),
             viaTiny: m.via_tiny || undefined,
             read: !!m.read,
             created: m.created,
@@ -327,15 +560,26 @@ export class MessagesListCall extends OpenAPIRoute {
       // exported for the sqlite-backed test).
       const { results } = await env.DB.prepare(INBOX_SQL).bind(userId).all();
 
-      const threads = (results || []).map((t: any) => ({
-        userId: t.peer,
-        login: t.login || "",
-        name: t.name || t.login || "unknown",
-        avatar: t.avatar || "",
-        unread: Number(t.unread || 0),
-        lastBody: String(t.last_body || "").slice(0, 140),
-        lastAt: t.last_at,
-      }));
+      const threads = (results || []).map((t: any) => {
+        const lastAttachments = parseAttachments(t.last_attachments);
+        return {
+          userId: t.peer,
+          login: t.login || "",
+          name: t.name || t.login || "unknown",
+          avatar: t.avatar || "",
+          unread: Number(t.unread || 0),
+          // 📷 The row preview is media-aware, so a caption-less photo reads
+          // "📷 Photo" instead of the empty string this used to produce — an
+          // inbox row that looked like nothing had happened. Clipped on a code
+          // POINT boundary like the other previews: `.slice(0, 140)` counts
+          // UTF-16 units and could end on a lone surrogate.
+          lastBody: clipToCodePoints(messagePreview(String(t.last_body || ""), lastAttachments), 140),
+          // The kinds themselves, so a client can put a thumbnail on the row
+          // without fetching the thread.
+          lastAttachments,
+          lastAt: t.last_at,
+        };
+      });
       return json({ threads });
     } catch (err) {
       console.log(err, "messages list");
@@ -407,9 +651,114 @@ export class MessageDeleteCall extends OpenAPIRoute {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
     const { userId, id } = data.body;
     if (!userId || !id) return json({ error: "userId and id required" }, 400);
+    // The R2 objects behind this message's attachments are deliberately NOT
+    // deleted. A media key can be referenced by more than one row — the
+    // recipient forwarding a photo on attaches the same `/media/<uuid>` URL —
+    // so deleting the bytes with the row would reach into a message that
+    // belongs to somebody else, and the sender of THIS message has no authority
+    // over that copy. Orphaned media is a storage cost (unguessable key, no
+    // listing endpoint); breaking a third party's thread is a correctness bug.
+    // A sweep keyed on "no message row references this key" is the right home
+    // for reclaiming them, and does not exist yet.
     const res = await env.DB.prepare("DELETE FROM messages WHERE id = ? AND from_user = ?")
       .bind(Number(id), String(userId)).run();
     if (!res?.meta?.changes) return json({ ok: false, error: "not found or not yours" }, 404);
     return json({ ok: true });
+  }
+}
+
+/**
+ * 📟 Device-token DM access — the branch the DM rail never had.
+ *
+ * Everything above resolves identity from a session (via the edge) or the
+ * internal key (via a sibling worker route). But an enrolled device — the
+ * reTerminal Sticky composing on its e-ink keyboard — holds only its own
+ * revocable `tind_` token, exactly like /media/upload and /device/event.
+ * This route gives it the DM rail WITHOUT a second implementation: the
+ * device token resolves the OWNER (DEVICE_EVENT_AUTH_SQL — same query, same
+ * no-oracle property: wrong token and revoked device are indistinguishable),
+ * then the op dispatches to the EXISTING handler classes in-process with a
+ * synthesized internal request. Send therefore inherits every guardrail —
+ * the 2000-code-point refusal, 100/day rate limit, attachment origin pinning,
+ * fan-out isolation — because it IS the same code path, with
+ * `fromUserId = resolved owner` and never anything client-supplied.
+ *
+ *   POST /device/messages { deviceId, token, op, ... }
+ *     op="send"   + to (@login | login | tiny slug), body, attachments?
+ *     op="inbox"                          → threads + unread counts
+ *     op="thread" + with (login|userId), limit? → thread (marks inbound read)
+ *     op="unread"                         → { unread, from: [...] }
+ *
+ * viaTiny is stamped with the device NAME (sliced to 40 like every other
+ * caller) so a recipient sees "via sticky" — provenance for a message a
+ * wall display sent on the owner's behalf.
+ */
+export class DeviceMessagesCall extends OpenAPIRoute {
+  static schema = {
+    tags: ["Messages"],
+    summary: "Internal: device-token DM access (send/inbox/thread/unread) — owner resolved from the device token.",
+    requestBody: {
+      deviceId: new Str({ required: true }),
+      token: new Str({ required: true, description: "That device's token (verified by hash)." }),
+      op: new Str({ required: true, description: "send | inbox | thread | unread" }),
+      to: new Str({ required: false, description: "send: recipient login or tiny slug." }),
+      body: new Str({ required: false, description: "send: message body (same code-point cap as /message)." }),
+      attachments: new Str({ required: false, description: "send: same contract as /message." }),
+      with: new Str({ required: false, description: "thread: peer userId or login." }),
+      limit: new Str({ required: false, description: "thread: messages (≤200, default 50)." }),
+    },
+    responses: { "200": { description: "Result", schema: { response: "Result" } } },
+  };
+
+  async handle(request: Request, env: any, ctx: any, data: Record<string, any>) {
+    if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
+    const { deviceId, token, op, to, body, attachments, limit } = data.body;
+    const withPeer = data.body["with"];
+    if (!deviceId || !token || !op) return json({ error: "deviceId, token and op required" }, 400);
+
+    const { hashDeviceToken, DEVICE_EVENT_AUTH_SQL } = await import("./devices");
+    const dev = await env.DB.prepare(DEVICE_EVENT_AUTH_SQL)
+      .bind(String(deviceId), await hashDeviceToken(String(token))).first();
+    if (!dev?.user_id) return json({ error: "unknown device" }, 401);
+    const owner = String(dev.user_id);
+
+    // Synthesized INTERNAL request: same origin as the incoming call (so the
+    // attachment origin pin still points at this worker), key from env — the
+    // downstream checkInternalKey passes because we ARE downstream of the gate.
+    const internal = (url: string) =>
+      new Request(url, { headers: { "x-internal-key": env.INTERNAL_API_KEY || "" } });
+    const origin = new URL(request.url).origin;
+
+    switch (String(op)) {
+      case "send": {
+        const target = String(to || "").trim();
+        if (!target) return json({ error: "to required for send" }, 400);
+        return new MessageSendCall({} as any).handle(internal(`${origin}/message`), env, ctx, {
+          body: {
+            fromUserId: owner,
+            toLogin: target,
+            toTiny: target,          // resolveRecipient tries login first, then tiny
+            body: body ?? "",
+            attachments,
+            viaTiny: String(dev.name || "device"),
+          },
+        });
+      }
+      case "inbox":
+        return new MessagesListCall({} as any).handle(
+          internal(`${origin}/messages?userId=${encodeURIComponent(owner)}`), env);
+      case "thread": {
+        const peer = String(withPeer || "").trim();
+        if (!peer) return json({ error: "with required for thread" }, 400);
+        const lim = Math.min(Math.max(Number(limit) || 50, 1), 200);
+        return new MessagesListCall({} as any).handle(
+          internal(`${origin}/messages?userId=${encodeURIComponent(owner)}&with=${encodeURIComponent(peer)}&limit=${lim}`), env);
+      }
+      case "unread":
+        return new MessagesUnreadCall({} as any).handle(
+          internal(`${origin}/message/unread?userId=${encodeURIComponent(owner)}`), env);
+      default:
+        return json({ error: "op must be send | inbox | thread | unread" }, 400);
+    }
   }
 }

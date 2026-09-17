@@ -31,9 +31,12 @@ import { TelegramConfigCall, TelegramGetCall, TelegramDeleteCall, pollTelegramBo
 import { TelegramApiCall } from "./telegram-api";
 import { PrefsGetCall, PrefsSetCall } from "./prefs";
 import { ModelConfigGetCall, ModelConfigSetCall } from "./model-config";
+import { ModelProvidersGetCall, ModelProvidersSetCall, ModelProvidersDeleteCall } from "./model-providers";
 import { AccountVoiceGetCall, AccountVoiceSetCall } from "./account-voice";
 import { DeviceEnrollCall, DeviceHeartbeatCall, DevicesListCall, DeviceRevokeCall, DeviceRotateTokenCall, DeviceEndpointCallRoute, DeviceEventCall } from "./devices";
+import { FirmwarePublishCall, FirmwareCurrentCall, FirmwareDeviceCurrentCall } from "./firmware";
 import { TranscriptAddCall, TranscriptListCall, TranscriptGetCall } from "./transcripts";
+import { DeviceAskCall } from "./ask";
 import { LocationBeatCall, LocationsListCall, LocationDeleteCall, LOCATION_SWEEP_SQL, LOCATION_SWEEP_AGE_S } from "./locations";
 import { PayBalanceCall, PayInvokeCall, PayTransferCall, PayRefundCall, PayPriceSetCall, PayPricingCall, PayCreditCall, PaySpendCall, PaySpendReverseCall, PaySpendSentCall, PaySettleUnknownCall, PayReconcileStatusCall, reconcileSentSpends, reconcileSettleUnknown } from "./payments";
 import { PayLinkAddressCall, PayClaimCall, PayDepositInfoCall, PayFaucetCall } from "./deposits";
@@ -41,7 +44,7 @@ import { WithdrawRequestCall, WithdrawCompleteCall, WithdrawFailCall } from "./w
 import { RelaySendCall, RelayPollCall, RelayReplyCall, RelayRecvCall, RelayDepositCall, RelayTaskResultCall } from "./relay";
 import { RingGetCall, RingAddCall } from "./ring";
 import { VisitCall } from "./visit";
-import { MessageSendCall, MessagesListCall, MessagesUnreadCall, MessageDeleteCall } from "./messages";
+import { MessageSendCall, MessagesListCall, MessagesUnreadCall, MessageDeleteCall, DeviceMessagesCall } from "./messages";
 import { MediaUploadCall, MediaGetCall, ToolResultPostCall, ToolResultGetCall } from "./media";
 import { VoiceSession, voiceSessionCreate, voiceConnect, voiceReap, voiceRecording, voiceReplayAsset, VoiceSessionsListCall, VoiceSessionGetCall } from "./voice";
 
@@ -59,7 +62,10 @@ export const router = OpenAPIRouter({
     name_for_model: 'tiny',
     description_for_human: "Tiny AI offers a platform for everyone to create and manage AI services with ease.",
     description_for_model: "Tiny AI facilitates the creation and management of AI services for everyone.",
-    contact_email: 'help@tinyai.id',
+    // tiny.technology, not the lapsed tinyai.id: this address is PUBLISHED in
+    // /.well-known/ai-plugin.json as where users and model hosts report
+    // problems, and only this domain still has our MX records.
+    contact_email: 'help@tiny.technology',
     legal_info_url: 'https://plugin.tiny.technology/legal',
     logo_url: 'https://tiny.technology/tiny.png',
   },
@@ -120,6 +126,11 @@ router.post('/prefs', PrefsSetCall)
 // encrypted at rest, only the server-side chat route reads it non-safe.
 router.get('/model-config', ModelConfigGetCall)
 router.post('/model-config', ModelConfigSetCall)
+// 🍕 Multi-provider credential store ("pizza selection") — internal-key only;
+// keys AES-256-GCM at rest; full=1 read is the cross-device sync channel.
+router.get('/model-providers', ModelProvidersGetCall)
+router.post('/model-providers', ModelProvidersSetCall)
+router.delete('/model-providers', ModelProvidersDeleteCall)
 // 🎙️ Account-default live-call voice — internal-key only. Fallback for tinys
 // with no per-tiny voice set (per-tiny voice → account voice → 'marin').
 router.get('/account-voice', AccountVoiceGetCall)
@@ -136,9 +147,20 @@ router.post('/device/rotate-token', DeviceRotateTokenCall)
 // 🎙️ Devices that notice things on their own (Nicla Voice wake word) push onto
 // the owner's event ring — the one path in the device model that isn't pull.
 router.post('/device/event', DeviceEventCall)
+// 🗣️ The e-ink Sticky asks its owner's tiny a question (text or audioUrl) and
+// renders the answer + optional card. Auth like /device/event; the agent turn
+// reuses the scheduled-job pipeline (see ask.ts).
+router.post('/device/ask', DeviceAskCall)
 // 🤖 Endpoint devices dial OUT: the worker holds the bearer and makes the call,
 // so the credential never reaches the edge app (docs/endpoint-devices-vision).
 router.post('/device/endpoint/call', DeviceEndpointCallRoute)
+// 📦 Firmware channels (migration 0033) — the one stable name a deployed tiny can
+// poll for "is there a newer build?". Holds a pointer (version/url/sha256), never
+// the manifest: the bytes stay in R2 under /api/media and the device hashes what
+// it fetches. `device-current` is the only device-token verb here.
+router.post('/firmware/publish', FirmwarePublishCall)
+router.get('/firmware/current', FirmwareCurrentCall)
+router.post('/firmware/device-current', FirmwareDeviceCurrentCall)
 // 🎤 Nicla Voice recorder (migration 0030): after a wake (or a nicla_voice_record
 // envelope) the paired phone records + transcribes on-device and stores the text
 // here. The write authenticates like /device/event (token resolves the owner);
@@ -211,6 +233,7 @@ router.get('/voice/sessions', VoiceSessionsListCall)
 router.get('/voice/session', VoiceSessionGetCall)
 router.get('/voice/replay/:id/:file', (req: Request, env: any) => voiceReplayAsset(req, env))
 router.post('/message', MessageSendCall)
+router.post('/device/messages', DeviceMessagesCall)
 router.get('/messages', MessagesListCall)
 router.get('/message/unread', MessagesUnreadCall)
 router.delete('/message', MessageDeleteCall)

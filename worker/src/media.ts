@@ -48,10 +48,76 @@ const MEDIA_MAX_BYTES = 6 * 1024 * 1024;
 const RESULT_MAX = 32 * 1024;
 const RESULT_SWEEP_AGE_S = 900; // tool results are ephemeral: 15 min
 
+/**
+ * 🗑️ EVERY KEY FAMILY IN THIS BUCKET, AND WHAT WOULD RECLAIM IT.
+ *
+ * There is no `MEDIA.delete` and no `MEDIA.list` anywhere in this worker: an
+ * object here is permanent, and once its last reference is dropped it is also
+ * unreachable — nothing can enumerate a bucket by prefix to find it again. So
+ * "who still points at this?" is a property of OTHER stores, and a writer who
+ * adds a key family without asking that question leaves bytes that are billed
+ * forever and readable by nobody.
+ *
+ * Exported and enumerated because that bug is an ABSENCE — the same reason
+ * delete.ts exports TINY_OWNED_STORES. A test asserts this list covers every
+ * key template written in the worker AND every `reclaimed: false` entry says
+ * why, in prose, so the gap is a documented decision instead of a silence.
+ *
+ * ⚠️ `reclaimed: false` is the honest state for ALL of them today. It is not a
+ * TODO marker: it records that the reference-dropping half exists and the
+ * byte-deleting half does not.
+ */
+export const MEDIA_KEY_FAMILIES: {
+  key: string; writtenBy: string; referencedBy: string; reclaimed: boolean; how: string;
+}[] = [
+  {
+    key: "<uuid>.<ext>",
+    writtenBy: "media.ts MediaUploadCall (phones: screenshots, generated images, necklace audio, DM attachments)",
+    referencedBy: "whatever row the uploader files afterwards — transcripts.audio_url, a messages attachment, a tool_results payload, or a chat history entry",
+    reclaimed: false,
+    how: "no delete exists. Several referrers are RINGS or sweeps that drop the reference by design (transcripts prunes at TRANSCRIPT_RING_CAP; tool_results sweeps at RESULT_SWEEP_AGE_S), so these are orphaned in normal operation, not only on user delete. A key may also be referenced by MORE than one row (a forwarded DM attachment), so a reclaim must be reference-counted — see MessageDeleteCall.",
+  },
+  {
+    key: "voice/<sessionId>/recording.wav",
+    writtenBy: "voice.ts (mixed on first replay request, then cached)",
+    referencedBy: "derivable from the voice_sessions row id; regenerated from the pcm segments if absent",
+    reclaimed: false,
+    how: "a cache, not a record — safe to delete at any time, and nothing does. voice_sessions itself has no delete path anywhere (delete.ts TINY_OWNED_STORES tracks that as its own gap), so the session id that names this key outlives every tiny it belonged to.",
+  },
+  {
+    key: "voice/<sessionId>/events.jsonl",
+    writtenBy: "voice.ts teardown (the session's event journal)",
+    referencedBy: "the voice_sessions row id",
+    reclaimed: false,
+    how: "written on teardown for a replay nobody has asked for yet — the same speculative-write shape the glasses recorder stopped doing (tests/glasses-clip-lazy-upload.test.ts). Kept because a call's journal is the only record of what the model heard and said.",
+  },
+  {
+    key: "voice/<sessionId>/<in|out>-<seq>.pcm",
+    writtenBy: "voice.ts flushSegment (fire-and-forget, every few seconds of a live call)",
+    referencedBy: "the voice_sessions row id, by convention — the seq range is discovered by probing keys, never listed",
+    reclaimed: false,
+    how: "the highest-volume family here: raw audio of every voice call, both directions, written while the call runs. No delete, and the probe-by-convention read means a gap in the sequence is indistinguishable from the end of the call.",
+  },
+];
+
 /** contentType allowlist → extension. Images + the audio formats the speak
  *  tool will persist. Anything else is rejected (this store never serves
- *  HTML/JS — no stored-XSS surface on the public GET). */
-const EXT: Record<string, string> = {
+ *  HTML/JS — no stored-XSS surface on the public GET).
+ *
+ *  📦 The last two are firmware, not media: a necklace's over-the-air bundle is
+ *  a handful of MicroPython modules plus a manifest naming their sha256s, and
+ *  the board streams them straight from here (strands-nicla firmware/tiny_ota.py,
+ *  tools/publish_ota.py). Uploaded under their honest types rather than dressed
+ *  as a PNG, so an object in this bucket is identifiable by whoever audits it.
+ *
+ *  Neither adds a script surface. MediaGetCall serves the stored contentType with
+ *  X-Content-Type-Options: nosniff, and nosniff is exactly what stops a browser
+ *  treating a non-JS type as JS — including a <script src> pointed at the JSON,
+ *  which is the one way an inert-looking document becomes executable. The
+ *  firmware itself is public source in the strands-nicla repo, so an unguessable
+ *  URL holding a copy of it discloses nothing; the sha256s in the manifest are
+ *  what make the bytes trustworthy, not the secrecy of the key. */
+export const EXT: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/png": "png",
   "image/webp": "webp",
@@ -63,6 +129,13 @@ const EXT: Record<string, string> = {
   // 🎥 meta_record_video (glasses clips) — mp4 is as inert as the images on
   // the public GET (no HTML/JS surface); the 6MB cap above still governs.
   "video/mp4": "mp4",
+  // 📦 a necklace's OTA bundle: the modules, and the manifest that names them.
+  "text/x-python": "py",
+  "application/json": "json",
+  // 📦 the Sticky's OTA app image (single-file A/B slot) — served as inert
+  // bytes on the public GET like everything else; the 6MB cap governs and a
+  // 4MB OTA slot caps the useful size anyway.
+  "application/octet-stream": "bin",
 };
 
 /** Resolve an uploading device's owner. Identical shape to

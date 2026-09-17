@@ -23,7 +23,7 @@ import { emitEvent } from "./events";
 import { grantReputation, followRef, mutualRef } from "./reputation";
 // Memory graph: entity table is becoming the source of
 // truth; learnings stays dual-written for rollback during transition.
-import { RECENT_SQL, RECENT_ALL_SQL, TOTALS_SQL, BY_VEC_SQL, CLOSE_SQL, PURGE_ALL_FACTS_SQL, PURGE_ALL_FACT_EDGES_SQL, NODES_SQL, ALL_NODES_SQL, ALL_EDGES_SQL, CONFLICTS_SQL, SOCIAL_RELS, SOCIAL_NEIGHBORS_SQL, CONSULTED_EDGES_SQL, FACT_FEED_SQL, FEED_SQL, FOLLOWING_SQL, SOCIAL_OWNER, userNodeId, insertFactEntity, resolveEntityId, legacyVecId, supersede, insertEdges, neighbors, rankExpanded, groupConflicts, resolveConflict, recordSocialEdge, trustRank, type EdgeInput } from "./graph";
+import { RECENT_SQL, RECENT_ALL_SQL, TOTALS_SQL, BY_VEC_SQL, CLOSE_SQL, CLOSE_ALL_SQL, NODES_SQL, ALL_NODES_SQL, ALL_EDGES_SQL, CONFLICTS_SQL, SOCIAL_RELS, SOCIAL_NEIGHBORS_SQL, CONSULTED_EDGES_SQL, FACT_FEED_SQL, FEED_SQL, FOLLOWING_SQL, SOCIAL_OWNER, userNodeId, insertFactEntity, resolveEntityId, legacyVecId, supersede, insertEdges, neighbors, rankExpanded, groupConflicts, resolveConflict, recordSocialEdge, trustRank, type EdgeInput } from "./graph";
 
 const OpenAI = require("openai");
 
@@ -818,28 +818,10 @@ export class LearningsDeleteCall extends OpenAPIRoute {
           "SELECT vec_id FROM entity WHERE owner = ? AND kind = 'fact' AND vec_id IS NOT NULL"
         ).bind(String(userId)).all();
         vectorIds = (results || []).map((r: any) => String(r.vec_id));
-        // A WIPE DELETES. Closing the rows only set
-        // valid_to, and `label` + `attrs_json.$.source` still hold the
-        // memory VERBATIM — which RECENT_ALL_SQL / ALL_NODES_SQL(true) /
-        // BY_VEC_SQL(n, true) all render back the moment anyone passes
-        // include_closed=1 (the "History" toggle in MemoryPanel, iOS
-        // MemoryGraph, and tiny-tech's include_history). "Gone from every
-        // surface" and "marked grey on every surface" are not the same
-        // promise, and the unlearn tool makes the first one:
-        // "Erase EVERY memory and the semantic index — not recoverable".
-        //
-        // Edges FIRST: edge.src/dst REFERENCE entity(id), and D1 enforces
-        // foreign keys. Their `scope` column is caller-supplied text that
-        // ALL_EDGES_SQL returns, so it is content too.
-        const purged = await env.DB.batch([
-          env.DB.prepare(PURGE_ALL_FACT_EDGES_SQL).bind(String(userId)),
-          env.DB.prepare(PURGE_ALL_FACTS_SQL).bind(String(userId)),
-          env.DB.prepare("DELETE FROM learnings WHERE user_id = ?").bind(String(userId)),
-        ]);
-        // The FACT count is what the caller is told about (index 1) — not the
-        // edge count, which would inflate `deleted` past the number of
-        // memories the user had.
-        closed = Number(purged?.[1]?.meta?.changes || 0);
+        const res = await env.DB.prepare(CLOSE_ALL_SQL).bind(now, String(userId)).run();
+        closed = Number(res?.meta?.changes || 0);
+        await env.DB.prepare("DELETE FROM learnings WHERE user_id = ?")
+          .bind(String(userId)).run();
       }
       // Embeddings persist until explicitly deleted (AGENTS.md gotcha #9)
       for (let i = 0; i < vectorIds.length; i += 1000) {

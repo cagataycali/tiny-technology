@@ -19,8 +19,29 @@
  * with userId stamped by the app proxy / agent tool, never taken from a body.
  *
  * Ring semantics like events.ts: capped per user, oldest pruned on write —
- * a transcript is a note about a moment, not an archive; the audio in R2 is
- * the archive.
+ * a transcript is a note about a moment, not an archive.
+ *
+ * ⚠️ AND THE AUDIO IN R2 IS NOT THE ARCHIVE EITHER. This header used to say it
+ * was, which read as a researched decision — the words are disposable because
+ * the recording is durable — and the code has never had a basis for it:
+ *
+ *   - `audio_url` is stored in exactly ONE place: the row this file prunes.
+ *     Nothing else durably holds it (the `nicla_transcript` event carries the
+ *     preview and the id, not the URL, and it is a ring too). So the prune
+ *     drops the only reference that existed.
+ *   - the worker has `MEDIA.put/head/get` and no `MEDIA.delete` and no
+ *     `MEDIA.list` — see MEDIA_KEY_FAMILIES in media.ts. An object whose last
+ *     reference is gone is therefore permanently unreachable AND permanently
+ *     billed: not an archive, just a leak with a UUID.
+ *
+ * So the prune loses BOTH halves of a recording past the cap, and the losses
+ * are asymmetric in the worst direction — the text (small, useful, cheap) is
+ * deleted, the audio (large, expensive) is kept forever and reachable by
+ * nobody. Reclaiming it needs a delete + an owner check on this worker, which
+ * is a deploy; naming it here is what keeps the next reader from re-deriving
+ * the wrong conclusion from a comment. The phones do NOT rely on the false
+ * claim: iOS keeps its own local copy under its own byte budget and refuses to
+ * evict a row that owns audio it cannot re-fetch (NiclaRecorder.pruneAndSave).
  */
 import { OpenAPIRoute, Query, Str, Int } from "@cloudflare/itty-router-openapi";
 import { checkInternalKey } from "./users";
@@ -130,6 +151,11 @@ export class TranscriptAddCall extends OpenAPIRoute {
     ).run();
 
     // Ring semantics (events.ts RING_CAP): oldest beyond the cap pruned on write.
+    // ⚠️ This orphans the pruned rows' R2 audio permanently — this row is the
+    // only thing that ever held `audio_url`, and the worker has no delete (see
+    // the file header + MEDIA_KEY_FAMILIES). Deliberate for now: dropping the
+    // reference is what the ring is for, and reaching the bytes needs a delete
+    // endpoint this worker doesn't have. It is NOT "the archive keeps it".
     await env.DB.prepare(TRANSCRIPT_PRUNE_SQL).bind(userId, TRANSCRIPT_RING_CAP).run();
 
     // Name the device + carry the id: the ring is what the next turn's prompt

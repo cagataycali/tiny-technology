@@ -3,11 +3,9 @@
  *
  * The entity table is the memory source of truth; the legacy `learnings`
  * table is dual-written during transition (same deterministic id scheme as
- * migration 0012, so backfill + dual-writes never collide). RETIRING a fact
- * never hard-deletes it: unlearn/supersede CLOSE a row (valid_to = now).
- * "Currently true" = valid_to IS NULL. A WIPE (clear-all) is the one
- * exception and DELETEs — see PURGE_ALL_FACTS_SQL for why closing cannot
- * serve it.
+ * migration 0012, so backfill + dual-writes never collide). Facts are never
+ * hard-deleted: unlearn/supersede CLOSE a row (valid_to = now). "Currently
+ * true" = valid_to IS NULL.
  *
  * SQL is exported (messages/scheduler pattern) so tests run the real
  * statements against sqlite.
@@ -63,43 +61,9 @@ export const CLOSE_SQL = `
   UPDATE entity SET valid_to = ?1
   WHERE owner = ?2 AND id = ?3 AND valid_to IS NULL`;
 
-/**
- * Clear-all — the ONE memory operation that is NOT bitemporal.
- *
- * "Facts are NEVER hard-deleted" is the rule for RETIREMENT (unlearn one,
- * supersede): the fact stops being true, and the row survives as history so
- * provenance and freshness still work. A wipe is a different request. The
- * tool the user reaches says "Erase EVERY memory and the semantic index —
- * not recoverable", and clear-all already purges the Vectorize side.
- *
- * Closing every row cannot serve it: setting valid_to leaves `label` and
- * `attrs_json.$.source` — the verbatim memory text — in the row, and three
- * opt-in read paths render exactly those columns back (RECENT_ALL_SQL,
- * ALL_NODES_SQL(true), BY_VEC_SQL(n, true), all reachable with
- * include_closed=1 / the clients' "History" toggle). "Closed" is a badge,
- * not erasure.
- *
- * So a wipe DELETEs, scoped by OWNER and nothing else:
- *   - entities: every row the user owns, NOT just kind='fact'. Today
- *     insertFactEntity is the only writer under a user owner, so the two are
- *     the same set — but the schema documents 'person'|'tiny'|'project'|
- *     'concept' as kinds, and a `label` on a person node the user's agent
- *     extracted is their memory as much as a fact is. A kind filter here
- *     would be a wipe that silently narrows the day someone adds the second
- *     kind. Social nodes are unreachable either way: they live under
- *     SOCIAL_OWNER, a different owner entirely.
- *   - edges: the user's OWN edge rows, because `edge.scope` is
- *     caller-supplied text ("Python for scope A") and ALL_EDGES_SQL returns
- *     it. Deleting the nodes and keeping the edges would leave the user's
- *     words in a column nobody thinks of as content. Social edges are NOT
- *     touched: they are owned by SOCIAL_OWNER, and a follow is a
- *     relationship the user can see and revoke, not a memory.
- */
-export const PURGE_ALL_FACTS_SQL = `
-  DELETE FROM entity WHERE owner = ?1`;
-
-export const PURGE_ALL_FACT_EDGES_SQL = `
-  DELETE FROM edge WHERE owner = ?1`;
+export const CLOSE_ALL_SQL = `
+  UPDATE entity SET valid_to = ?1
+  WHERE owner = ?2 AND valid_to IS NULL AND kind = 'fact'`;
 
 export interface EntityRow {
   id: string;

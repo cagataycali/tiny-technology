@@ -217,6 +217,67 @@ export const DEVICE_ROTATE_TOKEN_SQL = `
   UPDATE devices SET token_hash = ?3
   WHERE id = ?1 AND user_id = ?2 AND revoked = 0 AND kind != 'endpoint'`;
 
+/**
+ * The row a re-enrolment under an existing name should ADOPT, if there is one.
+ *
+ * Enroll used to insert unconditionally, so every client that re-enrolled the
+ * same hardware minted another row and left the previous one in the fleet
+ * forever with a frozen last_seen. Measured 2026-08-14: a Nicla Vision whose
+ * flash had been wiped ended up with THREE rows named `tiny-ae1d`, two of them
+ * dead on arrival. The CLI path already refused this (`enroll_vision.py` calls a
+ * second row "the same orphan by another route"), but nothing on the server did,
+ * so the app and the daemon could not be told.
+ *
+ * Refusing is not an option here: `enrollDevice` in tiny-tech/src/device.ts
+ * re-enrolls AUTOMATICALLY whenever its identity file is gone or its heartbeat
+ * 401s, and throws if no token comes back. A 409 would strand every daemon that
+ * lost its device.json. So enroll adopts instead — same row, new token.
+ *
+ * STALE is the whole condition, and it is what makes this safe. A row that
+ * heartbeat within PRESENCE_WINDOW_S is a LIVE device that merely shares a name
+ * (two machines with one hostname), and stealing its token would start a
+ * re-enroll war: it 401s, re-enrols, steals back, forever. A stale row with your
+ * name is you, arriving without your credential — which is exactly the orphan
+ * case. NULL last_seen counts as stale: a row that never once heartbeat is a
+ * failed enrolment, the emptiest orphan of all.
+ *
+ * `revoked = 0` matters more here than anywhere else: a daemon re-enrols on the
+ * 401 that revoking CAUSES, so adopting a revoked row would hand back the
+ * credential the owner just killed and make revoke unenforceable. Excluded rows
+ * fall through to a fresh insert, which is the correct answer for a revoked one.
+ *
+ * `kind != 'endpoint'` for the reason DEVICE_ROTATE_TOKEN_SQL gives: endpoint
+ * rows hold token_hash = '' on purpose, and letting one be adopted would mint an
+ * inbound credential for a device that must never have one.
+ *
+ * ORDER BY last_seen DESC: among several stale rows, the one seen most recently
+ * is the likeliest to be this device. sqlite sorts NULLs last under DESC, so a
+ * never-seen row is the last resort rather than the first pick.
+ */
+export const DEVICE_ADOPTABLE_BY_NAME_SQL = `
+  SELECT id FROM devices
+  WHERE user_id = ?1 AND name = ?2 AND revoked = 0 AND kind != 'endpoint'
+    AND (last_seen IS NULL OR last_seen < ?3)
+  ORDER BY last_seen DESC LIMIT 1`;
+
+/**
+ * Adopt-on-enroll: re-key the row AND refresh what the enroller says it is.
+ *
+ * The guards are copied from DEVICE_ROTATE_TOKEN_SQL deliberately and are pinned
+ * by the same tests — this statement is reached from an unauthenticated-by-token
+ * path (the caller proved the SESSION, not the device), so losing `revoked = 0`
+ * or `kind != 'endpoint'` here would be the same escalation in a new place.
+ *
+ * platform/kind/capabilities are refreshed because the enroller is the authority
+ * on what the device is NOW: a row adopted after a reflash would otherwise keep
+ * describing the hardware it used to be. last_seen is deliberately NOT touched —
+ * presence is something the device earns with a heartbeat, and writing "seen now"
+ * here would show an unreachable board as online until the window expired.
+ */
+export const DEVICE_REENROLL_SQL = `
+  UPDATE devices SET token_hash = ?3, platform = ?4, kind = ?5, capabilities = ?6
+  WHERE id = ?1 AND user_id = ?2 AND revoked = 0 AND kind != 'endpoint'`;
+
 export class DeviceEnrollCall extends OpenAPIRoute {
   static schema = {
     tags: ["Devices"],
@@ -237,6 +298,39 @@ export class DeviceEnrollCall extends OpenAPIRoute {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
     const { userId, name, platform, kind, capabilities, url, secret } = data.body;
     if (!userId || !String(name || "").trim()) return json({ error: "userId and name required" }, 400);
+
+    // Adopt before inserting. This runs BEFORE the device cap on purpose: an
+    // adoption adds no row, and a fleet sitting at MAX_DEVICES_PER_USER must
+    // still be able to re-key hardware it already owns — otherwise the cap turns
+    // a lost token into a permanently unreachable device.
+    //
+    // The name is compared in its STORED form: DEVICE_INSERT_SQL slices to
+    // NAME_MAX, so a longer name would never match its own row and would mint a
+    // duplicate on every attempt — the exact bug this guard exists to stop.
+    const storedName = String(name).slice(0, NAME_MAX);
+    if (!isEndpointKind(kind)) {
+      const stale: any = await env.DB.prepare(DEVICE_ADOPTABLE_BY_NAME_SQL)
+        .bind(String(userId), storedName, Math.floor(Date.now() / 1000) - PRESENCE_WINDOW_S)
+        .first();
+      if (stale?.id) {
+        const adoptedToken = mintToken();
+        const res = await env.DB.prepare(DEVICE_REENROLL_SQL).bind(
+          String(stale.id),
+          String(userId),
+          await hashDeviceToken(adoptedToken),
+          String(platform || "").slice(0, 32),
+          (PULL_KINDS as readonly string[]).includes(String(kind)) ? String(kind) : "cli",
+          sanitizeCapabilities(capabilities),
+        ).run();
+        // 0 changed means the row stopped being adoptable between the SELECT and
+        // the UPDATE — revoked in that window. Returning the token anyway would
+        // install a credential that authenticates nothing and surface later as an
+        // unexplained offline device, so fall through and enroll fresh instead.
+        if (Number(res?.meta?.changes || 0) > 0) {
+          return json({ ok: true, device_id: String(stale.id), device_token: adoptedToken, adopted: true });
+        }
+      }
+    }
 
     const count = await env.DB.prepare(DEVICE_COUNT_SQL).bind(String(userId)).first();
     if (Number(count?.n || 0) >= MAX_DEVICES_PER_USER) {
@@ -261,7 +355,7 @@ export class DeviceEnrollCall extends OpenAPIRoute {
       await env.DB.prepare(ENDPOINT_INSERT_SQL).bind(
         id,
         String(userId),
-        String(name).slice(0, NAME_MAX),
+        storedName,
         String(platform || "").slice(0, 32),
         ENDPOINT_KIND,
         sanitizeCapabilities(capabilities),
@@ -276,7 +370,7 @@ export class DeviceEnrollCall extends OpenAPIRoute {
     await env.DB.prepare(DEVICE_INSERT_SQL).bind(
       id,
       String(userId),
-      String(name).slice(0, NAME_MAX),
+      storedName,
       String(platform || "").slice(0, 32),
       (PULL_KINDS as readonly string[]).includes(String(kind)) ? String(kind) : "cli",
       sanitizeCapabilities(capabilities),
@@ -298,13 +392,14 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
       token: new Str({ required: true }),
       capabilities: new Str({ required: false }),
       lanUrl: new Str({ required: false, description: "http://<private-ip>:<port> the owner's own clients can dial directly" }),
+      wantUnread: new Str({ required: false, description: "truthy → reply carries the owner's unread DM count (opt-in: the badge poll for glass devices, free for the rest of the fleet)" }),
     },
     responses: { "200": { description: "Alive", schema: { response: "Alive" } } },
   };
 
   async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
-    const { deviceId, token, capabilities, lanUrl } = data.body;
+    const { deviceId, token, capabilities, lanUrl, wantUnread } = data.body;
     if (!deviceId || !token) return json({ error: "deviceId and token required" }, 400);
 
     // A bad lanUrl is DROPPED, never a 400: the heartbeat's job is presence, and
@@ -328,6 +423,28 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
     // A wrong token and a revoked device look identical from outside —
     // no oracle for probing which device ids exist
     if (!res?.meta?.changes) return json({ error: "unknown device" }, 401);
+
+    // 💬 Opt-in unread badge (docs/research/MESSAGES_TRANSPORT.md in
+    // sticky-the-reterminal): the relay poll is a device's push channel and the
+    // heartbeat is its clock, so the cheapest possible DM badge is one COUNT
+    // riding a reply that already exists — no new route, no new poll. Strictly
+    // opt-in because this is the hottest device route (every device, every
+    // 30s); the fleet that doesn't render badges pays nothing. Failure is a
+    // MISSING field, never a failed heartbeat: presence must not die over a
+    // badge, and the device treats absence as "keep last known".
+    if (wantUnread && String(wantUnread) !== "0" && String(wantUnread) !== "false") {
+      try {
+        const owner = await env.DB.prepare(
+          "SELECT user_id FROM devices WHERE id = ?1 AND revoked = 0"
+        ).bind(String(deviceId)).first();
+        if (owner?.user_id) {
+          const cnt = await env.DB.prepare(
+            "SELECT COUNT(*) AS c FROM messages WHERE to_user = ? AND read = 0"
+          ).bind(owner.user_id).first();
+          return json({ ok: true, unread: Number(cnt?.c || 0) });
+        }
+      } catch { /* badge is best-effort; presence already succeeded */ }
+    }
     return json({ ok: true });
   }
 }

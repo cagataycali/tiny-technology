@@ -91,11 +91,46 @@ export const VOICE_INSERT_SQL = `
 export const VOICE_CONNECT_SQL = `
   UPDATE voice_sessions SET status = 'live', connected_at = ?2 WHERE id = ?1`;
 
+/**
+ * Teardown's row update — MONOTONIC, and deliberately so.
+ *
+ * ⚠️ Every counter this binds lives ONLY in DO instance memory (`inSeq`,
+ * `outSeq`, `eventCount`, `startedMs`, `events`); `state.storage` holds `cfg`
+ * alone. So a teardown running on a FRESH instance — an eviction that re-armed
+ * the alarm, or `POST /voice/reap/:id` waking a cold DO — has every counter at
+ * 0 and `this.closed` false (it is per-instance, not persisted). The old
+ * unconditional `SET segment_count = ?5` then overwrote a real 12-segment,
+ * two-hour row with zeroes.
+ *
+ * That is not a cosmetic loss. `segment_count` is the ONLY thing that can tell
+ * a hole from the end of a call (see voiceRecording), so zeroing it silently
+ * reverts the stitch to break-at-first-miss; and all three clients drop a
+ * `segment_count = 0` row from the list entirely, each calling it an outage
+ * casualty whose "stitch 404s, the row is dead" — while the audio sits in R2,
+ * intact and stitchable.
+ *
+ * So: a counter may only ever go UP, `ended_at` keeps the FIRST stamp (that is
+ * when the call actually ended), an error reason is never overwritten by a
+ * later silent teardown, and the WHERE clause makes a no-knowledge re-teardown
+ * a genuine no-op (0 rows) instead of a write. A reap of a row that never
+ * finished still moves `status` off 'live' — that is what reap is FOR.
+ * `COALESCE(col, 0)` guards the columns because `max(NULL, x)` is NULL in
+ * sqlite, which would blank a row rather than raise it.
+ */
 export const VOICE_END_SQL = `
   UPDATE voice_sessions
-  SET status = ?2, ended_at = ?3, duration_ms = ?4, segment_count = ?5,
-      event_count = ?6, input_tokens = ?7, output_tokens = ?8, error = ?9
-  WHERE id = ?1`;
+  SET status = ?2,
+      ended_at = COALESCE(ended_at, ?3),
+      duration_ms = max(COALESCE(duration_ms, 0), ?4),
+      segment_count = max(COALESCE(segment_count, 0), ?5),
+      event_count = max(COALESCE(event_count, 0), ?6),
+      input_tokens = max(COALESCE(input_tokens, 0), ?7),
+      output_tokens = max(COALESCE(output_tokens, 0), ?8),
+      error = COALESCE(?9, error)
+  WHERE id = ?1 AND (
+      status NOT IN ('ended', 'error')
+      OR ?5 > COALESCE(segment_count, 0)
+      OR (?9 IS NOT NULL AND error IS NULL))`;
 
 export class VoiceSession {
   state: any;
@@ -167,6 +202,10 @@ export class VoiceSession {
    *  armed to ever scrub it. teardown is idempotent (this.closed). */
   private async handleReap(request: Request): Promise<Response> {
     if (!checkInternalKey(request, this.env)) return json({ error: "unauthorized" }, 401);
+    // ⚠️ No reason, deliberately — see alarm(). A reap runs on a possibly-COLD
+    // instance by design ("safe on any session"), so it knows neither why the
+    // call stopped nor whether it had already finished. It is the archetype of
+    // the caller this cycle's guard exists to disarm.
     await this.teardown("ended");
     return json({ ok: true });
   }
@@ -382,7 +421,7 @@ export class VoiceSession {
       });
     });
     c.addEventListener("close", () => this.teardown("ended"));
-    c.addEventListener("error", () => this.teardown("error"));
+    c.addEventListener("error", () => this.teardown("error", "the client socket errored"));
   }
 
   /** Frames FROM OpenAI. Audio deltas → client binary; everything else → the
@@ -529,15 +568,22 @@ export class VoiceSession {
     // otherwise every OpenAI-side drop reads as a mute "call ended" (cost an
     // hour of debugging during the 2026-07-25 OpenAI incident: dial 101'd,
     // then "Network connection lost", zero events, nothing surfaced anywhere).
+    // ⚠️ Both arms RECORD the reason as well as speaking it. The live client
+    // hears it once, in a toast, and then the call is over; the row is what the
+    // person still has tomorrow when they ask why. Telling only the socket is
+    // the same mistake the console.log was: a reason addressed to whoever
+    // happened to be watching.
     u.addEventListener("close", (e: any) => {
+      const why = `upstream closed: ${e?.code ?? "?"} ${String(e?.reason || "").slice(0, 80)}`.trim();
       console.log("voice upstream CLOSE", e?.code, String(e?.reason || "").slice(0, 120));
       this.sendClient(JSON.stringify({ type: "error", error: "the voice service closed the connection — try calling again" }));
-      this.teardown("ended");
+      this.teardown("ended", why);
     });
     u.addEventListener("error", (e: any) => {
+      const why = `upstream error: ${String(e?.message || e).slice(0, 80)}`;
       console.log("voice upstream ERROR", String(e?.message || e).slice(0, 120));
       this.sendClient(JSON.stringify({ type: "error", error: "the voice service dropped — try calling again" }));
-      this.teardown("error");
+      this.teardown("error", why);
     });
   }
 
@@ -597,7 +643,16 @@ export class VoiceSession {
   }
 
   // ── Teardown ─────────────────────────────────────────────────────────────
-  private async teardown(status: "ended" | "error") {
+  /** `reason` lands in voice_sessions.error, which VOICE_GET_SQL has always
+   *  selected and nothing has ever written: this bind used to be a hardcoded
+   *  `null`, so every client faithfully read a column that was NULL for every
+   *  session ever recorded. The reason was never missing — the upstream
+   *  close/error listeners hold it and `console.log`ed it into the worker tail,
+   *  where nobody debugging their own dropped call can reach it. Found by a
+   *  SURVIVING mutant: `error = ?9` and `error = COALESCE(?9, error)` were
+   *  behaviourally identical precisely because ?9 could not be non-null, which
+   *  is also what made the guard arm protecting it unfireable. */
+  private async teardown(status: "ended" | "error", reason: string | null = null) {
     if (this.closed) return;
     this.closed = true;
     const cfg: any = await this.state.storage.get("cfg");
@@ -611,11 +666,22 @@ export class VoiceSession {
     this.flushSegment("in");
     this.flushSegment("out");
     const segCount = this.inSeq + this.outSeq;
-    if (id && this.env.MEDIA) {
+    // ⚠️ Only write the journal if THIS instance has one. `this.events` is
+    // in-memory, so a teardown on a fresh instance (eviction, or /voice/reap
+    // waking a cold DO — `this.closed` is per-instance and does not stop it)
+    // would `put` an EMPTY body over the real journal. R2 has no delete here,
+    // but a put OVERWRITES, and events.jsonl is what carries the mix markers:
+    // blanking it makes voiceRecording 404 the call ("no replay journaled")
+    // even though every PCM segment is still sitting in the bucket. An empty
+    // journal is not a shorter journal, it is the loss of one — same shape as
+    // VOICE_END_SQL's zeroed counters above.
+    if (id && this.env.MEDIA && this.events.length) {
       const body = this.events.join("\n");
       await this.env.MEDIA.put(`voice/${id}/events.jsonl`, body, {
         httpMetadata: { contentType: "application/x-ndjson" },
       }).catch((err: any) => console.log(err, "events flush"));
+    } else if (id && this.env.MEDIA) {
+      console.log("voice teardown with no journaled events — not overwriting", id, status);
     }
 
     const durationMs = this.startedMs ? Date.now() - this.startedMs : 0;
@@ -623,7 +689,7 @@ export class VoiceSession {
       try {
         await this.env.DB.prepare(VOICE_END_SQL).bind(
           id, status, Math.floor(Date.now() / 1000), durationMs,
-          segCount, this.eventCount, this.inTokens, this.outTokens, null
+          segCount, this.eventCount, this.inTokens, this.outTokens, reason
         ).run();
       } catch (err) { console.log(err, "voice end update"); }
     }
@@ -640,10 +706,19 @@ export class VoiceSession {
    *  resets startedMs, which lands in the pre-connect arm — teardown, the
    *  right call there too (the sockets died with the old instance). */
   async alarm() {
+    // ⚠️ NO reason from this arm. `!startedMs` is two different events wearing
+    // one face — a ticket that expired unused, and an EVICTION of a call that
+    // was mid-conversation — and this instance cannot tell them apart (that is
+    // the whole subject of VOICE_END_SQL's docstring). Naming either would be
+    // this cycle's own defect in miniature: a cold instance writing down a
+    // conclusion it has no basis for. Silence leaves the column NULL, which
+    // reads as "no reason recorded" rather than as a wrong one.
     if (!this.startedMs) { await this.teardown("ended"); return; }
     const idle = Date.now() - this.lastClientMs;
-    if (idle >= CLIENT_IDLE_MS || Date.now() - this.startedMs >= MAX_SESSION_MS) {
-      await this.teardown("ended");
+    // These two the alarm DOES know, because it measured them itself.
+    if (idle >= CLIENT_IDLE_MS) { await this.teardown("ended", "the client went silent"); return; }
+    if (Date.now() - this.startedMs >= MAX_SESSION_MS) {
+      await this.teardown("ended", "the call hit the maximum length");
       return;
     }
     try { this.state.storage.setAlarm?.(Date.now() + IDLE_CHECK_MS); } catch { /* next close reaps */ }
@@ -840,10 +915,21 @@ export async function voiceRecording(request: Request, env: any): Promise<Respon
 
   // Only stitch a FINISHED call — a live one is still growing its segments
   // and would cache a partial recording forever.
-  const row = await env.DB?.prepare("SELECT status FROM voice_sessions WHERE id = ?").bind(id).first().catch(() => null);
+  //
+  // ⚠️ `segment_count` is selected too, and it is not decoration: it is the DO's
+  // own record of how many segments it journaled (teardown's `inSeq + outSeq`),
+  // and it is the ONLY thing that can tell a complete call from a lossy one.
+  // See readAll below — "no key at index i" and "the call ended at index i" are
+  // the same observation without it.
+  const row: any = await env.DB?.prepare(
+    "SELECT status, segment_count FROM voice_sessions WHERE id = ?"
+  ).bind(id).first().catch(() => null);
   if (row && row.status !== "ended" && row.status !== "error") {
     return json({ error: "call still in progress" }, 409);
   }
+  // 0/null means "an old row, or a row this worker never got to update" — not
+  // "zero segments". Only a positive count is a claim worth checking against.
+  const expected = Number(row?.segment_count) > 0 ? Number(row.segment_count) : null;
 
   const ev = await env.MEDIA.get(`voice/${id}/events.jsonl`);
   if (!ev) return json({ error: "no replay journaled for this session" }, 404);
@@ -857,12 +943,50 @@ export async function voiceRecording(request: Request, env: any): Promise<Respon
     } catch { /* skip malformed line */ }
   }
 
+  // ⚠️ A GAP IS NOT THE END OF THE CALL, and `break` cannot tell the difference.
+  //
+  // `flushSegment` is deliberately fire-and-forget — "a dropped segment
+  // shouldn't stall the live relay" — so a failed `MEDIA.put` logs and the call
+  // continues, while `inSeq`/`outSeq` were already incremented. That leaves a
+  // permanent HOLE in the sequence. Teardown makes it likelier still: it flushes
+  // the final tails WITHOUT awaiting them, then awaits the D1 update that flips
+  // status to "ended" — so the 409 guard above can pass while the last puts are
+  // in flight.
+  //
+  // Breaking at the first miss reported both cases as a shorter call: a two-hour
+  // recording whose segment 3 was lost replayed as ninety seconds, with a
+  // complete-looking scrubber and nothing anywhere saying a byte was missing.
+  // And the result was then CACHED (no MEDIA.delete exists — see media.ts
+  // MEDIA_KEY_FAMILIES), so the truncation became that call's permanent answer.
+  //
+  // So: probe the whole declared range, keep going past a hole, and REPORT it.
+  // `missing` is what makes the loss visible instead of merely absent.
+  const missing: string[] = [];
   const readAll = async (dir: "in" | "out") => {
     const parts: Uint8Array[] = [];
     let total = 0;
-    for (let i = 0; i < 10_000; i++) {
+    // `segment_count` is the SUM of both directions, so probing it per-direction
+    // always overshoots one of them — those tail misses are the overshoot, not
+    // loss. So a miss is only PENDING until a later hit proves the sequence
+    // continued past it; whatever is still pending at the end was the tail.
+    const limit = expected ?? 10_000;
+    const pending: string[] = [];
+    for (let i = 0; i < limit; i++) {
       const seg = await env.MEDIA.get(`voice/${id}/${dir}-${i}.pcm`);
-      if (!seg) break;
+      if (!seg) {
+        // Legacy/unknown count: a break is the only stop signal there is, and
+        // guessing would be worse than the old behaviour. Keep it, and say so
+        // in the response header rather than pretending the read was complete.
+        if (expected === null) break;
+        pending.push(`${dir}-${i}`);
+        // Bounded probe past a hole: without this a call that really ended
+        // early would read every remaining index for nothing.
+        if (pending.length > 3) break;
+        continue;
+      }
+      // A hit after misses proves those were real holes, not the tail.
+      for (const m of pending) missing.push(m);
+      pending.length = 0;
       const bytes = new Uint8Array(await seg.arrayBuffer());
       parts.push(bytes);
       total += bytes.length;
@@ -910,10 +1034,34 @@ export async function voiceRecording(request: Request, env: any): Promise<Respon
   const wav = new Uint8Array(44 + data.length);
   wav.set(wavHeader(data.length), 0);
   wav.set(data, 44);
-  await env.MEDIA.put(`voice/${id}/recording.wav`, wav, {
-    httpMetadata: { contentType: "audio/wav" },
-  }).catch((err: any) => console.log(err, "recording cache"));
-  return rangedWav(wav, request.headers.get("Range"), wavHeaders);
+
+  // ⚠️ A LOSSY STITCH IS NOT CACHED. `Cache-Control: immutable` + no
+  // `MEDIA.delete` in this worker (media.ts MEDIA_KEY_FAMILIES) means whatever
+  // lands here is that call's answer FOREVER — so a stitch that is missing
+  // segments must not be the thing that gets frozen. The segments it wants may
+  // still be in flight from teardown's un-awaited flush, in which case the next
+  // request stitches a complete recording; caching the short one would have
+  // guaranteed nobody ever heard the rest.
+  const short = missing.length > 0;
+  const headers: Record<string, string> = { ...wavHeaders };
+  // An unknown count is not a clean bill of health: the read fell back to
+  // break-at-first-miss, so "no gaps found" only means none were detectable.
+  // Legacy rows and rows whose end-update never landed both look like this.
+  if (expected === null) headers["X-Tiny-Segments-Unverified"] = "1";
+  if (short) {
+    // Say it on the response too. The player cannot tell a 90-second recording
+    // of a 2-hour call from a 90-second call — the scrubber looks complete
+    // either way — so the disclosure has to travel with the bytes.
+    headers["Cache-Control"] = "no-store";
+    headers["X-Tiny-Segments-Missing"] = missing.slice(0, 20).join(",");
+    headers["X-Tiny-Recording-Partial"] = "1";
+    console.log("voice recording stitched with gaps", id, missing.length, missing.slice(0, 20).join(","));
+  } else {
+    await env.MEDIA.put(`voice/${id}/recording.wav`, wav, {
+      httpMetadata: { contentType: "audio/wav" },
+    }).catch((err: any) => console.log(err, "recording cache"));
+  }
+  return rangedWav(wav, request.headers.get("Range"), headers);
 }
 
 /** Replay filename allowlist — events log + segmented PCM only; nothing else
@@ -945,9 +1093,14 @@ export async function voiceReplayAsset(request: Request, env: any): Promise<Resp
   });
 }
 
+// `error` is selected here too, not just by VOICE_GET_SQL: the list is what
+// every client actually renders (web /calls, iOS CallRecordingsView, Android
+// CallRecordingsSheet), and a reason no list carries is a reason nobody reads.
+// Until teardown started binding it this column was NULL for every row ever
+// written, so shipping it in the list is what makes the wiring observable.
 export const VOICE_LIST_SQL = `
   SELECT id, tiny_name, voice, status, started_at, ended_at, duration_ms,
-         segment_count, event_count, input_tokens, output_tokens
+         segment_count, event_count, input_tokens, output_tokens, error
   FROM voice_sessions
   WHERE user_id = ?1
   ORDER BY started_at DESC LIMIT 50`;
@@ -992,8 +1145,13 @@ export class VoiceSessionGetCall extends OpenAPIRoute {
     const origin = new URL(request.url).origin;
     const manifest = {
       events: `${origin}/voice/replay/${row.id}/events.jsonl`,
-      // Segments are interleaved in/out; expose both series generously and let
-      // the player stop at the first missing index.
+      // Segments are interleaved in/out under this prefix, indexed from 0.
+      // ⚠️ An absent index is NOT a stop signal — this comment used to say it
+      // was. A hole and the end of the call are the same observation from out
+      // here (voiceRecording above has the three reachable causes), so walk to
+      // `segment_count` on the row and treat a miss below it as a gap to
+      // REPORT. No client reads `audioBase` today; /voice/recording/:id serves
+      // the stitched WAV, so whoever writes the first player starts there.
       audioBase: `${origin}/voice/replay/${row.id}`,
     };
     return json({ ok: true, session: row, manifest });
