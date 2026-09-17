@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Files this repo deliberately changed for open-sourcing (template hygiene,
 # layout fixes, scrubbed fixtures). Extend when a cycle adds one ON PURPOSE.
-DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$|web/SECURITY\.md$|web/\.env\.example$|web/package(-lock)?\.json$|web/next\.config\.js$|web/tsconfig\.json$|web/vitest\.config\.ts$|FleetHarness\.kt$|gen-store-composites\.mjs$|web/tests/(wearables-ios|wearables-web|android-ota-integrity|chain-calldata|flipper-ble)\.test\.ts$|^mkdocs\.yml$'
+DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$|web/SECURITY\.md$|web/\.env\.example$|web/package(-lock)?\.json$|web/next\.config\.js$|web/tsconfig\.json$|web/vitest\.config\.ts$|FleetHarness\.kt$|gen-store-composites\.mjs$|web/tests/(wearables-ios|wearables-web|android-ota-integrity|chain-calldata|flipper-ble|chain-joiner-script)\.test\.ts$|^mkdocs\.yml$'
 # `(^|/)\.gradle/` — the CACHE dir, not build.gradle.kts / settings.gradle.kts:
 # the old `\.gradle` matched both and the gradle files were never compared,
 # which is how a ported DmMedia.kt met a build.gradle.kts without media3.

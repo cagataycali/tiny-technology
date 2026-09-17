@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { readFileSync, existsSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join as joinPath } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -39,9 +39,26 @@ const ROOT = process.cwd()
 const SCRIPT = joinPath(ROOT, 'chain/multinode/scripts/join-tiny-chain.sh')
 const GENESIS = joinPath(ROOT, 'chain/multinode/genesis-8470.json')
 
-/** A JDK we know exists on this machine, used as the "joiner has Java" fixture. */
-const REAL_JDK = ['/opt/homebrew/opt/openjdk@26', '/opt/homebrew/opt/openjdk']
-  .find((p) => existsSync(joinPath(p, 'bin/java')))
+/** A JDK we know exists on this machine, used as the "joiner has Java" fixture.
+ * macOS Homebrew paths, then whatever the host (e.g. a CI runner) advertises. */
+const REAL_JDK = [
+  '/opt/homebrew/opt/openjdk@26',
+  '/opt/homebrew/opt/openjdk',
+  process.env.JAVA_HOME ?? '',
+  '/usr/lib/jvm/default-java',
+].filter(Boolean).find((p) => existsSync(joinPath(p, 'bin/java')))
+
+/**
+ * Hermetic HOME with a stub besu at the script's fallback path. Without this,
+ * the suite passed on the machine that HAS a real besu under ~/.tiny-chain and
+ * failed everywhere else — the exact defect class this file was written to
+ * catch, one layer up. The stub answers --version so the script's probe reads
+ * something besu-shaped; --dry-run never executes it beyond that.
+ */
+const STUB_HOME = mkdtempSync(joinPath(tmpdir(), 'joiner-home-'))
+const STUB_BESU_DIR = joinPath(STUB_HOME, '.tiny-chain/besu/besu-26.7.0/bin')
+mkdirSync(STUB_BESU_DIR, { recursive: true })
+writeFileSync(joinPath(STUB_BESU_DIR, 'besu'), '#!/bin/sh\necho "besu/v26.7.0"\nexit 0\n', { mode: 0o755 })
 
 /**
  * Run the joiner script with a controlled environment.
@@ -56,7 +73,7 @@ function run(env: Record<string, string>, args: string[] = ['--dry-run']) {
       // ⚠️ Cast through `unknown`: node's ProcessEnv type demands NODE_ENV, and
       // supplying it would defeat the point — the value of this harness is that the
       // child sees ONLY what is listed here, so its env genuinely is a partial one.
-      env: { ...env, HOME: env.HOME ?? process.env.HOME ?? '/tmp' } as unknown as NodeJS.ProcessEnv,
+      env: { ...env, HOME: env.HOME ?? STUB_HOME } as unknown as NodeJS.ProcessEnv,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       cwd: ROOT,
@@ -67,8 +84,15 @@ function run(env: Record<string, string>, args: string[] = ['--dry-run']) {
   }
 }
 
-/** PATH holding only the macOS java STUB — exists, executable, no runtime. */
-const STUB_PATH = '/usr/bin:/bin'
+/**
+ * PATH whose `java` is a broken stub. On macOS, bare /usr/bin/java already IS
+ * one (exits 1 without a JDK) — but on Linux runners /usr/bin/java is a real
+ * JDK, which silently inverted the "no working java" premise. Shadow java
+ * with our own stub first on the PATH so the premise holds on every host.
+ */
+const STUB_JAVA_BIN = mkdtempSync(joinPath(tmpdir(), 'joiner-stubjava-'))
+writeFileSync(joinPath(STUB_JAVA_BIN, 'java'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+const STUB_PATH = `${STUB_JAVA_BIN}:/usr/bin:/bin`
 const JDK_PATH = REAL_JDK ? `${REAL_JDK}/bin:/usr/bin:/bin` : STUB_PATH
 
 describe('the joiner script is executable by a stranger, not just by us', () => {
@@ -133,7 +157,7 @@ describe('the joiner script is executable by a stranger, not just by us', () => 
       // test asserted the right code for the wrong reason. Removing the second
       // failure makes Java the ONLY thing that can end this run.
       stdout = execFileSync('bash', [copy, '--dry-run', '--bootnodes', `enode://${'a'.repeat(128)}@203.0.113.7:30303`], {
-        env: { PATH: STUB_PATH, TINY_JOIN_GENESIS: GENESIS, HOME: process.env.HOME || '/tmp' } as unknown as NodeJS.ProcessEnv,
+        env: { PATH: STUB_PATH, TINY_JOIN_GENESIS: GENESIS, HOME: STUB_HOME } as unknown as NodeJS.ProcessEnv,
         encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], cwd: ROOT,
       })
     } catch (e: any) {
