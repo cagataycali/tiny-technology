@@ -33,8 +33,6 @@ import { REQUESTS_PER_POINT, MAX_REPUTATION_BONUS } from '../lib/rate-limit-curv
  *    refusal itself out of view.
  */
 
-// `ios/` resolves through the web/ios symlink, so the path reads the same here
-// as it did when web was the repo root.
 const src = (p: string) => readFileSync(join(process.cwd(), p), 'utf8')
 
 const base = {

@@ -8,17 +8,16 @@ import { join } from 'node:path'
  *
  * `SFSpeechRecognitionRequest.addsPunctuation` defaults to FALSE, so a
  * recognizer built without it returns one unbroken run-on. That is a formatting
- * detail on a screen and something worse everywhere text leaves the phone: every
- * one of these transcripts is read by the agent — as a chat message, a tool
- * result, or a transcript row in its context — and NiclaRecorder already says why
- * at the one site that had thought about it:
+ * detail on a screen and something worse everywhere text leaves the phone: all
+ * seven of these transcripts are read by the agent — as a chat message, a tool
+ * result, or a transcript row in its context — and DmMedia already says why:
  *
- *   "A take here is up to 10s of unprompted speech that a model reads later …
- *    it needs sentence boundaries to stay legible. Without this a wake-triggered
- *    transcript arrives as one unpunctuated run-on."
+ *   "A voice note is a sentence someone said, and it is read as text by both
+ *    the recipient and the agent — without punctuation it arrives as one
+ *    unreadable run-on."
  *
- * HALF the rails were missing it, and the shape of the miss is what makes this a
- * derived roster rather than a spot-check:
+ * Three of the seven were missing it, and the shape of the miss is what makes
+ * this a derived roster rather than a spot-check:
  *
  *   - `GlassesListener.listen(seconds:)` has TWO rails. If the live card is
  *     already transcribing it rides that transcriber and returns the delta;
@@ -94,12 +93,9 @@ const SITES = requestSites()
 describe('iOS speech requests — punctuation and on-device, on every rail', () => {
   it('finds the recognition sites at all (a zero-length roster proves nothing)', () => {
     // Without this the suite passes vacuously the day the constructor is renamed
-    // or the source moves — green, and pinning nothing. Both numbers are MEASURED
-    // in this tree (six requests across four files) rather than copied from a
-    // sibling client, and they are floors with exactly one job: refuse a scrape
-    // that found nothing. A seventh rail must RAISE this, never be excused by it.
-    expect(SITES.length).toBeGreaterThanOrEqual(6)
-    expect(new Set(SITES.map(s => s.file)).size).toBeGreaterThanOrEqual(4)
+    // or the source moves — green, and pinning nothing.
+    expect(SITES.length).toBeGreaterThanOrEqual(7)
+    expect(new Set(SITES.map(s => s.file)).size).toBeGreaterThanOrEqual(5)
   })
 
   it.each(SITES.map(s => [`${s.file}:${s.line}`, s] as const))(

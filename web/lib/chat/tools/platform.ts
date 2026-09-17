@@ -12,6 +12,12 @@ import { tool, ImageBlock, TextBlock } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { validatePublicUrl, usd } from '@/lib/utils'
 import { sanitizeToolName } from '@/lib/chat/tool-filter'
+import { relaySend } from '@/lib/chat/relay-send'
+// prompt.ts imports NOTHING (a pure leaf), so this cannot cycle. Reusing its
+// parser rather than writing a second one is the point: the system prompt's
+// device block and this tool result must never disagree about what a device
+// declares — that disagreement is the bug this import fixes.
+import { parseCapabilities, duplicateRoles } from '@/lib/chat/prompt'
 
 // Exported: lib/chat/tools/spawn.ts rides the same internal-key channel for
 // its batch deposits/announcements — one WORKER constant, one header shape.
@@ -218,12 +224,12 @@ export async function deviceReplyBlocks(
 
 export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
   name: 'use_device',
-  description: "Reach the user's enrolled devices — laptops/daemons from `npx tiny-tech`, and `endpoint` devices, which are machines running their own always-on authenticated API (a 3D printer, a robot). Endpoint devices are invoked exactly the same way, but their reachability is unknown until you call them (online:null, not offline), and they answer synchronously with no pending ticket. action:'list' shows devices with online/offline presence. action:'invoke' sends a prompt to a device — its LOCAL agent executes (real shell, real files, its zenoh mesh) and the answer comes back here; it waits up to ~45s, and a slower task returns pending:true with an envelope_id instead of failing (the device keeps working, and the user gets a push notification when it finishes). For a task that is clearly long (builds, downloads, big analyses) or when the user says to run it in the background / fire-and-forget, pass wait:false — the envelope_id comes back immediately and the notification closes the loop. action:'result' with that envelope_id fetches the finished result — kept ~24 hours and re-readable, so you can check this conversation, a later one, or after the user taps the notification. If the device made images during the turn (e.g. a Mac with the `computer` capability screenshotting its own screen), they come back here as images you can SEE plus hosted URLs — so ask a device to look at its screen when the question is about what's on it. Only the owner's devices are reachable; prefer online devices.",
+  description: "Reach the user's enrolled devices — laptops/daemons from `npx tiny-tech`, and `endpoint` devices, which are machines running their own always-on authenticated API (a 3D printer, a robot). Endpoint devices are invoked exactly the same way, but their reachability is unknown until you call them (online:null, not offline), and they answer synchronously with no pending ticket. action:'list' shows devices with online/offline presence AND the `capabilities` each one declares — match the task to a device that declares the power it needs, and never tell the user a device lacks something without checking that list first (a phone typically declares chat, location, bluetooth_scan, record, speak, open_app, screenshot and more, so 'open an app on my iPhone' is a thing it can genuinely do). action:'invoke' sends a prompt to a device — its LOCAL agent executes (real shell, real files, its zenoh mesh) and the answer comes back here; it waits up to ~45s, and a slower task returns pending:true with an envelope_id instead of failing (the device keeps working, and the user gets a push notification when it finishes). For a task that is clearly long (builds, downloads, big analyses) or when the user says to run it in the background / fire-and-forget, pass wait:false — the envelope_id comes back immediately and the notification closes the loop. action:'result' with that envelope_id fetches the finished result — kept ~24 hours and re-readable, so you can check this conversation, a later one, or after the user taps the notification. If the device made images during the turn (e.g. a Mac with the `computer` capability screenshotting its own screen), they come back here as images you can SEE plus hosted URLs — so ask a device to look at its screen when the question is about what's on it. Only the owner's devices are reachable; prefer online devices.",
   inputSchema: z.object({
     action: z.enum(['list', 'invoke', 'result']),
     device_id: z.string().optional().describe('Target device id (from list). Required for invoke.'),
     prompt: z.string().optional().describe('What the device agent should do. Required for invoke.'),
-    envelope_id: z.string().optional().describe("Envelope id from a pending invoke (or a batch_* ticket from spawn_agents wait:false — background fleets park their results in the same mailbox). Required for action:'result'."),
+    envelope_id: z.string().optional().describe("Envelope id from a pending invoke, or a TICKET — every kind redeems identically, because they all park in the same mailbox: batch_* from spawn_agents wait:false (a background fleet), task_* from a device's own long task it ran on its side (use_tasks). A task_* is what the \"finished a background task\" push and the device_task_result ring row hand you, so treat it as a valid id and just fetch it. Required for action:'result'."),
     wait: z.boolean().optional().describe("invoke only (default true): wait up to ~45s for the answer. false = fire-and-forget — return the pending ticket immediately; the user is notified when the device finishes. Use false for long tasks or an explicit 'in the background'. Ignored for endpoint devices (they answer synchronously)."),
   }),
   callback: async (input) => {
@@ -260,10 +266,36 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
       }).then(r => r.json()).catch(e => ({ error: String(e) }))
       if (d.error) return { ok: false, error: d.error }
       const now = Math.floor(Date.now() / 1000)
+      // 🔀 Same name, two rows — see duplicateRoles(). A reinstall, a restore, or
+      // iOS's own reEnroll() mints a NEW device row under the same
+      // "<login>-<model>" name and orphans the old one with its capability list
+      // frozen. This tool already reported `last_seen_seconds_ago`, but an age is
+      // a fact the model has to interpret; the row that IS the phone is a verdict,
+      // and without it the agent read a six-day-dead row's three capabilities as
+      // the live iPhone's limits and told the user so — in the same turn as a
+      // use_device invoke that had just opened Mail on that phone successfully.
+      const roles = duplicateRoles(d.devices || [])
       return {
         ok: true,
         devices: (d.devices || []).map((x: any) => ({
           id: x.id, name: x.name, kind: x.kind, platform: x.platform,
+          // ⚠️ THE FIELD THAT DECIDES WHICH DEVICE CAN DO THE JOB, and this
+          // projection used to drop it. The worker selects `capabilities` and
+          // returns it (DEVICE_LIST_SQL → DeviceListCall), and the system
+          // prompt's device block renders it as sentences — but a model that
+          // discovers devices by CALLING this tool got seven fields and no
+          // capabilities at all, so it had nothing to match a task against and
+          // fell back to guessing from the name/platform. That is how an iPhone
+          // declaring nine capabilities (chat, bluetooth_scan, location, record,
+          // speak, open_app, image_gen, glasses, screenshot) got described to
+          // the user as advertising only the first three: the tool's own
+          // description promises "action:'list' shows devices", and the shape it
+          // returned could not keep the promise.
+          //
+          // Normalized rather than raw: the column is a JSON array STRING (and
+          // null for a device enrolled before the field existed), which a model
+          // should not be asked to parse out of a tool result.
+          capabilities: parseCapabilities(x.capabilities),
           // `online` is null for endpoint devices (they never heartbeat — their
           // liveness is only known by calling them). Keep the null rather than
           // coercing to false, so the model doesn't report a healthy robot as
@@ -272,6 +304,13 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
           ...(x.online === null ? { note: 'reachability unknown until invoked (endpoint device)' } : {}),
           ...(x.url ? { url: x.url } : {}),
           last_seen_seconds_ago: x.last_seen ? now - x.last_seen : null,
+          // Present ONLY on rows whose name is shared, so an ordinary fleet
+          // carries no extra field to reason about.
+          ...(roles.get(String(x.id)) === 'superseded'
+            ? { superseded: true, note_superseded: 'an OLDER enrollment of this same name — its capability list is frozen at its last heartbeat and is NOT what the device has today; the row of this name without this flag is the device. Never tell the user a device lacks something read off this row.' }
+            : roles.get(String(x.id)) === 'current'
+              ? { current_for_name: true }
+              : {}),
         })),
       }
     }
@@ -297,12 +336,16 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
     // worker to make the call: it holds the bearer credential, so it never
     // reaches this edge runtime. Resolve the kind first; a stale device_id from
     // earlier in the conversation must not silently take the relay path.
-    const kind = await fetch(`${WORKER}/device/list?userId=${encodeURIComponent(userId)}`, {
+    // The same lookup also yields the device's NAME, which every refusal below
+    // needs: "dev_8f3c" is an id the user has never seen, and a failure that
+    // names it reads as being about something else entirely.
+    const row = await fetch(`${WORKER}/device/list?userId=${encodeURIComponent(userId)}`, {
       headers: ikey(), cache: 'no-store',
     })
       .then(r => r.json())
-      .then((d: any) => (d?.devices || []).find((x: any) => x.id === input.device_id)?.kind)
+      .then((d: any) => (d?.devices || []).find((x: any) => x.id === input.device_id))
       .catch(() => undefined)
+    const kind = row?.kind
 
     if (kind === 'endpoint') {
       // 100s: strictly ABOVE the worker's own 90s budget, so the worker is the
@@ -334,14 +377,12 @@ export const makeUseDeviceTool = (userId: string | null | undefined) => tool({
     }
 
     // 1. send the envelope
-    const sent = await fetch(`${WORKER}/device/relay/send`, {
-      method: 'POST', headers: ikey(),
-      body: JSON.stringify({
-        userId, toDevice: input.device_id,
-        payload: JSON.stringify({ type: 'invoke', prompt: input.prompt }),
-      }),
-    }).then(r => r.json()).catch(e => ({ error: String(e) }))
-    if (sent.error || !sent.id) return { ok: false, error: sent.error || 'send failed' }
+    const sent = await relaySend({
+      worker: WORKER, headers: ikey(), userId, toDevice: input.device_id,
+      payload: JSON.stringify({ type: 'invoke', prompt: input.prompt }),
+      deviceName: row?.name,
+    })
+    if (!sent.queued) return { ok: false, error: sent.error }
 
     // 1b. 🔥 Fire-and-forget (wait:false): hand back the claim ticket without
     //     burning the turn's 45s. The worker pushes a notification when the
@@ -485,7 +526,7 @@ export const makeScreenshotTool = (userId: string | null | undefined) => tool({
     //
     // ⚠️ A user who ignores the prompt does NOT simply time out here — not since
     // the phones' consent window closes itself and posts `expired` at
-    // budget − deliveryGrace, so the window shuts BEFORE this loop's last check.
+    // budget − deliveryGrace (docs/remote-screenshot-consent-design, P2.5/P2.7).
     // This budget is the number both phones derive their window from, so it is
     // named once and read by the message below too.
     for (let i = 0; i < SHOT_POLL_LOOPS; i++) {
@@ -636,8 +677,18 @@ export const makeMetaRecordVideoTool = (userId: string | null | undefined) => to
       if (!p?.ok) return { ok: false, error: String(p?.error || 'recording failed on the device') }
 
       // START leg: nothing to fetch, just tell the model it's rolling.
+      //
+      // ⚠️ The phone's own note is APPENDED, not discarded. A start can carry
+      // news the server cannot derive: both phones expire an uncollected
+      // auto-stopped clip (GlassesRecorder.pendingTTL / PENDING_TTL_MS) and say
+      // so HERE, on the start that replaced it. Overwriting `p.note` with this
+      // literal would drop that, and the model — seeing a plain
+      // {recording:true} — would keep believing the earlier clip is still
+      // collectable and eventually narrate the new one as if it were the old.
+      const started = '🔴 Recording started on the glasses (LED on). Call meta_record_video again to stop — it auto-stops at ~30s.'
       if (p.recording) {
-        return { ok: true, recording: true, note: '🔴 Recording started on the glasses (LED on). Call meta_record_video again to stop — it auto-stops at ~30s.' }
+        const carried = typeof p.note === 'string' ? p.note.trim() : ''
+        return { ok: true, recording: true, note: carried ? `${carried}\n\n${started}` : started }
       }
 
       // STOP leg: video URL + sampled frames the model can SEE.

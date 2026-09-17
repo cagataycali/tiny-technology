@@ -119,7 +119,7 @@ export async function DELETE(req: Request) {
   const { deviceId } = await req.json().catch(() => ({} as any))
   if (!deviceId) return json({ ok: false, error: 'deviceId required' }, 400)
 
-  const { data, ok, transient } = await relay(fetch(`${WORKER_URL}/device`, {
+  const { data, ok, status, transient } = await relay(fetch(`${WORKER_URL}/device`, {
     method: 'DELETE',
     headers: internalHeaders(),
     body: JSON.stringify({ userId: session.sub, deviceId: String(deviceId) }),
@@ -127,9 +127,25 @@ export async function DELETE(req: Request) {
   }))
 
   if (transient) return json({ ok: false, error: data.error, retryable: true }, 503)
-  // A non-2xx worker response with no parseable `error` must not report a
-  // successful revoke: the page optimistically drops the row on {ok:true}, so a
-  // false success would hide a still-live device token from the user.
-  if (!ok || data.error) return json({ ok: false, error: data.error || 'revoke failed' }, 424)
+  // ⚠️ A revoke's status is read by all three clients as a claim about a
+  // CREDENTIAL — `revokeMessage`/`RevokeFailure` open a 4xx with "Not revoked —
+  // its token still works." So the two kinds of failure must not share a code, and
+  // they did: `!ok` sent a worker 4xx and a worker 5xx alike to 424.
+  //
+  // A worker 4xx is a decision. `DeviceRevokeCall` answers 401 (bad internal key)
+  // and 400 (missing fields) BEFORE `DEVICE_REVOKE_SQL`, so nothing was written
+  // and the clients may say so.
+  //
+  // A worker 5xx — or an HTML error page, which `relay` parses to `{}` with no
+  // `error` — is the ABSENCE of one: the UPDATE may have run and the answer been
+  // lost after it. 503 is the house code for that (GET above already draws this
+  // exact line) and it is in `statusOwnsTheMessage`, so the clients word it
+  // themselves instead of echoing `worker 500` at a person.
+  if (status >= 400 && status <= 499) {
+    return json({ ok: false, error: data.error || 'revoke failed' }, 424)
+  }
+  if (!ok || data.error) {
+    return json({ ok: false, error: data.error || `worker ${status}`, retryable: true }, 503)
+  }
   return json({ ok: true, revoked: data.revoked })
 }

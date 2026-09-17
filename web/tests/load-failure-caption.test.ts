@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -67,25 +67,109 @@ const SHEETS = [
   { file: 'MemoryGraph.swift', sheet: 'Memory graph', fn: 'let path = "/api/graph?all=1"' },
 ]
 
+/** Every Swift source in the app target. ⚠️ Two all-clears below said "across
+ *  every Swift source" while naming three or four files by hand — so a fifth
+ *  surface could guess, or call the helper undeclared, and both would pass. The
+ *  count is asserted because a glob that finds nothing makes every
+ *  `.not.toContain` below pass forever. */
+const EVERY_SWIFT = readdirSync(join(ROOT, 'ios/Tiny/Sources')).filter(f => f.endsWith('.swift'))
+
 describe('a sheet that failed to load names one cause', () => {
   it('no surface offers the reader two causes at once', () => {
+    expect(EVERY_SWIFT.length, 'the source scan found almost nothing — every pin here is vacuous')
+      .toBeGreaterThan(40)
     // The exact string, across every Swift source — including the watch and
-    // widget targets, which share this directory.
-    for (const f of ['Panels.swift', 'Activity.swift', 'MemoryGraph.swift', 'Api.swift']) {
+    // widget targets, which share this directory. `code()` first: `LoadFailure`'s
+    // own doc comment quotes the sentence while explaining its removal.
+    for (const f of EVERY_SWIFT) {
       expect(code(readFileSync(SRC(f), 'utf8')), `${f} still guesses`)
         .not.toContain('Login required or network error')
     }
   })
 
-  it('all five sheets ask the shared helper', () => {
-    // One helper, five callers: the point is that none of them re-decides what
-    // a 401 means. A sixth copy of the status wording is how the app got here.
-    let callers = 0
-    for (const f of ['Panels.swift', 'Activity.swift', 'MemoryGraph.swift']) {
-      const src = code(readFileSync(SRC(f), 'utf8'))
-      callers += (src.match(/LoadFailure\.message\(error\)/g) ?? []).length
+  /**
+   * The callers that are NOT one of the five sheets. Merged with `SHEETS` below,
+   * this is the whole census.
+   *
+   * ⚠️ It used to scan three files and compare one TOTAL against a seven-line
+   * list, which was two holes in the same assertion: five real callers
+   * (TinyLive ×3, TinySetup, VoiceCall) were outside the scan and invisible to
+   * it, and a caller gained in one file while another lost one summed to the
+   * same number. Every source, counted per file.
+   */
+  const OFF_SHEET_CALLERS: Record<string, string[]> = {
+    'Panels.swift': [
+      // AdoptFailure.classify (inc 23) — the Nicla handover, which is not a
+      // sheet load. Two calls: the non-ApiError guard and the `default:` arm.
+      // Both hand the server's own line through instead of phrasing a cause,
+      // which is the rule, so they are callers rather than copies.
+      'AdoptFailure.classify — not an ApiError at all',
+      'AdoptFailure.classify — a status the client has no better words for',
+    ],
+    'TinyLive.swift': [
+      // The relay's three arms (inc 33, inc 35) — the same defect one hop out
+      // from a sheet: `try?` on a poll or a send reported an expired session as
+      // "Couldn't reach the relay", a network shrug over a decided refusal.
+      'RelayPoll.classify — the poll answered with a thrown error',
+      'clipResult — the SEND arm of a recording request',
+      'frameResult — the SEND arm of a frame request',
+    ],
+    // inc 36 — the enrol. The house wording for the refusal, and `EnrollOutcome`
+    // adds what that refusal means for a step that cannot be taken twice.
+    'TinySetup.swift': ['EnrollOutcome.read(error:) — a refused or unconfirmed enrol'],
+    'VoiceCall.swift': ['the call-history load'],
+  }
+
+  /** Sheet by sheet from `SHEETS`, so the two lists cannot drift, plus the rest. */
+  const DECLARED = (() => {
+    const byFile: Record<string, string[]> = {}
+    for (const s of SHEETS) (byFile[s.file] ??= []).push(`${s.sheet} — the sheet load`)
+    for (const [f, extra] of Object.entries(OFF_SHEET_CALLERS)) (byFile[f] ??= []).push(...extra)
+    return byFile
+  })()
+
+  it('every caller of the shared helper is a declared one', () => {
+    // One helper: the point is that no caller re-decides what a 401 means, and a
+    // sixth copy of the status wording is how the app got here. Each sheet's own
+    // delegation is pinned individually below; this is the census that catches a
+    // caller nobody declared. It is an enumeration and not a bare count on
+    // purpose — a NEW delegating caller is the desired outcome, so it gets a
+    // line and a reason here rather than a number nudge.
+    const found: Record<string, number> = {}
+    for (const f of EVERY_SWIFT) {
+      const n = (code(readFileSync(SRC(f), 'utf8')).match(/LoadFailure\.message\(error\)/g) ?? []).length
+      if (n) found[f] = n
     }
-    expect(callers, 'a sheet stopped asking the shared helper').toBe(SHEETS.length)
+    const declared = Object.fromEntries(
+      Object.entries(DECLARED).map(([f, reasons]) => [f, reasons.length]))
+    // Both directions, per file: a file nobody declared is a surface nobody
+    // vetted, and a count that moved is a caller that lost its reason.
+    expect(found, 'an undeclared caller appeared — delegate to the helper, then declare it here')
+      .toEqual(declared)
+  })
+
+  it('the second entry point has a declared set of surfaces too', () => {
+    // `contentMessage` is the OTHER way into this rule — the one that prefers the
+    // server's own sentence, for lists of things that are not devices. It
+    // delegates to `message` (pinned in the helper test below), so its callers are
+    // not copies either; what matters is that the set of surfaces deciding a
+    // load-failure caption is enumerated rather than discovered. File
+    // granularity, not per call site: these are content lists, and a sheet that
+    // grows a second load is not the event this guards against.
+    const DECLARED_CONTENT: Record<string, number> = {
+      'Messages.swift': 2, // the DM thread load, and classifyThreadLoad's retryable arm
+      'Panels.swift': 4, // UniverseView, ProfileView (a throw and a status), ToolboxView
+      'Settings.swift': 1, // TinyEditorView
+      'Split.swift': 1, // SidebarView
+      'TinyLive.swift': 1, // lookUpVision — the fleet lookup behind the vision panel
+    }
+    const found: Record<string, number> = {}
+    for (const f of EVERY_SWIFT) {
+      const n = (code(readFileSync(SRC(f), 'utf8')).match(/LoadFailure\.contentMessage\(/g) ?? []).length
+      if (n) found[f] = n
+    }
+    expect(found, 'a surface started wording load failures without a line here')
+      .toEqual(DECLARED_CONTENT)
   })
 
   it('no sheet swallows the error with `try?` on the load it reports', () => {
@@ -260,7 +344,7 @@ describe('a sheet that failed to load names one cause', () => {
     // failed load means. Messages has TWO loads (inbox + one thread), so seven
     // call sites across six files.
     let callers = 0
-    for (const file of Array.from(new Set(KT_SHEETS.map((s) => s.file)))) {
+    for (const file of new Set(KT_SHEETS.map((s) => s.file))) {
       callers += (kt(file).match(/LoadFailure\.loaded\(res,/g) ?? []).length
     }
     // …and the count must equal the number of loads PINNED below, or a load exists

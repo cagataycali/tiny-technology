@@ -129,11 +129,20 @@ describe.skipIf(!present)('worker previews — cutting is right here, mid-surrog
   it('🔴 the three fan-out previews no longer use unit-counting slices', () => {
     // Telegram 3500, push 300, event ring 200 — all three fed a truncated body
     // to something a human reads, so all three could show a lone surrogate.
+    //
+    // They now clip `preview` rather than `text`: since attachments landed
+    // (migration 0031) the previewed value is `messagePreview(text, attachments)`,
+    // so a caption-less photo reads "📷 Photo" instead of "". Same three
+    // budgets, same code-point rule — and neither name may be unit-sliced.
     const src = readFileSync('worker/src/messages.ts', 'utf8')
     expect(src).not.toMatch(/text\.slice\(0,\s*\d+\)/)
+    expect(src).not.toMatch(/preview\.slice\(0,\s*\d+\)/)
     for (const n of [3500, 300, 200]) {
-      expect(src, `preview ${n}`).toContain(`clipToCodePoints(text, ${n})`)
+      expect(src, `preview ${n}`).toContain(`clipToCodePoints(preview, ${n})`)
     }
+    // The previewed value must actually BE the media-aware one, or the three
+    // budgets above are clipping a variable that lost the photo again.
+    expect(src).toMatch(/const preview = messagePreview\(text, media\.attachments\)/)
   })
 })
 
@@ -145,14 +154,20 @@ describe('the rule reaches the callers that never had it', () => {
     // inline-reply and tiny-tech's MCP tool all use — four of the five never ran
     // dm-send's check, so this was the live truncation path in practice.
     expect(route).not.toContain('message.slice(0, 2000)')
-    expect(route).toContain('decideDmSend(message)')
+    // `decideDmPayload` IS the text rule plus the attachment rule: it calls
+    // decideDmSend verbatim for the words (pinned in dm-attachments.test.ts,
+    // "the text rule is delegated, not reimplemented"), and adds only that a
+    // caption-less photo may have an empty body. So this route still refuses
+    // every over-long or blank text DM it refused before.
+    expect(route).toContain('decideDmPayload(message, attachments)')
     expect(route).toContain('body: decided.body')
+    expect(route).toContain('attachments: decided.attachments')
   })
 
   it('and the refusal LEAVES the handler — a computed verdict decides nothing', () => {
     // Measured on an earlier fix in this codebase: an ordering-only assertion
     // stayed green while `if (false)` let everything through. Require the exit.
-    const gate = route.indexOf('decideDmSend(message)')
+    const gate = route.indexOf('decideDmPayload(message, attachments)')
     const send = route.indexOf('fetch(`${WORKER}/message`')
     expect(gate).toBeGreaterThan(-1)
     expect(send).toBeGreaterThan(gate)
@@ -221,7 +236,26 @@ describe('all five surfaces state the same limit', () => {
     expect(swift.slice(sGate, sSend)).toContain('sendError')     // and says why
     // `draft = ""` must stay inside the success branch — an early return that
     // cleared the field would lose the very message it refused to send.
-    expect(swift).toMatch(/if ok \{ draft = "" \}/)
+    //
+    // ⚠️ Brace-matched rather than pinned to the one-line `if ok { draft = "" }`
+    // it used to be: the success branch legitimately grew a second statement
+    // (clearing the peer's staged attachments once the DM is away), and pinning
+    // the SHAPE turned that into a red on a rule that still held. What matters
+    // is WHERE the clear happens, not how many lines share the branch.
+    const okAt = swift.indexOf('if ok {', sSend)
+    expect(okAt, 'the success branch is gone — re-anchor').toBeGreaterThan(-1)
+    let depth = 1
+    let i = swift.indexOf('{', okAt) + 1
+    while (i < swift.length && depth > 0) {
+      if (swift[i] === '{') depth++
+      else if (swift[i] === '}') depth--
+      i++
+    }
+    expect(swift.slice(okAt, i), 'the draft is no longer cleared on a successful send')
+      .toContain('draft = ""')
+    // And nothing clears it on the way to the send, which is the actual defect.
+    expect(swift.slice(sGate, sSend), 'a refused send now wipes the draft it refused')
+      .not.toContain('draft = ""')
 
     const kt = readFileSync('android/app/src/main/java/technology/tiny/app/ui/Messages.kt', 'utf8')
     const kGate = kt.indexOf('dmSendRefusal(body)')

@@ -93,7 +93,7 @@ describe('capability chips read as words, at every call site', () => {
     const HYPHENATED_ON_PURPOSE = ['Wi-Fi']
     const table = panels.slice(panels.indexOf('let CAPABILITY_LABELS'))
     const body = table.slice(table.indexOf('['), table.indexOf(']\n') + 1)
-    const values = Array.from(body.matchAll(/"[^"]+":\s*"([^"]+)"/g)).map((m) => m[1])
+    const values = [...body.matchAll(/"[^"]+":\s*"([^"]+)"/g)].map((m) => m[1])
     expect(values.length, 'the table did not parse — did it stop being a literal?')
       .toBeGreaterThan(25)
     expect(values.filter((v) => v.includes('_')), 'a label kept its underscore')
@@ -117,7 +117,7 @@ describe('capability chips read as words, at every call site', () => {
     const at = panels.indexOf(`let ${tableName}: [(needle: String`)
     expect(at, `${tableName} not found — renamed, or no longer a needle list?`).toBeGreaterThan(-1)
     const body = panels.slice(at, panels.indexOf('\n]', at))
-    return Array.from(body.matchAll(/^\s{4}\("([^"]+)",/gm)).map((m) => m[1])
+    return [...body.matchAll(/^\s{4}\("([^"]+)",/gm)].map((m) => m[1])
   }
 
   it('the row says what the hardware is, instead of printing the wire', () => {
@@ -192,7 +192,7 @@ describe('capability chips read as words, at every call site', () => {
       const at = panels.indexOf(`let ${name}: [String: String]`)
       expect(at, `${name} not found`).toBeGreaterThan(-1)
       const body = panels.slice(at, panels.indexOf('\n]', at))
-      return Array.from(body.matchAll(/^\s{4}"([a-z]+)":/gm)).map((m) => m[1]).sort()
+      return [...body.matchAll(/^\s{4}"([a-z]+)":/gm)].map((m) => m[1]).sort()
     }
     expect(keys('DEVICE_KIND_NAME')).toEqual(keys('DEVICE_KIND_GLYPH'))
   })
@@ -205,10 +205,10 @@ describe('capability chips read as words, at every call site', () => {
     const body = fn.slice(0, fn.indexOf('\n}\n'))
     expect(body).toMatch(/replacingOccurrences\(of: "_", with: " "\)/)
     expect(body).toMatch(/replacingOccurrences\(of: "-", with: " "\)/)
-    const words = Array.from(
-      panels.slice(panels.indexOf('let DEVICE_PLATFORM_NAME')).slice(0, 900)
+    const words = [
+      ...panels.slice(panels.indexOf('let DEVICE_PLATFORM_NAME')).slice(0, 900)
         .matchAll(/^\s{4}\("[^"]+",\s*"([^"]+)"\)/gm),
-    ).map((m) => m[1])
+    ].map((m) => m[1])
     expect(words.length, 'the name table did not parse').toBeGreaterThan(5)
     expect(words.filter((w) => /[_]/.test(w)), 'a hardware name kept its underscore')
       .toEqual([])
@@ -221,7 +221,7 @@ describe('capability chips read as words, at every call site', () => {
     // demand icons for `telegram` and `integrations` — real daemon labels that
     // neither phone has drawn yet. Same reason DEVICE_PLATFORM_GLYPH is data.
     expect(panels).toMatch(/let CAPABILITY_LABELS: \[String: String\] = \[/)
-    const scraped = Array.from(panels.matchAll(/case "(\w+)": return "/g)).map((m) => m[1])
+    const scraped = [...panels.matchAll(/case "(\w+)": return "/g)].map((m) => m[1])
     for (const smuggled of ['telegram', 'integrations']) {
       expect(scraped, `${smuggled} entered the scrape — Android now needs an icon`)
         .not.toContain(smuggled)

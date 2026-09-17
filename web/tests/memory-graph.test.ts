@@ -104,18 +104,11 @@ describe.skipIf(!present)('memory graph — migration + parity (real SQL, real s
     expect(all(g.BY_VEC_SQL(1, true), 'u1', 'learning:1')).toHaveLength(1)
   })
 
-  // ⚠️ This case USED to assert `entity` count === 3 after a clear-all — i.e.
-  // "all rows survive", which is the RETIREMENT rule applied to a WIPE. The
-  // rows that survived still carried the memory text verbatim in `label` and
-  // `attrs_json.$.source`, and include_closed=1 renders both. See
-  // tests/memory-wipe.test.ts for the full defect. Wipe = DELETE.
-  it('clear-all DELETES the owner\'s facts and leaves other owners alone', () => {
-    db.prepare(g.PURGE_ALL_FACTS_SQL).run({ 1: 'u1' })
+  it('clear-all closes only the owner\'s live facts', () => {
+    db.prepare(g.CLOSE_ALL_SQL).run({ 1: 500, 2: 'u1' })
     expect(all(g.RECENT_SQL, { 1: 'u1', 2: 100 })).toHaveLength(0)
-    expect(all(g.RECENT_ALL_SQL, { 1: 'u1', 2: 100 })).toHaveLength(0) // history too
     expect(all(g.RECENT_SQL, { 1: 'u2', 2: 100 })).toHaveLength(1) // untouched
-    expect(all("SELECT COUNT(*) AS c FROM entity WHERE owner = 'u1'").at(0).c).toBe(0)
-    expect(all("SELECT COUNT(*) AS c FROM entity WHERE owner = 'u2'").at(0).c).toBe(1)
+    expect(all("SELECT COUNT(*) AS c FROM entity WHERE owner = 'u1'").at(0).c).toBe(3) // all rows survive
   })
 
   it('capacity counts LIVE facts only — closing frees quota', () => {

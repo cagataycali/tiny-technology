@@ -41,6 +41,7 @@
  */
 import { z } from 'zod'
 import { tool } from '@strands-agents/sdk'
+import { relaySend } from '@/lib/chat/relay-send'
 
 const WORKER = process.env.TINY_WORKER_URL || 'https://plugin.tiny.technology'
 const ikey = () => ({
@@ -136,6 +137,121 @@ export const FILES_WAIT_S = 45
 export const BLE_ROUND_TRIP_S = 35
 
 /**
+ * How long flipper_find waits for the board to acknowledge the alert. Not to
+ * confirm a beep: nothing on either route reports what was heard (see
+ * `makeFlipperFindTool`).
+ *
+ * The work itself is ONE RPC — `FlipperGateway.alert()` allows it 10s — so 25
+ * (a 15s Low Power poll sleep plus that 10s) looks generous and would be a trap:
+ * every wait BELOW `BLE_ROUND_TRIP_S` takes `flipperInvoke`'s honest short-wait
+ * branch, which refuses to diagnose anything and sends the caller to "an
+ * interactive chat, where the full ceiling is available" — a sentence that makes
+ * no sense when the caller IS one. Any tool that polls this relay needs a ceiling
+ * at or above that round trip or it can never conclude anything, so a find gets
+ * the same 45 as a status read and `clampToJob` still shortens it for a job or a
+ * live call.
+ */
+export const ALERT_WAIT_S = 45
+
+/**
+ * The remedy for a phone that reads 🟢 and answers nothing — the one cause this
+ * rail never named, and the only one the user can act on.
+ *
+ * A 🟢 on a phone is a HEARTBEAT, not a listener, and for up to a minute at a
+ * time those are different facts:
+ *
+ *   • `startDeviceLoops()` starts TWO tasks — the 30s heartbeat (45s in Low Power
+ *     Mode) and the 5s relay poll — and `stopDeviceLoops()` cancels BOTH.
+ *     TinyApp.swift calls the first on `.active` and the second on `.background`.
+ *   • presence is `last_seen` inside PRESENCE_WINDOW_S = 60 (the worker's
+ *     src/devices.ts), and the heartbeat is its ONLY writer: /device/relay/recv
+ *     never touches it.
+ *
+ * 60s window, 30s beat ⇒ a phone the user has just put in their pocket keeps
+ * reading ONLINE for the rest of that window with provably nothing polling for
+ * envelopes. There is no silent push (Background.swift records it as unbuilt) and
+ * BGAppRefresh is opportunistic at ≥15min, so a suspended app cannot be woken
+ * inside any wait a tool has. The envelope is not lost — it sits in the relay and
+ * is claimed at the next foreground — but nobody is waiting by then.
+ *
+ * P5's own choreography walks straight into that window: pair the board, unplug
+ * the cable, then go to the laptop and ask. That walk is 20-60s.
+ *
+ * Both necklace rails already say this out loud — nicla-voice.ts: "out of
+ * Bluetooth range, or the tiny app is closed"; platform.ts: "or the app went to
+ * background during capture". The Flipper rail is the one that asserted the
+ * opposite and then accused the hardware.
+ *
+ * ONE sentence, three call sites (both `!host.online` BLE arms and the long BLE
+ * timeout), because a fact spread across three hand-written sentences drifts in
+ * three directions. What is shared is the FACT — each arm keeps its own frame,
+ * since one is an `error` string and one is an `ok:true` status `note`.
+ */
+export function bleAppRemedy(name: string): string {
+  return `The tiny app heartbeats and polls for work only while it is OPEN on "${name}": iOS stops both when it goes to the background and cannot be woken on demand, so a phone in a pocket still shows online for up to a minute after it stopped listening. Open the tiny app on that phone and ask again.`
+}
+
+/**
+ * What the Bluetooth route can actually be ASKED for — one list, five readers.
+ *
+ * This sentence was written out FIVE times by hand (the cable-only refusal, the
+ * "that phone is up but cannot capture" arm, flipper_status's BLE note,
+ * CAPABILITY_HINTS.flipper_ble in the system prompt, and job-run's capability
+ * note), and four of the five promised a beep **no tool could send**. The phone
+ * has implemented it since P1 — `Session.handleFlipperEnvelope`'s
+ * `case "alert", "beep", "find"` → `FlipperGateway.alert()`, one
+ * `Gui.PlayAudiovisualAlert` — and the cabled CLI has `alert` too, so the missing
+ * half was always this one: three named tools, none of which could ask for it.
+ * An agent told "it can beep" with nothing to call either contradicts its own
+ * prompt or says "done" and leaves someone hunting a silent board.
+ *
+ * Every copy also said the phone can "read the SD card", which this rail offers
+ * NO caller: flipper_files lists names and sizes and says so in its own
+ * description, because /ext/nfc holds the user's passports and bank cards. A
+ * single named file over BLE is designed (§4.4 of the design doc, behind the
+ * credential guard) and unbuilt — so it is not on this list either.
+ *
+ * The list NAMES ITS TOOLS, which is what makes it checkable: a capability
+ * claimed on this rail with no tool beside it is this defect coming back.
+ */
+export function bleCanDo(): string {
+  return 'report status (flipper_status), list what is saved on its SD card (flipper_files), and set off its find-me alert — sound, buzz and LED, as far as that board\'s own settings allow (flipper_find)'
+}
+
+/**
+ * What became of an ask nobody waited long enough for — the fact the short-wait
+ * timeout left out, and the only one that could still help.
+ *
+ * `relaySend` has already returned `queued` by the time that branch runs, so
+ * leaving early cancels NOTHING: the envelope sits in the relay, the phone claims
+ * it at its next poll, and the board does the thing. Nor does anything carry the
+ * answer back afterwards — the worker's late-reply rails are gated to
+ * `{type:'invoke'}` envelopes (`worker/src/relay.ts`,
+ * `parseLateInvoke`: `request.type !== "invoke"` ⇒ no ring event, no push), so a
+ * `{type:'flipper'}` reply that lands after its waiter left is swept without ever
+ * reaching the event ring `use_device` uses for exactly this state. The caller is
+ * the last party in a position to be told, which is why this is a sentence rather
+ * than a TODO.
+ *
+ * It matters most for the ALERT, which is why this exists at all. A find's answer
+ * is not text, it is a noise in a room, and whoever asked is usually standing in
+ * that room with their hands empty — `/api/voice/tool` calls it "the most
+ * spoken-word tool on this rail". "Ask again from a chat" throws away the beep
+ * the board is about to make and asks for a second one.
+ *
+ * Per-action frames over one shared fact (hazard: share the FACT, keep the
+ * frame). A status read and a listing have nothing to listen for and must not be
+ * told to listen; between them and `alert` that is every action a tool on this
+ * rail sends.
+ */
+export function bleStillQueued(action: string, name: string): string {
+  const queued = `Leaving early did not cancel it: the request is queued on the relay and "${name}" runs it within seconds of its next poll.`
+  return action === 'alert'
+    ? `${queued} The Flipper is about to sound its alert, so listen for it now rather than asking again — a second ask is a second alert, not a second answer.`
+    : `${queued} Nothing carries a late answer back to a turn that has ended, so it will be done and unreported.`
+}
+
+/**
  * A tool's ceiling, clamped by a scheduled job's remaining time.
  *
  * Jobs die at JOB_DEADLINE_S, so a job with 25s left must not sit for 45. But the
@@ -155,6 +271,11 @@ function clampToJob(ceilingS: number, budgetS?: number): number {
 /** The wait a listing actually gets. */
 export function filesWait(budgetS?: number): number {
   return clampToJob(FILES_WAIT_S, budgetS)
+}
+
+/** The wait a find actually gets. */
+export function alertWait(budgetS?: number): number {
+  return clampToJob(ALERT_WAIT_S, budgetS)
 }
 
 /**
@@ -193,9 +314,19 @@ export function parseCaps(raw: unknown): string[] {
  * The host node with a Flipper attached, online one first.
  *
  * Note what "online" means here, because it differs from both necklaces: it is
- * the LAPTOP heartbeating. A 🟢 means the host is reachable and had a Flipper on
- * a serial port at its last beat (≤30s ago). The Flipper itself has no presence
- * of its own and never will — it cannot report anything without the cable.
+ * the HOST heartbeating — the laptop over the cable, the phone over BLE. A 🟢
+ * means that host beat within PRESENCE_WINDOW_S (60s, the worker's devices.ts)
+ * and had a Flipper attached at that beat. The Flipper itself has no presence of
+ * its own and never will.
+ *
+ * Two things that window does NOT prove, both of them once written here as if it
+ * did (it said "the LAPTOP", and "≤30s ago"):
+ *   • 60s is twice the 30s beat, so 🟢 outlives the last beat by a beat. On a
+ *     phone that gap is the difference between heartbeating and listening — see
+ *     `bleAppRemedy`.
+ *   • the capability is re-declared per beat and the heartbeat OVERWRITES the
+ *     column, so a link that dropped is self-reporting: within one beat the phone
+ *     stops claiming `flipper_ble` and this resolves no BLE host at all.
  */
 export async function resolveFlipperHosts(userId: string):
     Promise<{ cable: FlipperHost | null; ble: FlipperHost | null }> {
@@ -277,7 +408,7 @@ async function flipperInvoke(
     // them to buy a cable they already own would be nonsense.
     if (hosts.ble && !ble) {
       return {
-        error: `This needs the Flipper's serial CLI, and the only link on this account is Bluetooth from "${hosts.ble.name}". Capturing IR, Sub-GHz, RFID or iButton has no Bluetooth equivalent — the firmware exposes no receive command over BLE. Plug the Flipper into a machine running the tiny CLI (\`npx tiny-tech mesh\`) for this one. Over Bluetooth the phone can still do status, browse and read the SD card, and make it beep.`,
+        error: `This needs the Flipper's serial CLI, and the only link on this account is Bluetooth from "${hosts.ble.name}". Capturing IR, Sub-GHz, RFID or iButton has no Bluetooth equivalent — the firmware exposes no receive command over BLE. Plug the Flipper into a machine running the tiny CLI (\`npx tiny-tech mesh\`) for this one. Over Bluetooth the phone can still ${bleCanDo()}.`,
       }
     }
     return {
@@ -285,28 +416,54 @@ async function flipperInvoke(
     }
   }
   if (!host.online) {
+    // What to say about the OTHER route takes two facts, and this sentence used
+    // to check only one: `hosts.ble` merely EXISTING was reported as "and the
+    // phone is dead too". So a capture asked with the mac mini asleep and the
+    // board happily linked to the phone in the user's pocket answered "the
+    // Bluetooth link on owner-phone is not answering either" — a hardware verdict
+    // on the one route that was up, from the one party that knew it had never
+    // asked. The phone IS answering; it just cannot receive a signal over BLE,
+    // ever. Different fact, different remedy: wake the machine, rather than go
+    // hunting a Bluetooth fault that isn't there.
+    //
+    // An ONLINE ble host can only be seen here when the caller passed ble:null,
+    // because with a BLE action available pickFlipperHost would have routed to
+    // it instead of returning this offline cable host. That is why the last arm
+    // needs no condition of its own — and why there is no unreachable fourth.
+    const aboutTheOtherRoute =
+      !hosts.ble ? ' The Flipper has no network of its own.'
+      : !hosts.ble.online ? ` The Bluetooth link on "${hosts.ble.name}" is not answering either.`
+      : ` "${hosts.ble.name}" does hold the Flipper over Bluetooth and is answering — but capturing IR, Sub-GHz, RFID or iButton has no Bluetooth equivalent (the firmware exposes no receive command over BLE), so waking this machine is the only way to get one. Over Bluetooth that phone can still ${bleCanDo()}, right now.`
     return {
       offline: true,
       transport: host.transport,
       host: host.name,
+      // The ble arm needs no such clause: a cable host, even an offline one,
+      // outranks an offline phone in pickFlipperHost, so reaching here with the
+      // phone chosen means there is no cable route on the account to report on.
+      //
+      // It DOES need a remedy, which it had none of — every other refusal in this
+      // file names an action (`npx tiny-tech mesh`, "Devices → your phone → Find
+      // my Flipper", "waking this machine") and this one left the user holding a
+      // verdict. The action is almost always the same one: open the app.
       error: host.transport === 'ble'
-        ? `"${host.name}" — the phone holding the Flipper over Bluetooth — is not heartbeating, so nothing can reach the Flipper right now. The Flipper has no network of its own.`
-        : `"${host.name}" — the machine the Flipper is plugged into — is not heartbeating, so nothing can reach the Flipper right now. It is asleep, offline, or the tiny CLI is not running.${hosts.ble ? ` The Bluetooth link on "${hosts.ble.name}" is not answering either.` : ' The Flipper has no network of its own.'}`,
+        ? `"${host.name}" — the phone holding the Flipper over Bluetooth — is not heartbeating, so nothing can reach the Flipper right now. The Flipper has no network of its own. ${bleAppRemedy(host.name)}`
+        : `"${host.name}" — the machine the Flipper is plugged into — is not heartbeating, so nothing can reach the Flipper right now. It is asleep, offline, or the tiny CLI is not running.${aboutTheOtherRoute}`,
     }
   }
 
-  const sent = await fetch(`${WORKER}/device/relay/send`, {
-    method: 'POST', headers: ikey(),
-    body: JSON.stringify({
-      userId, toDevice: host.id,
-      payload: JSON.stringify(
-        host.transport === 'ble'
-          ? { type: 'flipper', action: ble!.action, args: ble!.args ?? {} }
-          : { type: 'invoke', prompt: instruction },
-      ),
-    }),
-  }).then(r => r.json()).catch(e => ({ error: String(e) }))
-  if (sent.error || !sent.id) return { error: sent.error || 'relay send failed' }
+  const sent = await relaySend({
+    worker: WORKER, headers: ikey(), userId, toDevice: host.id,
+    payload: JSON.stringify(
+      host.transport === 'ble'
+        ? { type: 'flipper', action: ble!.action, args: ble!.args ?? {} }
+        : { type: 'invoke', prompt: instruction },
+    ),
+    // Not the Flipper — the machine or phone holding it. Every other refusal in
+    // this file names that host, because "the Flipper" is never what failed here.
+    deviceName: host.name,
+  })
+  if (!sent.queued) return { error: sent.error }
 
   for (let i = 0; i < Math.ceil(waitS / 3); i++) {
     await new Promise(r => setTimeout(r, 3000))
@@ -327,13 +484,41 @@ async function flipperInvoke(
   // trip came back as a confident story about Bluetooth range — a hardware
   // diagnosis for a board that answers fine, made by the one party that knew it
   // had left early.
+  //
+  // The LONG branch then made the same mistake one layer up. "The phone is
+  // heartbeating and had time to reply, so the Flipper itself is the quiet one"
+  // reads the 🟢 as proof that something was listening; it is not (see
+  // `bleAppRemedy`), and the difference lasts up to a minute — the exact minute
+  // it takes to walk from the board to a laptop and type. So the sentence
+  // accused the hardware of a silence the app's own lifecycle explains, and its
+  // first two suggestions sent the user to the Flipper's Settings → Bluetooth
+  // screen, which is where "Forget all paired devices" lives: a wrong diagnosis
+  // whose remedy un-pairs the link.
+  //
+  // Order now follows what is both likeliest and fixable, and the demoted causes
+  // keep a TELL rather than a settings instruction: a dropped link takes the
+  // `flipper_ble` capability with it at the next beat, so asking again is what
+  // distinguishes "the board went away" from "the board is busy".
+  //
+  // ⚠️ The SHORT branch then had a third problem, and it is a problem about its
+  // reader. Which callers can reach it? A wait under BLE_ROUND_TRIP_S, i.e. a
+  // clamped one: chat gets 45 and a job 42, both above it — only a live voice
+  // call, clamped to 15 by VOICE_TOOL_BUDGET_S, lands here, and it lands here on
+  // EVERY Bluetooth call it ever makes. So the one sentence this branch prints was
+  // read exclusively by a caller it was not written for: it said "This turn didn't
+  // have the time" (bad luck, on a rail where it is arithmetic) and sent them to
+  // "an interactive chat" — which ALERT_WAIT_S's own doc had already called "a
+  // sentence that makes no sense when the caller IS one", while assuming no
+  // interactive caller could get here. A spoken turn is interactive and typed
+  // is what it isn't. Worse, it reported a silence while saying nothing about the
+  // request it had already handed to the relay: see `bleStillQueued`.
   return {
     transport: host.transport,
     host: host.name,
     error: host.transport === 'ble'
       ? (waitS < BLE_ROUND_TRIP_S
-        ? `Stopped waiting after ${waitS}s, which is not long enough to conclude anything: an answer over Bluetooth needs up to ${BLE_ROUND_TRIP_S}s, because "${host.name}" polls for work every 5s (15s in Low Power Mode) and only then starts asking the Flipper. This turn didn't have the time. Ask again from an interactive chat, where the full ${fullS}s is available.`
-        : `No answer within ${waitS}s from "${host.name}". The phone is heartbeating and had time to reply, so the Flipper itself is the quiet one — it may have moved out of Bluetooth range of the phone, its Bluetooth may be switched off in its own settings, or an app open on its screen may be holding the hardware.`)
+        ? `Stopped waiting after ${waitS}s, which is not long enough to conclude anything: an answer over Bluetooth needs up to ${BLE_ROUND_TRIP_S}s, because "${host.name}" polls for work every 5s (15s in Low Power Mode) and only then starts asking the Flipper. ${bleStillQueued(ble!.action, host.name)} Every turn clamped this short lands here, so asking the same way again spends another ${waitS}s for this same sentence — ask from a TYPED chat, where the full ${fullS}s is available.`
+        : `No answer within ${waitS}s from "${host.name}", which was long enough. A phone shows online for a minute after its last heartbeat, and that is not the same as something listening: ${bleAppRemedy(host.name)} If the app was already open there, the Flipper is the quiet one — most likely an app on its screen is holding the hardware (every other command answers "Other application is running" until it is closed), or it has moved out of Bluetooth range. Those two are worth telling apart by asking again: if the link really dropped, the phone stops declaring the Flipper within a beat or two and you will get a clear "no route" instead of another timeout.`)
       : `No answer within ${waitS}s. A capture holds the device for its whole window, so the host may still be listening — ask again, or read the outcome with use_device.`,
   }
 }
@@ -366,9 +551,14 @@ export const makeFlipperStatusTool = (userId: string | null | undefined, budgetS
       const where = host.transport === 'ble'
         ? `linked over Bluetooth to "${host.name}"`
         : `plugged into "${host.name}"`
+      // "Nobody can ask it" is true of both routes and useless on its own — this
+      // tool's own description is "use this before any other flipper_* tool", so
+      // it is the first thing the user hears, and the sentence it heard back
+      // stopped at the verdict. The cable arm has always had its remedy in the
+      // caller's hands (wake the machine); the phone arm gets one now.
       return {
         ok: true, reachable: false, host: host.name, transport: host.transport,
-        note: `The Flipper was last seen ${where}, but that host is not heartbeating — so the Flipper is unreachable. It has no network of its own: whatever it is doing now, nobody can ask it.`,
+        note: `The Flipper was last seen ${where}, but that host is not heartbeating — so the Flipper is unreachable. It has no network of its own: whatever it is doing now, nobody can ask it.${host.transport === 'ble' ? ` ${bleAppRemedy(host.name)}` : ''}`,
       }
     }
     const r = await flipperInvoke(
@@ -390,12 +580,33 @@ export const makeFlipperStatusTool = (userId: string | null | undefined, budgetS
         : `USB cable into "${host.name}"`,
       details: r.result,
       ...(r.transport === 'ble' ? {
-        note: 'Over Bluetooth the Flipper can report status, browse and read its SD card, and beep. Capturing IR / Sub-GHz / RFID / iButton needs the USB cable — the firmware has no receive command over BLE.',
+        note: `Over Bluetooth the Flipper can ${bleCanDo()}. Capturing IR / Sub-GHz / RFID / iButton needs the USB cable — the firmware has no receive command over BLE.`,
       } : {}),
     }
   },
 })
 
+/**
+ * The one tool the Bluetooth route can never serve — and the last one anybody
+ * told about Bluetooth.
+ *
+ * "Capture needs the cable" is stated at every site that answers AFTER the call:
+ * both `!host.online` arms, the cable-only refusal, flipper_status's note, the
+ * phone's own refusal in Session.swift. It is also in both system prompts that
+ * exist — `CAPABILITY_HINTS.flipper_ble` ("no radio capture") and job-run's
+ * capability note ("only capturing … needs the cable"). It was in neither of the
+ * two texts a model reads BEFORE deciding to call this: not here, and not in a
+ * voice call, where `buildVoiceInstructions` carries a persona and a memory and
+ * no device roster at all — so on the one surface with no prompt to fix, this
+ * description was the only thing that could have said it, and didn't.
+ *
+ * That gap is not a wasted turn, it is a wasted PERSON. This tool needs a human
+ * at the board, and the paragraph below tells the model to announce the capture
+ * first — so with the board on Bluetooth the guaranteed order was: promise a
+ * capture, send someone to press their remote at it, then refuse. Hence the
+ * precondition sits with the announcement instruction it qualifies, and names
+ * flipper_status as the way to know before promising anything.
+ */
 export const makeFlipperListenTool = (userId: string | null | undefined, budgetS?: number) => tool({
   name: 'flipper_listen',
   description: `Capture a signal on the user's Flipper Zero and report what it received — the Flipper LISTENS, it does not transmit here. Radios:
@@ -403,7 +614,7 @@ export const makeFlipperListenTool = (userId: string | null | undefined, budgetS
 - "subghz" — 433/868MHz radio traffic at a given frequency (key fobs, sensors, doorbells)
 - "rfid" — a 125kHz proximity card held against the Flipper's back
 - "ibutton" — a Dallas/Cyfral/Metakom key touched to its contacts
-This BLOCKS for the whole listen window and needs a human to present the card or press the remote during it, so say what you are about to do before calling it. 13.56MHz NFC is NOT available (this firmware has no NFC CLI) — use flipper_files to find tags already saved on the SD card.`,
+This BLOCKS for the whole listen window and needs a human to present the card or press the remote during it, so say what you are about to do before calling it — but check the route BEFORE that announcement. Capture is USB-CABLE ONLY: capturing IR, Sub-GHz, RFID or iButton has no Bluetooth equivalent (the firmware exposes no receive command over BLE), so a phone holding the Flipper over Bluetooth refuses this, and that refusal lands after someone is already standing at the board. Ask flipper_status first unless you already know the cable is the live route; over Bluetooth the Flipper can still ${bleCanDo()}. 13.56MHz NFC is NOT available (this firmware has no NFC CLI) — use flipper_files to find tags already saved on the SD card.`,
   inputSchema: z.object({
     radio: z.enum(['ir', 'subghz', 'rfid', 'ibutton']).describe('Which radio to listen on.'),
     seconds: z.number().int().min(1).max(MAX_LISTEN_S).optional()
@@ -418,10 +629,18 @@ This BLOCKS for the whole listen window and needs a human to present the card or
     // A job with 20s left cannot host a 30s capture. Say that, rather than
     // starting a listen the caller is guaranteed to abandon — the host would go
     // on holding the radio after the answer stopped being wanted.
+    //
+    // TWO callers reach this, and the remedy used to be written for one of them.
+    // A job lands here on a long window (its clamp is 42s); a live voice call
+    // lands here on anything over 10s, because VOICE_TOOL_BUDGET_S clamps every
+    // wait on that rail to 15. "Run it from an interactive chat" is a fair thing
+    // to tell a scheduled job and a strange thing to tell somebody who is talking
+    // to you — TYPED is the property that distinguishes the two, and it is true
+    // for both readers.
     if (wait < secs + 5) {
       return {
         ok: false,
-        error: `A ${secs}s capture needs longer than this turn has left. Ask for a shorter window (or run it from an interactive chat).`,
+        error: `A ${secs}s capture needs longer than this turn has left. Ask for a shorter window (or run it from a TYPED chat, which gets the full ${listenBudget(secs)}s).`,
       }
     }
     const action =
@@ -468,5 +687,52 @@ export const makeFlipperFilesTool = (userId: string | null | undefined, budgetS?
     )
     if (r.error) return { ok: false, error: r.error, offline: r.offline }
     return { ok: true, folder, listing: r.result, transport: r.transport, host: r.host }
+  },
+})
+
+/**
+ * 🔔 Find-my-Flipper — the one thing this rail advertised and could not do.
+ *
+ * NOT a transmit, and that distinction is the whole reason this tool may exist
+ * while `flipper_tx` and a remote button press may not: `Gui.PlayAudiovisualAlert`
+ * over BLE, `alert` over the cable, both aimed at the board ITSELF. Nothing is
+ * broadcast, no saved signal is replayed, no gate opens, the SD card is not
+ * touched. The worst case is a noise in the room the Flipper is in — which is also
+ * the entire point, so the description says so out loud for the caller with nobody
+ * in that room.
+ *
+ * ⚠️ The two routes drive DIFFERENT hardware, and this comment used to claim both
+ * "beep/blink/buzz". Measured, not assumed:
+ *   * BLE hands the board a notification and the BOARD decides — on the user's own
+ *     C2, `/int/.notification.settings` reads speaker 1.0, LED 1.0, **vibro 0**.
+ *   * the cable sends `led r 255` + `vibro 1/0` and NO speaker command at all
+ *     (tiny-tech/src/agent/flipper.ts), which its own reply, `🚨 alert (led +
+ *     vibro)`, has always said honestly. The cable is also the PREFERRED route in
+ *     `pickFlipperHost`, so "the sound is what finds it" was most wrong exactly
+ *     when it was most likely to be read.
+ * Neither route reports what was heard — there is no acoustic feedback in either
+ * protocol — so every sentence about this tool describes an ACKNOWLEDGEMENT, and
+ * `FlipperGateway.alertSent(for:)` is the phone-side half of the same rule.
+ *
+ * Both transports, unlike every other tool here: `flipper_listen` is cable-only
+ * because the firmware has no receive RPC over BLE, and this is the mirror case
+ * where both routes can do it — so it takes the ordinary `pickFlipperHost` routing
+ * and needs no refusal of its own.
+ */
+export const makeFlipperFindTool = (userId: string | null | undefined, budgetS?: number) => tool({
+  name: 'flipper_find',
+  description: "Set off the find-me alert on the user's Flipper Zero for about a second — the tool for \"where is my Flipper?\", \"make it beep\", or proving a fresh Bluetooth link is real. Works over EITHER route (the USB cable, or Bluetooth from the phone holding it), but they drive different hardware: over Bluetooth the board plays its own audiovisual alert, and over the cable it flashes the LED and vibrates with no sound at all. Either way the answer is the board ACCEPTING the alert, never proof that anybody heard it — volume, vibration and LED are separate switches on the board, so a Flipper nobody hears is not a broken link. It does not transmit anything, replay a saved signal, launch an app or touch the SD card, and it reports no location — the alert itself is what finds it. Assume it can be loud wherever the board physically is, so use it when someone asked to find it, not to test a link in an unattended job.",
+  inputSchema: z.object({}),
+  callback: async () => {
+    if (!userId) return { ok: false, error: 'Login required — devices belong to the user account.' }
+    const r = await flipperInvoke(
+      userId,
+      'Run use_flipper with action "alert". Report whether the Flipper acknowledged it. Do not run any other action, do not transmit anything, and do not read, write or delete any file.',
+      alertWait(budgetS),
+      ALERT_WAIT_S,
+      { action: 'alert' },
+    )
+    if (r.error) return { ok: false, error: r.error, offline: r.offline }
+    return { ok: true, alerted: r.result, transport: r.transport, host: r.host }
   },
 })

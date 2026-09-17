@@ -2,12 +2,16 @@
  * /api/messages — the logged-in user's DMs (user↔user messaging).
  *   GET                 → inbox (threads + unread counts)
  *   GET ?with=<login>   → thread with that user (marks inbound read)
- *   POST { to, message }→ send (to = @login, login, or tiny slug; resolved
+ *   POST { to, message, attachments? }
+ *                       → send (to = @login, login, or tiny slug; resolved
  *                          server-side by the worker). Sender = session.sub.
+ *                          attachments = ≤4 { kind, url, contentType, … } whose
+ *                          urls come from POST /api/media; message may be empty
+ *                          when they are present.
  *   DELETE { id }       → delete a message you sent
  */
 import { getSession } from "@/lib/auth";
-import { decideDmSend } from "@/lib/chat/dm-send";
+import { decideDmPayload } from "@/lib/chat/dm-attachments";
 
 export const runtime = 'edge'
 
@@ -59,10 +63,14 @@ export async function POST(req: Request) {
   if (!session) {
     return new Response(JSON.stringify({ error: 'login required' }), { status: 401 });
   }
-  const { to, message, viaTiny } = await req.json().catch(() => ({}));
-  if (!to || typeof to !== 'string' || !message || typeof message !== 'string' || !message.trim()) {
+  const { to, message, attachments, viaTiny } = await req.json().catch(() => ({}));
+  if (!to || typeof to !== 'string') {
     return new Response(JSON.stringify({ error: 'to and message required' }), { status: 400 });
   }
+  // Blankness is NOT checked here any more: `decideDmPayload` owns it, because
+  // the answer depends on the attachments. A caption-less photo used to die on
+  // this line with "to and message required" — which named the wrong field and
+  // described a message that was perfectly valid.
   // Refuse over-length rather than `.slice(0, 2000)` it. This route is what the
   // web composer, both mobile apps, the notification inline-reply and the MCP
   // tool all post to; only the agent tool ran a client-side check, so a long
@@ -71,7 +79,13 @@ export async function POST(req: Request) {
   // could land inside a surrogate pair (measured: 2000 emoji → 1001 kept, ending
   // in a lone 0xd83d). See lib/chat/dm-send.ts for why refusal is the right call
   // on an irreversible send. The worker enforces the same rule independently.
-  const decided = decideDmSend(message);
+  //
+  // 📷 The same call now decides the ATTACHMENTS too (lib/chat/dm-attachments):
+  // media is validated before the text, an empty caption becomes legal once a
+  // photo is attached, and an attachment URL that is not one of our own
+  // media-store URLs is refused outright — the recipient's agent fetches those
+  // bytes and feeds them to a model, so this is not a formatting nicety.
+  const decided = decideDmPayload(message, attachments);
   if (!decided.ok) {
     return new Response(JSON.stringify({ error: decided.error }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
@@ -87,6 +101,7 @@ export async function POST(req: Request) {
         toLogin: target,
         toTiny: target.toLowerCase(),
         body: decided.body,
+        attachments: decided.attachments,
         viaTiny: typeof viaTiny === 'string' ? viaTiny.slice(0, 40) : '',
       }),
       signal: AbortSignal.timeout(10_000),

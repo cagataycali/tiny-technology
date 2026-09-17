@@ -23,6 +23,7 @@
 import { z } from 'zod'
 import { tool } from '@strands-agents/sdk'
 import { deviceReplyBlocks } from './platform'
+import { relaySend } from '@/lib/chat/relay-send'
 
 const WORKER = process.env.TINY_WORKER_URL || 'https://plugin.tiny.technology'
 const ikey = () => ({
@@ -60,14 +61,12 @@ async function niclaInvoke(userId: string, prompt: string, waitS = 45):
   if (!dev) return { error: 'No Nicla Vision necklace is enrolled on this account.' }
   if (!dev.online) return { error: `"${dev.name}" is offline (not heartbeating) — it may be unpowered or off WiFi.`, offline: true }
 
-  const sent = await fetch(`${WORKER}/device/relay/send`, {
-    method: 'POST', headers: ikey(),
-    body: JSON.stringify({
-      userId, toDevice: dev.id,
-      payload: JSON.stringify({ type: 'invoke', prompt }),
-    }),
-  }).then(r => r.json()).catch(e => ({ error: String(e) }))
-  if (sent.error || !sent.id) return { error: sent.error || 'relay send failed' }
+  const sent = await relaySend({
+    worker: WORKER, headers: ikey(), userId, toDevice: dev.id,
+    payload: JSON.stringify({ type: 'invoke', prompt }),
+    deviceName: dev.name,
+  })
+  if (!sent.queued) return { error: sent.error }
 
   for (let i = 0; i < Math.ceil(waitS / 3); i++) {
     await new Promise(r => setTimeout(r, 3000))

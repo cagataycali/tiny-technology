@@ -10,12 +10,24 @@
  * Backed by /api/messages (session-gated proxy → worker D1). Opening a
  * thread marks its inbound messages read server-side. Polls only while
  * open (+ one mount check for the badge, which doubles as login probe).
+ *
+ * 📷 Attachments (migration 0031): photos, .mp4 clips and voice notes. A picked
+ * file is prepared + uploaded to the media store IMMEDIATELY (chip in the
+ * composer showing its progress), and the send carries only the resulting URLs —
+ * so the message POST stays small and a failed upload is visible and retryable
+ * BEFORE anything is sent, rather than turning into a half-delivered DM. Rules
+ * live in lib/chat/dm-media-upload.ts (node-tested); this file is the surface.
  */
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconChat } from "./icons";
 import { toast } from "sonner";
 import { mergeThreadPoll, markThreadRead, optimisticId, type DmThread as Thread, type DmMessage as Msg } from "../../lib/chat/dm";
+import { dmDuration, DM_MAX_ATTACHMENTS, type DmAttachment } from "../../lib/chat/dm-attachments";
+import {
+  prepareDmFile, prepareDmRecording, uploadDmMedia, startDmTranscript,
+  dmAttachmentRoom, DM_VOICE_MAX_MS, DM_FILE_ACCEPT, type PreparedDmMedia,
+} from "../../lib/chat/dm-media-upload";
 import { dmDraftKey, getDmDraft, setDmDraft, clearDmDraft, type DmDrafts } from "../../lib/chat/dm-drafts";
 import { useOverlayExit } from "../../lib/chat/use-overlay-exit";
 import { useFocusTrap } from "../../lib/chat/use-focus-trap";
@@ -29,6 +41,84 @@ import { deadlineFor } from "../../lib/deadlines";
 // unread badge live without hammering the worker from every idle tab.
 const POLL_OPEN_MS = 15_000;
 const POLL_CLOSED_MS = 60_000;
+
+/**
+ * An attachment staged in the composer: uploaded to the media store the moment
+ * it's picked, so the send itself only ever carries a URL.
+ *
+ * `prepared` is kept after a failure on purpose — retry re-POSTs the SAME bytes
+ * instead of asking the user to find the file again.
+ */
+type Staged = {
+  id: number;
+  kind: DmAttachment["kind"];
+  name: string;
+  /** blob: URL for the chip thumbnail — revoked when the chip goes away */
+  previewUrl: string;
+  durationMs?: number;
+  transcript?: string;
+  status: "uploading" | "ready" | "failed";
+  error?: string;
+  /** set once uploaded — this is what the send actually carries */
+  attachment?: DmAttachment;
+  prepared: PreparedDmMedia;
+};
+
+/** 📷 The media inside a message bubble. Photos are shown, clips get a real
+ *  <video> (poster frame from preload=metadata), voice notes get an <audio>
+ *  plus the transcript the sender's device produced — which is the only part of
+ *  a voice note a deaf recipient, or a search, can use. */
+function DmMedia({ items }: { items: DmAttachment[] }) {
+  return (
+    <div className="space-y-1.5 mb-1">
+      {items.map((a, i) => {
+        if (a.kind === "image") {
+          return (
+            <a key={i} href={a.url} target="_blank" rel="noreferrer" className="block">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={a.url}
+                alt="Photo attachment — opens full size"
+                loading="lazy"
+                className="rounded-lg max-h-48 w-auto max-w-full"
+                /* Reserve the box from the stored dimensions so the thread
+                   doesn't jump as images decode (the poll auto-scrolls to the
+                   bottom, and a reflow mid-scroll lands you somewhere else). */
+                width={a.width}
+                height={a.height}
+                style={a.width && a.height ? { aspectRatio: `${a.width}/${a.height}` } : undefined}
+              />
+            </a>
+          );
+        }
+        if (a.kind === "video") {
+          return (
+            <video
+              key={i}
+              src={a.url}
+              controls
+              preload="metadata"
+              playsInline
+              className="rounded-lg max-h-48 w-full"
+            />
+          );
+        }
+        return (
+          <div key={i} className="space-y-1">
+            <audio src={a.url} controls preload="metadata" className="w-full max-w-[15rem] h-8" />
+            {a.transcript ? (
+              /* The words, not just a player. Prefixed so nobody mistakes an
+                 automatic transcript for something the sender typed. */
+              <div className="text-xs opacity-70 italic">🗣️ “{a.transcript}”</div>
+            ) : (
+              a.durationMs ? <div className="text-[10px] opacity-40">Voice note · {dmDuration(a.durationMs)}</div> : null
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
 
 export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
   const [open, setOpen] = useState(false);
@@ -68,6 +158,22 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
   const draftKeyNow = dmDraftKey(peer);
   const draft = getDmDraft(drafts, draftKeyNow);
   const [sending, setSending] = useState(false);
+  // 📷 Staged attachments, keyed BY PEER for exactly the reason the drafts map
+  // above is: every peer transition (row click, ← back, Escape, ?dm= link)
+  // leaves the composer mounted, so a single shared list would carry a photo
+  // meant for A into a send to B — the same defect as the shared draft string,
+  // with an unsendable consequence.
+  const [staged, setStaged] = useState<Record<string, Staged[]>>({});
+  const stageSeq = useRef(0);
+  // 🎤 voice note in progress
+  const [recMs, setRecMs] = useState<number | null>(null); // null = not recording
+  const recRef = useRef<MediaRecorder | null>(null);
+  const recChunks = useRef<Blob[]>([]);
+  const recTranscript = useRef<{ stop: () => string } | null>(null);
+  const recTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recStart = useRef(0);
+  const recDiscard = useRef(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
   const [deletingMsg, setDeletingMsg] = useState<number | null>(null);
   // null = unknown, false = signed out (render nothing), true = signed in
   const [loggedIn, setLoggedIn] = useState<boolean | null>(null);
@@ -243,19 +349,187 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
     loadThread(p);
   }, [loggedIn]);
 
+  // ── 📷 attachments ────────────────────────────────────────────────────────
+  // Same key as the drafts map (login || userId — see dmDraftKey): one identity
+  // for the thread, so a chip and a draft can never end up filed apart.
+  // `dmDraftKey` is null with no peer open; the attachment map is only ever
+  // touched from inside the thread view, where a peer exists by construction.
+  const stageKey = draftKeyNow || "";
+  const stagedNow = staged[stageKey] || [];
+
+  const patchStaged = (key: string, id: number, patch: Partial<Staged>) =>
+    setStaged((prev) => ({
+      ...prev,
+      [key]: (prev[key] || []).map((s) => (s.id === id ? { ...s, ...patch } : s)),
+    }));
+
+  const uploadStaged = (key: string, entry: Staged) => {
+    patchStaged(key, entry.id, { status: "uploading", error: undefined });
+    uploadDmMedia(entry.prepared)
+      .then((a) => patchStaged(key, entry.id, { status: "ready", attachment: a }))
+      // No auto-retry: the chip shows the failure with a Retry button. Silently
+      // re-POSTing megabytes on a bad connection puts several copies in R2 and
+      // leaves the composer looking stuck.
+      .catch((e) => patchStaged(key, entry.id, { status: "failed", error: String(e?.message || e) }));
+  };
+
+  /** Prepare (compress/convert/encode) then upload. `key` is captured by the
+   *  caller BEFORE the async work, so a thread switch mid-upload files the
+   *  result under the conversation it was picked for. */
+  const stageMedia = async (key: string, make: () => Promise<PreparedDmMedia>) => {
+    let prepared: PreparedDmMedia;
+    try {
+      prepared = await make();
+    } catch (e: any) {
+      // Every refusal from dm-media-upload names the problem AND the fix
+      // (".mov → convert to mp4", "2.9MB, over the 2.5MB limit"), so it's shown
+      // verbatim rather than replaced with "couldn't attach that".
+      toast.error(e?.message || "Couldn't attach that file");
+      return;
+    }
+    const entry: Staged = {
+      id: ++stageSeq.current,
+      kind: prepared.kind,
+      name: prepared.name,
+      previewUrl: prepared.previewUrl,
+      durationMs: prepared.durationMs,
+      transcript: prepared.transcript,
+      status: "uploading",
+      prepared,
+    };
+    setStaged((prev) => ({ ...prev, [key]: [...(prev[key] || []), entry] }));
+    uploadStaged(key, entry);
+  };
+
+  const onPickFiles = (files: FileList | null) => {
+    const list = Array.from(files || []);
+    if (!list.length || !peer) return;
+    const key = stageKey;
+    // Refuse the whole batch rather than keeping the first few: a photo the user
+    // watched themselves attach must not vanish between picker and send.
+    const room = dmAttachmentRoom(stagedNow.length, list.length, DM_MAX_ATTACHMENTS);
+    if (room) { toast.error(room); return; }
+    list.forEach((file) => stageMedia(key, () => prepareDmFile(file)));
+  };
+
+  const removeStaged = (key: string, id: number) => {
+    setStaged((prev) => {
+      const list = prev[key] || [];
+      const gone = list.find((s) => s.id === id);
+      // Release the blob: URL — without this every removed chip leaks its bytes
+      // for the life of the page.
+      if (gone) URL.revokeObjectURL(gone.previewUrl);
+      return { ...prev, [key]: list.filter((s) => s.id !== id) };
+    });
+  };
+
+  // ── 🎤 voice notes ────────────────────────────────────────────────────────
+  const stopRecording = (discard = false) => {
+    recDiscard.current = discard;
+    try { recRef.current?.stop(); } catch { /* already stopped */ }
+  };
+
+  const startRecording = async () => {
+    if (recRef.current || !peer) return;
+    const key = stageKey;                     // where the note belongs
+    if (dmAttachmentRoom(stagedNow.length, 1, DM_MAX_ATTACHMENTS)) {
+      toast.error(`A message can carry ${DM_MAX_ATTACHMENTS} attachments — send these first.`);
+      return;
+    }
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      // Denied, or no mic. Say which action fixes it — a silent no-op here reads
+      // as a broken button.
+      toast.error("Microphone unavailable — allow access to record a voice note.");
+      return;
+    }
+    let rec: MediaRecorder;
+    try {
+      rec = new MediaRecorder(stream);
+    } catch {
+      stream.getTracks().forEach((t) => t.stop());
+      toast.error("This browser can't record audio.");
+      return;
+    }
+    recChunks.current = [];
+    recDiscard.current = false;
+    rec.ondataavailable = (e) => { if (e.data?.size) recChunks.current.push(e.data); };
+    rec.onstop = () => {
+      // Release the mic FIRST — the recording indicator staying lit in the tab
+      // strip after you stop is alarming, and correctly so.
+      stream.getTracks().forEach((t) => t.stop());
+      const transcript = recTranscript.current?.stop() || "";
+      recTranscript.current = null;
+      if (recTimer.current) { clearInterval(recTimer.current); recTimer.current = null; }
+      recRef.current = null;
+      recStart.current = 0;
+      setRecMs(null);
+      if (recDiscard.current) return;            // cancelled on purpose
+      const blob = new Blob(recChunks.current, { type: recChunks.current[0]?.type || "audio/webm" });
+      if (!blob.size) { toast.error("Nothing was recorded — check your microphone."); return; }
+      // Re-encoded to WAV in prepareDmRecording: what MediaRecorder produces in
+      // Chrome (audio/webm) is unplayable on iOS, so shipping it would make a
+      // silent dead bubble on the recipient's phone.
+      stageMedia(key, () => prepareDmRecording(blob, transcript));
+    };
+    // The clock starts when the RECORDER does, not when we asked it to: on a
+    // cold mic `start()` can lag noticeably, and counting that lag would report
+    // (and cut off at) a length the audio doesn't have.
+    rec.onstart = () => { recStart.current = Date.now(); };
+    // Best-effort words alongside the audio — where the browser has a
+    // recogniser, a web voice note is readable by the agent too.
+    recTranscript.current = startDmTranscript();
+    rec.start();
+    recRef.current = rec;
+    setRecMs(0);
+    recTimer.current = setInterval(() => {
+      // Wall-clock, not accumulated ticks: setInterval is throttled in a
+      // background tab, so counting 200ms per tick would UNDER-count and let a
+      // recording run past the cap into an unsendable size.
+      const ms = recStart.current ? Date.now() - recStart.current : 0;
+      setRecMs(ms);
+      // Cap by STOPPING at the limit, not by refusing afterwards: nobody should
+      // talk for a minute and then be told the file is too big to send.
+      if (ms >= DM_VOICE_MAX_MS) stopRecording(false);
+    }, 200);
+  };
+
+  // A recording is bound to the mic and to the thread it started in. Leaving
+  // the panel (or the page) must not leave the mic open.
+  useEffect(() => () => { stopRecording(true); }, []);
+  useEffect(() => { if (!open) stopRecording(true); }, [open]);
+
   const send = () => {
     const text = draft.trim();
-    if (!text || !peer || sending) return;
+    if (!peer || sending) return;
     // Same stale-thread guard loadThread uses: the ← back / inbox rows stay
     // clickable while the POST is in flight, so capture who we're sending TO
     // now and bail on success if the user has since switched threads —
     // otherwise the optimistic bubble appends onto the NEW thread's list.
     const sentTo = peer.login || peer.userId;
+    const mine = staged[sentTo] || [];
+    // 🔴 Never send PART of what's staged. Sending the text now and dropping a
+    // still-uploading photo is the truncation defect in another costume: the DM
+    // can't be unsent, and the sender saw the photo in the composer.
+    if (mine.some((s) => s.status === "uploading")) {
+      toast.error("An attachment is still uploading — one moment.");
+      return;
+    }
+    if (mine.some((s) => s.status === "failed")) {
+      toast.error("An attachment didn't upload — retry or remove it before sending.");
+      return;
+    }
+    const attachments = mine.map((s) => s.attachment).filter(Boolean) as DmAttachment[];
+    // A caption-less photo IS a message (decideDmPayload allows an empty body
+    // when media is present), so the old `!text` bail now needs both to be empty.
+    if (!text && !attachments.length) return;
     setSending(true);
     fetch("/api/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ to: sentTo, message: text, viaTiny: tinyName || "" }),
+      body: JSON.stringify({ to: sentTo, message: text, attachments, viaTiny: tinyName || "" }),
       // `sending` disables the send button until the .finally runs — without a
       // deadline a hung POST locks the composer with the draft still in it.
       signal: AbortSignal.timeout(deadlineFor("/api/messages")),
@@ -268,12 +542,22 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
           // composer the next time it's opened (and, under the old shared
           // draft, in whichever thread happened to be open now).
           setDrafts((prev) => clearDmDraft(prev, sentTo));
+          // Same reasoning for the chips: the media was delivered, so keeping it
+          // staged would offer to send it a second time. Revoke the blob URLs on
+          // the way out (the bubble renders from the media-store URL now).
+          setStaged((prev) => {
+            (prev[sentTo] || []).forEach((s) => URL.revokeObjectURL(s.previewUrl));
+            const next = { ...prev };
+            delete next[sentTo];
+            return next;
+          });
           if (activePeerRef.current !== sentTo) return;
           // Optimistic append — poll will reconcile (id rules in lib/chat/dm.ts)
           setMsgs((prev) => [...prev, {
             id: optimisticId(d.id),
             direction: "sent",
             body: text,
+            attachments,
             created: Math.floor(Date.now() / 1000),
           }]);
           setTimeout(() => bottomRef.current?.scrollIntoView({ block: "nearest" }), 50);
@@ -542,6 +826,9 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
                             ? { background: "rgba(var(--tiny-accent-rgb),0.25)", border: "1px solid rgba(var(--tiny-accent-rgb),0.3)" }
                             : { background: "rgba(255,255,255,0.08)" }}
                         >
+                          {m.attachments && m.attachments.length > 0 && (
+                            <DmMedia items={m.attachments} />
+                          )}
                           {m.body}
                           <div className="text-[10px] opacity-40 mt-1 text-right">
                             {ago(m.created)}{m.viaTiny ? ` · via ${m.viaTiny}` : ""}
@@ -556,12 +843,121 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
                     the base 0.5rem (pb-safe alone would REPLACE it with 0 on
                     non-notched devices); viewportFit=cover is set globally */}
                 <div
-                  className="p-2 border-t flex gap-2"
+                  className="p-2 border-t"
                   style={{
                     borderColor: "rgba(var(--tiny-accent-rgb),0.15)",
                     paddingBottom: "calc(0.5rem + env(safe-area-inset-bottom, 0px))",
                   }}
                 >
+                  {/* ── staged attachments ── */}
+                  {stagedNow.length > 0 && (
+                    <div className="flex flex-wrap gap-2 pb-2">
+                      {stagedNow.map((s) => (
+                        <div
+                          key={s.id}
+                          className="relative rounded-lg overflow-hidden border"
+                          style={{ borderColor: s.status === "failed" ? "rgba(248,113,113,0.5)" : "rgba(var(--tiny-accent-rgb),0.25)" }}
+                        >
+                          {s.kind === "image" ? (
+                            <img src={s.previewUrl} alt="" className="w-16 h-16 object-cover" />
+                          ) : (
+                            <div className="w-16 h-16 grid place-items-center text-xl bg-white/5">
+                              {s.kind === "video" ? "🎥" : "🎤"}
+                              {s.durationMs ? (
+                                <span className="absolute bottom-0.5 left-1 text-[9px] opacity-70">{dmDuration(s.durationMs)}</span>
+                              ) : null}
+                            </div>
+                          )}
+                          {/* Uploading / failed states are ON the chip — the
+                              send button refuses while either is true, so the
+                              reason has to be visible right where it applies. */}
+                          {s.status === "uploading" && (
+                            <div className="absolute inset-0 grid place-items-center bg-black/50" role="status" aria-label={`Uploading ${s.name}`}>
+                              <span className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" aria-hidden="true" />
+                            </div>
+                          )}
+                          {s.status === "failed" && (
+                            <button
+                              onClick={() => uploadStaged(stageKey, s)}
+                              className="absolute inset-0 grid place-items-center bg-black/65 text-[10px] font-semibold text-red-300"
+                              title={s.error || "Upload failed"}
+                              aria-label={`Retry uploading ${s.name}`}
+                            >
+                              Retry
+                            </button>
+                          )}
+                          <button
+                            onClick={() => removeStaged(stageKey, s.id)}
+                            className="absolute top-0 right-0 w-5 h-5 grid place-items-center text-[11px] bg-black/70 hover:bg-black text-white rounded-bl-md"
+                            aria-label={`Remove ${s.name}`}
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── recording banner (replaces the composer row: while the
+                        mic is live, stop/cancel are the only useful actions) ── */}
+                  {recMs !== null ? (
+                    <div className="flex items-center gap-2" role="status" aria-live="off">
+                      <span className="w-2.5 h-2.5 rounded-full bg-red-500 animate-pulse flex-shrink-0" aria-hidden="true" />
+                      <span className="text-sm text-white tabular-nums">{dmDuration(recMs) || "0:00"}</span>
+                      <span className="text-xs opacity-50 text-white truncate">
+                        Recording — max {Math.round(DM_VOICE_MAX_MS / 1000)}s
+                      </span>
+                      <button
+                        onClick={() => stopRecording(true)}
+                        className="ml-auto px-3 py-2 rounded-lg text-xs border border-white/20 text-white/80 hover:text-white min-h-11 sm:min-h-0"
+                        aria-label="Discard recording"
+                      >
+                        Discard
+                      </button>
+                      <button
+                        onClick={() => stopRecording(false)}
+                        className="px-3 py-2 rounded-lg text-xs font-semibold min-h-11 sm:min-h-0"
+                        style={{ background: "var(--tiny-accent)", color: "#000" }}
+                        aria-label="Stop recording and attach"
+                      >
+                        Stop
+                      </button>
+                    </div>
+                  ) : (
+                  <div className="flex gap-2">
+                  {/* DM_FILE_ACCEPT: what planDmUpload can actually take — .mov
+                      is deliberately absent (no browser transcoder), and the
+                      refusal names the reason if one arrives anyway. */}
+                  <input
+                    ref={fileRef}
+                    type="file"
+                    multiple
+                    accept={DM_FILE_ACCEPT}
+                    className="hidden"
+                    onChange={(e) => { onPickFiles(e.target.files); e.target.value = ""; }}
+                  />
+                  <button
+                    onClick={() => fileRef.current?.click()}
+                    disabled={stagedNow.length >= DM_MAX_ATTACHMENTS}
+                    className="px-2 py-2 rounded-lg text-white/70 hover:text-white hover:bg-white/10 disabled:opacity-30 grid place-items-center min-w-11 min-h-11 sm:min-w-9 sm:min-h-9"
+                    aria-label="Attach a photo or video"
+                    title={stagedNow.length >= DM_MAX_ATTACHMENTS ? `${DM_MAX_ATTACHMENTS} attachments is the limit` : "Attach a photo or video clip"}
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.6} stroke="currentColor" className="w-5 h-5" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M18.375 12.739l-7.693 7.693a4.5 4.5 0 01-6.364-6.364l10.94-10.94A3 3 0 1119.5 7.372L8.552 18.32m.009-.01l-.01.01m5.699-9.941l-7.81 7.81a1.5 1.5 0 002.112 2.13" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={startRecording}
+                    disabled={stagedNow.length >= DM_MAX_ATTACHMENTS}
+                    className="px-2 py-2 rounded-lg text-white/70 hover:text-white hover:bg-white/10 disabled:opacity-30 grid place-items-center min-w-11 min-h-11 sm:min-w-9 sm:min-h-9"
+                    aria-label="Record a voice note"
+                    title="Record a voice note"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.6} stroke="currentColor" className="w-5 h-5" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z" />
+                    </svg>
+                  </button>
                   <input
                     ref={draftRef}
                     value={draft}
@@ -578,7 +974,10 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
                   />
                   <button
                     onClick={send}
-                    disabled={sending || !draft.trim()}
+                    /* A staged photo makes an empty caption sendable — the
+                       server agrees (decideDmPayload), so the button must too,
+                       or the commonest phone message is unsendable here. */
+                    disabled={sending || (!draft.trim() && stagedNow.length === 0)}
                     aria-busy={sending}
                     className="px-4 sm:px-3 py-2 rounded-lg text-sm font-semibold transition-all hover:scale-105 active:scale-100 disabled:opacity-50 disabled:hover:scale-100 grid place-items-center min-w-[2.75rem] sm:min-w-[2.25rem]"
                     style={{ background: "var(--tiny-accent)", color: "#000" }}
@@ -588,6 +987,8 @@ export default function MessagesHUD({ tinyName }: { tinyName?: string }) {
                       ? <span className="inline-block w-4 h-4 rounded-full border-2 border-black/30 border-t-black animate-spin" aria-hidden="true" />
                       : "↑"}
                   </button>
+                  </div>
+                  )}
                 </div>
               </>
             )}

@@ -10,6 +10,7 @@
  * this button, so a runaway agent can never drain the wallet unattended.
  *
  * States: awaiting (quote, buttons) → paying (spinner) → paid (receipt) /
+ * pending (sent, confirming) / unknown (no answer came back — see Phase) /
  * failed (reason) / declined. A quote that arrives already expired, or an
  * already-settled result, short-circuits to the right terminal state.
  *
@@ -82,7 +83,40 @@ function shortAddr(a?: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
-type Phase = "awaiting" | "paying" | "paid" | "failed" | "declined" | "pending";
+/** `unknown` is the third answer to "did the money move?". chain/settle-outcome.mjs
+ *  has carried it server-side for a while (settled / not_settled / unknown —
+ *  *"NEVER refund, that double-pays a landing transfer"*); this card had room for
+ *  two, so an approval whose answer never came back landed on `failed` and told
+ *  the user "Payment not sent" about a payment that may have settled. See the
+ *  catch in approve(). ⚠️ Unlike the others this union is NOT compiler-enforced —
+ *  the render below is a chain of `if (phase === …) return`, so a missing branch
+ *  falls through to the approval GATE (a live Approve button on an in-doubt
+ *  payment). tests/pay-answer-unknown.test.ts pins the branch for that reason. */
+type Phase = "awaiting" | "paying" | "paid" | "failed" | "declined" | "pending" | "unknown";
+
+// ── The words for an answer that never came ───────────────────────────────────
+// Byte-identical on all three clients (iOS PayQuoteCard.unconfirmed*, Android
+// WalletCore.UNCONFIRMED_TITLE/unconfirmedBody) and compared literally in
+// tests/pay-answer-unknown.test.ts — a money card whose copy drifts per platform
+// is three different promises about the same payment.
+//
+// What each sentence is allowed to claim:
+//   · "was sent" — true and checkable. The PUT left the browser; that is the one
+//     half of the round trip we witnessed.
+//   · "can't tell whether it went through" — the honest verdict, and the one the
+//     old copy replaced with a guess.
+//   · "settles at most once" — a property, not a reassurance: the execute route
+//     keys its spend ref on the quote's jti, so re-approving the SAME quote
+//     collides (already_spent → 409 already_paid) and the card flips to "Payment
+//     sent". Checking again is how the user LEARNS.
+//   · past the TTL the route 410s on `nowSec > q.exp` BEFORE reaching that dedup,
+//     so the answer can't be obtained from here — hence the second body, which
+//     points at the wallet ledger instead of a button.
+const UNCONFIRMED_TITLE = "Couldn’t confirm this payment";
+const UNCONFIRMED_CHECKABLE =
+  "Your approval was sent but no answer came back, so we can’t tell whether the payment went through. Checking again is safe — the same approval settles at most once.";
+const UNCONFIRMED_EXPIRED =
+  "Your approval was sent but no answer came back, and this quote has expired — so it can’t be checked from here. Your wallet’s activity list will show it if it settled.";
 
 const ACCENT = { bg: "rgba(var(--tiny-accent-rgb, 0,255,136),0.06)", border: "rgba(var(--tiny-accent-rgb, 0,255,136),0.35)", fg: "var(--tiny-accent)" };
 const DANGER = { bg: "rgba(var(--tiny-danger-rgb), 0.08)", border: "rgba(var(--tiny-danger-rgb), 0.3)", fg: "var(--tiny-danger)" };
@@ -90,7 +124,13 @@ const DANGER = { bg: "rgba(var(--tiny-danger-rgb), 0.08)", border: "rgba(var(--t
 /** The persisted terminal outcome (C3) — a paid/pending/declined tap survives a
  * reload so the card comes back as its receipt, not a dead expired-quote gate.
  * A `failed` attempt is never persisted (no money moved, quote may still be
- * spendable → a reload re-offers approval). Mirrors iOS PayQuoteItem.settled. */
+ * spendable → a reload re-offers approval). Mirrors iOS PayQuoteItem.settled.
+ * ⚠️ No "unknown" here on purpose: this is a CODEC shared with iOS
+ * (PaySettled.Outcome) and Android (PaySettled.outcome), so a new value is a
+ * three-client wire change — and an unconfirmed payment has no terminal outcome
+ * to persist anyway. A reload re-derives it as the approval gate, exactly as
+ * `failed` already does, and that is safe for the same reason Check again is:
+ * re-approving the SAME quote collides on its jti and returns already_paid. */
 type PaySettled = { phase: "paid" | "pending" | "declined"; result?: PayResult; error?: string };
 
 export default function PayReceipt({
@@ -185,8 +225,15 @@ export default function PayReceipt({
     // EXPIRY_TICK_MAX_MS behind). This is the authoritative client guard; the
     // server enforces exp too, so it's a friendlier refusal, not the only one.
     if (isQuoteExpired(active.expires_at, Date.now())) {
-      setSettleErr("This quote expired — ask again for a fresh price.");
-      setPhase("failed");
+      // From "unknown" a lapsed TTL must NOT become "failed". The answer we never
+      // received may have been a settlement; the quote expiring since only means
+      // we can no longer ASK. Staying unconfirmed swaps in the expired wording
+      // (the branch below reads `expired`) instead of upgrading "we don't know"
+      // into "not sent" as the clock passes — the original defect on a delay.
+      if (phase !== "unknown") {
+        setSettleErr("This quote expired — ask again for a fresh price.");
+        setPhase("failed");
+      }
       return;
     }
     inFlight.current = true;
@@ -200,8 +247,9 @@ export default function PayReceipt({
       // result (payment_required / expired / terms_changed), collapsing the
       // card to a dead-end with no Add funds / Retry / Get fresh quote button —
       // exactly when the user just topped up and tapped Retry through a blip.
-      // The outer catch leaves `settled` untouched, mirroring iOS
-      // (PayQuote.swift guard-let-else) and Android (WalletCore.networkFailure).
+      // The outer catch leaves `settled` untouched and reports the THIRD verdict,
+      // mirroring iOS (PayQuote.swift guard-let-else) and Android
+      // (WalletCore.answerLost).
       const r = await fetch("/api/x402/pay", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -209,9 +257,10 @@ export default function PayReceipt({
         // 195s (lib/deadlines), deliberately ABOVE the route's maxDuration=180.
         // Without any deadline `inFlight` never clears and the card is stuck on
         // "Paying…" with no retry; with a SHORTER one we'd abort settlements the
-        // server was completing and land in the catch below, which tells the user
-        // to try again — inviting a double-pay to a third party. The deadline
-        // only fires once the server has provably given up.
+        // server was still completing and strand the user in the unconfirmed
+        // branch below — an answer that existed, thrown away. The deadline only
+        // fires once the server has provably given up, so an unknown outcome
+        // means the answer is genuinely gone, not that we hung up early.
         signal: AbortSignal.timeout(deadlineFor("/api/x402/pay")),
       }).then((res) => res.json());
       if (r?.ok) {
@@ -245,13 +294,21 @@ export default function PayReceipt({
         setPhase("failed");
       }
     } catch {
-      // Transport / parse failure. Deliberately do NOT touch `settled` — a blip
-      // during a RETRY (the first attempt already learned it was a funds
-      // shortfall / re-quotable) must keep the recovery path visible; the quote
-      // moved no money and is still spendable. iOS parity: PayQuote.swift's
-      // guard-let-else sets only settleErr/phase and leaves needsFunds/canReQuote.
-      setSettleErr("No response — check your connection and try again.");
-      setPhase("failed");
+      // 🎲 THE THIRD ANSWER. This catch is two things — a transport failure
+      // (dropped connection, AbortSignal deadline) or a body that wasn't JSON —
+      // and NEITHER is "nothing was sent". The PUT left the browser; the server
+      // may have reserved, signed, settled and debited before the answer was
+      // lost. This used to be `failed`, which put a red role="alert" "Payment not
+      // sent" over a payment that may have gone through, and a body telling the
+      // user to "try again" — read as "pay again", the exact double-pay the
+      // already_paid branch above exists to prevent.
+      //
+      // `settled` is still deliberately left untouched (a blip during a RETRY
+      // must not clobber a retained recoverable result), but the unconfirmed
+      // branch reads none of it: its one action is Check again, and a definitive
+      // reply to THAT sets everything from the server, which outranks anything
+      // remembered here.
+      setPhase("unknown");
     } finally {
       inFlight.current = false; // allow a retry after a recoverable failure
     }
@@ -328,6 +385,38 @@ export default function PayReceipt({
       <Shell tone={ACCENT} icon live="status">
         <Title tone={ACCENT}>Payment sent — confirming</Title>
         <Body>{settleErr || "The payment was sent and is confirming on-chain. It'll be verified shortly — no need to retry."}</Body>
+      </Shell>
+    );
+  }
+
+  // ── Unknown — the approval left us and the answer never came back. Accent and
+  // role="status", NOT danger + role="alert": this is not a failure, and both an
+  // alarm colour and an assertive interruption are themselves claims about an
+  // outcome nobody has. `expired` is the live hook value (quote-expiry.test.ts
+  // bans a hand-rolled clock read here), so a card left open past the TTL loses
+  // its Check again button and switches to the ledger wording on its own.
+  if (phase === "unknown") {
+    return (
+      <Shell tone={ACCENT} icon live="status">
+        <Title tone={ACCENT}>{UNCONFIRMED_TITLE}</Title>
+        <Body>{expired ? UNCONFIRMED_EXPIRED : UNCONFIRMED_CHECKABLE}</Body>
+        {!expired ? (
+          <div className="mt-2.5">
+            {/* ONE action, and it is a question rather than a payment: re-PUTting
+                the same quote either settles it once or collides on its jti and
+                comes back already_paid → "Payment sent". Deliberately NOT "Get
+                fresh quote" — a fresh quote carries a NEW jti, so it is a second
+                payment, and offering it here is how an in-doubt payment becomes
+                two. */}
+            <button
+              onClick={approve}
+              className="px-3 py-1.5 rounded-lg text-xs font-semibold transition-transform hover:scale-105 active:scale-100"
+              style={{ background: "var(--tiny-accent)", color: "#000" }}
+            >
+              ↻ Check again
+            </button>
+          </div>
+        ) : null}
       </Shell>
     );
   }

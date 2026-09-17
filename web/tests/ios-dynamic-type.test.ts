@@ -58,7 +58,7 @@ function enumBody(source: string, name: string): string {
 
 /** `.font(.system(size: 9))` → ['9']. Ignores `.font(.caption2)` and friends. */
 function absoluteFontSizes(body: string): string[] {
-  return Array.from(body.matchAll(/\.font\(\s*\.system\(size:\s*([^),]+)/g)).map((m) => m[1].trim())
+  return [...body.matchAll(/\.font\(\s*\.system\(size:\s*([^),]+)/g)].map((m) => m[1].trim())
 }
 
 /**

@@ -26,7 +26,7 @@ import { makeLearnTool, makeRecallTool, makeUnlearnTool } from '@/lib/chat/tools
 import { makeSendMessageTool, makeReadMessagesTool } from '@/lib/chat/tools/messages'
 import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
 import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
-import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool, makeFlipperFindTool } from '@/lib/chat/tools/flipper'
 
 export type RealtimeTool = {
   type: 'function'
@@ -89,6 +89,9 @@ export function buildVoiceTools(sessionType: string): RealtimeTool[] {
     makeFlipperStatusTool(null),
     makeFlipperListenTool(null),
     makeFlipperFilesTool(null),
+    // 🔔 "Where's my Flipper?" is a question people ask a room out loud, and the
+    // answer is a beep from under a cushion rather than a sentence.
+    makeFlipperFindTool(null),
   ].map(fromStrands)
   if (native) {
     // Round-trip media tools: the device executes (consent-gated capture /

@@ -12,6 +12,8 @@
 import { useEffect, useState } from "react";
 import SiteHeader from "@/components/SiteHeader";
 import { deadlineFor } from "@/lib/deadlines";
+import { callOutcome } from "@/lib/voice/outcome";
+import { refusalFromStatusAnswer, tooLongToStitch, type RecordingStatusAnswer } from "@/lib/voice/playback";
 
 type CallSession = {
   id: string;
@@ -20,6 +22,13 @@ type CallSession = {
   started_at?: number;
   duration_ms?: number;
   segment_count?: number;
+  // ⚠️ The recorded reason the call ended abnormally — decoded, because the
+  // filter below ADMITS `status === "error"` rows and without this field one
+  // drew exactly like a call the person hung up on themselves. The column
+  // reaches here already (VOICE_LIST_SQL selects it, /api/voice/sessions
+  // passes rows through verbatim); it was dropped on this line. Diagnostic
+  // text — `callOutcome` translates, never render it raw.
+  error?: string | null;
 };
 
 const WORKER = "https://plugin.tiny.technology";
@@ -32,6 +41,10 @@ export default function CallsPage() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const [copyFailed, setCopyFailed] = useState<string | null>(null);
+  // Why a recording wouldn't play, keyed by call id. `<audio>`'s own answer to
+  // a 413 is to grey out its play button and say nothing, so the reason has to
+  // be fetched and rendered by us — see `playFailed` below.
+  const [playError, setPlayError] = useState<Record<string, string>>({});
   // Spoken copy outcome for screen readers — the visible "✓ copied" swap sits
   // under a STATIC aria-label, which announces nothing (wallet copyUrl parity).
   const [copyMsg, setCopyMsg] = useState("");
@@ -53,8 +66,15 @@ export default function CallsPage() {
           return;
         }
         // Only finished calls stitch (live ones 409); hide sub-2s pocket dials
-        // and zero-segment rows (no audio journaled — outage casualties; their
-        // stitch 404s, the row is dead).
+        // and zero-segment rows.
+        // ⚠️ A zero count is "nothing we can offer", NOT "no audio exists".
+        // Teardown's counters live only in the Durable Object's memory, so a
+        // teardown on a fresh instance used to overwrite a real count with 0
+        // while the PCM segments sat in R2 intact (fixed worker-side: the row
+        // update is monotonic now). This filter is still right — a 0 row has
+        // no mix markers, so its stitch really does 404 — but it hides a row
+        // whose audio may be recoverable, so do not read it as proof the call
+        // was lost.
         setSessions((d.sessions || []).filter((s: CallSession) =>
           (s.status === "ended" || s.status === "error")
           && (s.duration_ms || 0) > 2000
@@ -90,6 +110,28 @@ export default function CallsPage() {
       // back-to-back won't re-announce in a live region).
       setCopyMsg("");
     }, 2000);
+  };
+
+  // `<audio>` fired onError: the element knows only that it can't play this.
+  // Ask the same-origin status route what the worker actually said, and put a
+  // sentence on the row. Never leave it silent — a dead play button with no
+  // explanation is exactly the defect this fixes, so an unreadable answer still
+  // gets `playbackRefusal`'s generic line.
+  // ⚠️ The translation itself is `refusalFromStatusAnswer`, not inline here: a
+  // rule inside a component closure has no caller, so the only pin available was
+  // a grep for this call site — and a mutant that asked the route WHY and threw
+  // the answer away survived it.
+  const playFailed = async (id: string) => {
+    let answer: RecordingStatusAnswer = null;
+    try {
+      const r = await fetch(`/api/voice/recording-status/${encodeURIComponent(id)}`, {
+        signal: AbortSignal.timeout(deadlineFor("/api/voice/recording-status")),
+      });
+      answer = await r.json();
+    } catch {
+      /* answer stays null — the generic line, never silence */
+    }
+    setPlayError((p) => ({ ...p, [id]: refusalFromStatusAnswer(answer).text }));
   };
 
   return (
@@ -146,6 +188,24 @@ export default function CallsPage() {
                       : ""}
                     {s.duration_ms ? ` · ${clock(s.duration_ms)}` : ""}
                   </div>
+                  {/* Why the call ended, when it didn't end the way calls end.
+                      Absent on a clean hangup — a badge on every row says
+                      nothing. The duration above is the reason this matters:
+                      a 20-second row reads as a short call, so the fact that
+                      the service dropped 20 seconds in has to be ON the row.
+                      ⚠️ `outcome.text`, never `s.error`: the column holds
+                      `upstream closed: 1011 …`, written for the worker tail. */}
+                  {(() => {
+                    const outcome = callOutcome(s.status, s.error);
+                    return outcome ? (
+                      <div
+                        className="mt-1 text-xs"
+                        style={{ color: "rgba(var(--tiny-danger-rgb), 0.75)" }}
+                      >
+                        ⚠️ {outcome.text}
+                      </div>
+                    ) : null;
+                  })()}
                 </div>
                 <button
                   onClick={() => share(s.id, s.tiny_name || "tiny")}
@@ -163,7 +223,30 @@ export default function CallsPage() {
                 src={`${WORKER}/voice/recording/${s.id}`}
                 className="mt-3 w-full"
                 aria-label={`Recording of the call with ${s.tiny_name || "tiny"}`}
+                onError={() => playFailed(s.id)}
               />
+              {/* ⚠️ Why the play failed — because `<audio>` cannot say. Its whole
+                  answer to a 413/409/404 is a greyed-out play button: the
+                  worker's reason IS in the response body and the element throws
+                  it away, so a person who taps play on a call that can never
+                  stitch gets a dead control and no explanation. Asked on error
+                  only (never on load), same-origin so the body is readable. */}
+              {playError[s.id] ? (
+                <div
+                  role="status"
+                  className="mt-1 text-xs"
+                  style={{ color: "rgba(var(--tiny-danger-rgb), 0.75)" }}
+                >
+                  ⚠️ {playError[s.id]}
+                </div>
+              ) : tooLongToStitch(s.segment_count) ? (
+                // Knowable BEFORE the tap: `segment_count` is already on the row
+                // and ~30 segments cannot fit the 40MB stitch cap. Saying so up
+                // front beats a play button that is guaranteed to fail.
+                <div className="mt-1 text-xs text-white/40">
+                  ⚠️ this call is too long to replay in one piece
+                </div>
+              ) : null}
             </div>
           ))}
         </div>

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Long-running tiny-chain devnet. Deterministic accounts (anvil's default test
 # mnemonic), steady 2s blocks so the worker's MIN_CONFIRMATIONS=3 deposit check
-# (chatgpt-plugin-tinyai/src/deposits.ts:39) clears in ~6s without traffic.
+# (worker/src/deposits.ts:39) clears in ~6s without traffic.
 set -euo pipefail
 export PATH="$HOME/.foundry/bin:$PATH"
 exec anvil \

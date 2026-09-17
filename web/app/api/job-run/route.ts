@@ -16,10 +16,14 @@ import { makeLearnTool, makeRecallTool, makeUnlearnTool, makeConflictsTool, make
 import { makeForgedTools, buildDynamicTools, makeUseTelegramTool, makeUseDeviceTool, makeWalletTool } from '@/lib/chat/tools/platform'
 import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
 import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
-import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool, makeFlipperFindTool, bleCanDo } from '@/lib/chat/tools/flipper'
 import { parseDisabledTools, filterTools, dedupeToolsByName } from '@/lib/chat/tool-filter'
 
-export const runtime = 'edge'
+// MUST be Node.js runtime: this route is NON-streaming, and Vercel's Edge
+// runtime demands a first byte within ~25s — measured 2026-08-25: any agent
+// turn slower than 25s (e.g. a use_device invoke) returned a platform 504
+// before JOB_DEADLINE_S ever mattered. Node honors maxDuration instead.
+export const runtime = 'nodejs'
 export const maxDuration = 120
 
 const WORKER = 'https://plugin.tiny.technology'
@@ -131,13 +135,21 @@ export async function POST(req: Request) {
       makeNiclaVoiceRecordTool(userId || null, JOB_DEADLINE_S),
       makeNiclaVoiceTranscriptsTool(userId || null),
       makeNiclaVoiceTranscriptTool(userId || null),
-      // 🐬 All three take the deadline. flipper_status looks like a cheap read and
+      // 🐬 All FOUR take the deadline. flipper_status looks like a cheap read and
       // is not: it posts a relay envelope and polls, so with no budget it sat for
       // a flat 45s of this job's 50 and the cancel below fired before the job
       // could report the "unreachable" it had just established.
       makeFlipperStatusTool(userId || null, JOB_DEADLINE_S),
       makeFlipperListenTool(userId || null, JOB_DEADLINE_S),
       makeFlipperFilesTool(userId || null, JOB_DEADLINE_S),
+      // 🔔 Mounted rather than withheld: a job that is ASKED to beep the board
+      // ("if it's reachable at 6pm, beep it so I remember to grab it") can, and
+      // the alternative is worse than the noise — the capability note below tells
+      // the model the Bluetooth route can beep, and a named capability with no
+      // tool behind it is the defect this cycle exists to remove. The reason not
+      // to reach for it unprompted is in the tool's own description, which every
+      // rail reads.
+      makeFlipperFindTool(userId || null, JOB_DEADLINE_S),
       // READ-ONLY wallet — lets scheduled jobs answer money questions
       // ("alert me when my balance drops under $1") without being able to
       // move a cent; every spend path stays behind an explicit user step.
@@ -183,11 +195,15 @@ export async function POST(req: Request) {
       // Bluetooth from that phone` out of the heartbeat (lib/chat/prompt.ts
       // CAPABILITY_HINTS), the prompt below is ALL a job is told about the
       // topology. So the one route that is up at 3am — the board in a bag, bonded
-      // to the phone in the same bag, while the cabled machine sleeps — was
+      // to the phone in the same bag, while the cabled mac mini sleeps — was
       // denied in the job's own instructions, and denied more authoritatively than
       // flipper_status's schema (which has always said "or which phone holds it
       // over Bluetooth") could contradict.
-      'flipper_status / flipper_files for the owner\'s Flipper Zero, which has TWO routes and no network of its own: a USB cable into a machine running the tiny CLI, or Bluetooth from the tiny app on the owner\'s phone. Unattended runs are exactly when the cabled machine is asleep and the phone is the live route, so ASK flipper_status rather than assuming the cable — it reports which one answered. Over Bluetooth status, browsing and reading the SD card all work; only capturing IR / Sub-GHz / RFID / iButton needs the cable. "Unreachable" (neither route heartbeating) is a reportable outcome, not a failure. flipper_listen also exists but BLOCKS for its window and needs a person at the device to present a card or press a remote, so do not use it in unattended work unless the job explicitly asks for a capture at a moment someone will be there',
+      // ⚠️ And the list of what Bluetooth can do is SHARED (bleCanDo), not typed
+      // again here. Five copies of it existed; four promised a beep no tool could
+      // send, and every copy also offered to "read the SD card", which no caller
+      // on this rail can do. A job is the reader least able to check either claim.
+      `flipper_status / flipper_files for the owner's Flipper Zero, which has TWO routes and no network of its own: a USB cable into a machine running the tiny CLI, or Bluetooth from the tiny app on the owner's phone. Unattended runs are exactly when the cabled machine is asleep and the phone is the live route, so ASK flipper_status rather than assuming the cable — it reports which one answered. Over Bluetooth the phone can ${bleCanDo()}; only capturing IR / Sub-GHz / RFID / iButton needs the cable. "Unreachable" (neither route heartbeating) is a reportable outcome, not a failure. flipper_listen also exists but BLOCKS for its window and needs a person at the device to present a card or press a remote, so do not use it in unattended work unless the job explicitly asks for a capture at a moment someone will be there`,
       forgedTools.length ? `their forged tools (${forgedTools.map((t: any) => t.name).join(', ')})` : '',
       dynamicTools.length ? `this tiny's API skills (${dynamicTools.map((t: any) => t.name).slice(0, 10).join(', ')})` : '',
       mcpClients.length ? 'the tiny\'s connected MCP servers' : '',

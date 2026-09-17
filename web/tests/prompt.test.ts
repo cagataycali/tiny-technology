@@ -1,9 +1,10 @@
 // @vitest-environment node
 import { describe, it, expect } from 'vitest'
-import { buildSoulPrompt, buildDeviceBlock, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, eventDetail, EVENT_DETAIL_CHARS, selectEvents, EVENT_BLOCK_ROWS, PER_KIND_SOFT_CAP, type SoulPromptInputs } from '../lib/chat/prompt'
+import { readFileSync, readdirSync } from 'node:fs'
+import { buildSoulPrompt, buildDeviceBlock, lastSeenPhrase, capabilitySummary, parseCapabilities, economyBlock, walletFundsPhrase, DEVICE_LABELS, EVENT_ICONS, eventDetail, EVENT_DETAIL_CHARS, selectEvents, EVENT_BLOCK_ROWS, PER_KIND_SOFT_CAP, type SoulPromptInputs } from '../lib/chat/prompt'
 import { EMITTED_KINDS } from '../lib/chat/event-icons'
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+
+const source = (p: string) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
 
 const base: SoulPromptInputs = {
   tinyName: 'testy',
@@ -160,34 +161,12 @@ describe('buildSoulPrompt', () => {
   }
   const UUID = '9f8c1e2a-3b4d-4c5e-8f70-a1b2c3d4e5f6'
   const EMITTER_FIXTURES: Record<string, string> = {
-    // worker/src/transcripts.ts — the `(transcript <id>)` emit, at its own
-    // documented worst case (40-char device name + the full
-    // TRANSCRIPT_PREVIEW_CHARS preview + the id). Named by the symbol, not by a
-    // line number: the numbers differ between trees and rot on the next edit.
+    // transcripts.ts:167, at its own documented worst case (40-char device
+    // name + the full 200-char TRANSCRIPT_PREVIEW_CHARS preview + the id).
     nicla_transcript: `${'d'.repeat(40)}: "${'the roof guy comes tuesday '.repeat(8).slice(0, 200)}" (transcript ${UUID})`,
-    // worker/src/relay.ts — the `envelope_id:'<id>'` emit, with its 90-char brief.
+    // relay.ts:491, with its 90-char brief.
     device_task_result: `💻 studio-mbp finished: "${'ran the migration and rows changed '.repeat(3).slice(0, 90)}" — read it with use_device action:'result' envelope_id:'${UUID}'`,
   }
-
-  /**
-   * ⚠️ What makes the two fixtures above load-bearing, asserted rather than
-   * assumed: each must EXCEED the old 140 and fit inside the ring's real 300.
-   * A fixture shorter than 140 keeps its id under the defective slice too, so
-   * both `toContain(UUID)` tests below would stay green against the bug — they
-   * would be pinning nothing while reading as the proof of the whole increment.
-   *
-   * Not hypothetical: the device name in the relay fixture is scrubbed in this
-   * tree (the upstream fixture carries a real hostname), and a rename is exactly
-   * the edit that shortens a row without anyone re-measuring it. 294 and 209 as
-   * written, so there is room — but the margin is a measurement, not a promise.
-   */
-  it('both fixtures are in the window where the head-slice destroyed the id', () => {
-    for (const [kind, s] of Object.entries(EMITTER_FIXTURES)) {
-      expect(s.length, `${kind}: shorter than the old slice, so it cannot detect it`).toBeGreaterThan(140)
-      expect(s.length, `${kind}: over the ring's cap, so elision explains the pass`).toBeLessThanOrEqual(EVENT_DETAIL_CHARS)
-      expect(s.slice(0, 140), `${kind}: the old 140-slice kept the id — fixture proves nothing`).not.toContain(UUID)
-    }
-  })
 
   it('a transcript event reaches the agent with its id, so the full text is fetchable', () => {
     const row = detailFor('nicla_transcript')
@@ -362,6 +341,241 @@ describe('buildDeviceBlock — capabilities reach the agent', () => {
     }
   })
 
+  /**
+   * ⚠️⚠️ THE ROSTER IS THE GUARD'S INPUT, SO THE GUARD CANNOT SEE WHAT IT OMITS —
+   * and the test above is the one that proves it. It loops over DEVICE_LABELS and
+   * fails when a label has no sentence, which makes the LIST the fixed input and
+   * the hints the thing to maintain. But the list was 18 laptop labels, and the
+   * phones and boards declare 17 tokens between them: 16 of those were outside it,
+   * so the loop above ran fully green while a Pixel's whole prompt line read
+   *
+   *     — can: chat; location; bluetooth_scan; speak; open_app; screenshot; glasses; record
+   *
+   * bare wire tokens, underscores and all. Every assertion in this file passed for
+   * as long as that was true, because a missing entry is silent by construction.
+   *
+   * 🔑 THE FIX IS TO DERIVE THE ROSTER, NEVER TRANSCRIBE IT. What the clients
+   * declare on the wire is a fact in their source; this reads it from there and
+   * requires DEVICE_LABELS to cover it. So the next client capability fails HERE,
+   * on the commit that adds it, instead of shipping as a bare token that reads
+   * exactly like a label this deploy has never heard of (the test above it, which
+   * is correct and must stay).
+   *
+   * ⚠️ Why this is not cosmetic, which is how it survived: the block tells the
+   * model to "match the task to a device that can do it" from this line ALONE, and
+   * `record` genuinely resolves a device (nicla-voice.ts RECORD_CAP filters the
+   * fleet by it). Asked to open Mail on the iPhone, the agent recited "your iPhone
+   * daemon only advertises chat + bluetooth_scan + location" — these tokens,
+   * verbatim — and concluded that opening an app was merely "lightweight" rather
+   * than the thing `open_app` names. Session.swift calls that the canonical
+   * mis-inference; this line is where it starts.
+   */
+  it('DEVICE_LABELS covers every capability the CLIENTS IN THIS REPO declare', () => {
+    // Comment leaders stripped first: every one of these declarations is
+    // annotated, and a token merely NAMED in prose must not count as one
+    // DECLARED on the wire — that would let a comment satisfy the guard.
+    const decomment = (s: string) =>
+      s.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')
+    const tokens = (s: string) => Array.from(decomment(s).matchAll(/['"]([^'"\n]+)['"]/g), (m) => m[1])
+
+    // Each entry: the file, a regex capturing its capability declaration, and the
+    // floor of how many tokens it must yield. The floor is the did-I-read-this
+    // assertion — a declaration that moves yields [] and would otherwise pass
+    // forever, which is the same silent-input failure this whole test is about.
+    const DECLARERS: [string, RegExp, number][] = [
+      // 📱 The phones. iOS adds flipper_ble on a live link (beatCapabilities),
+      // asserted separately below since it is not in the static array.
+      ['ios/Tiny/Sources/Session.swift', /static let capabilities = \[([^\]]+)\]/, 8],
+      ['android/app/src/main/java/technology/tiny/app/fleet/FleetManager.kt',
+        /private val capabilities = listOf\(([\s\S]*?)\n {4}\)/, 7],
+      // 💎 The necklace boards, enrolled by the phones that pair them. Both arms
+      // of the ternary/if — a Vision declares six, a Voice four.
+      ['ios/Tiny/Sources/TinySetup.swift', /let caps = isVoice\s*\n\s*\?([\s\S]*?)\n\n/, 8],
+      // ⚠️ Anchored on the NEXT statement, not on a closing brace: `} else {` is
+      // itself a line of 12 spaces + `}`, so a non-greedy run to `\n {12}\}`
+      // stops at the FIRST arm and reads the reference to the Voice list — zero
+      // string literals, and a silent pass if the floor below weren't asserted.
+      ['android/app/src/main/java/technology/tiny/app/ui/Nearby.kt',
+        /val caps = if \(isVoice\) \{([\s\S]*?)\n {12}val enrolled/, 6],
+      ['android/app/src/main/java/technology/tiny/app/fleet/NiclaVoiceGateway.kt',
+        /internal val CAPABILITIES = listOf\(([^)]*)\)/, 4],
+      // 🖨️ Endpoint robots are the one kind NOT declared by any source in this
+      // repo — the machine's own API sends whatever it likes, so there is no
+      // array here to read. The nearest thing to a declaration is the LIVE
+      // printer's real capability list, asserted in the Android endpoint test;
+      // deliberately that assertion and not the identical sentence in
+      // EndpointPanel.kt's doc comment, because a token named in PROSE must not
+      // satisfy this guard (a comment declares nothing, and a mutant pins that).
+      ['android/app/src/test/java/technology/tiny/app/ui/EndpointPanelTest.kt',
+        /assertEquals\(\s*\n\s*listOf\(("chat"[^)]*)\),\s*\n\s*parseCapabilities/, 4],
+    ]
+
+    for (const [file, re, floor] of DECLARERS) {
+      const m = source(file).match(re)
+      expect(m, `${file}'s capability declaration moved — re-anchor this pin on ` +
+        `wherever it went rather than leaving it to pass on an empty read`).not.toBeNull()
+      const declared = tokens(m![1])
+      expect(declared.length, `parsed no capabilities out of ${file} — the extractor is reading nothing`)
+        .toBeGreaterThanOrEqual(floor)
+      for (const cap of declared) {
+        expect(DEVICE_LABELS as readonly string[],
+          `${file} declares "${cap}" on the wire and the prompt roster never heard of it, so ` +
+          `it reaches the agent as a BARE WIRE TOKEN — indistinguishable from a label this ` +
+          `deploy has never seen. Add it here AND give it a CAPABILITY_HINTS sentence.`)
+          .toContain(cap)
+      }
+    }
+
+    // flipper_ble is conditional (only while a board is linked), so it is not in
+    // the static array above — pinned by name, and by tests/flipper-ble.test.ts.
+    expect(source('ios/Tiny/Sources/Session.swift'), 'beatCapabilities no longer adds flipper_ble')
+      .toMatch(/capabilities \+ \["flipper_ble"\]/)
+    expect(DEVICE_LABELS as readonly string[]).toContain('flipper_ble')
+  })
+
+  it('every roster label renders a phrase for a REAL device, phones included', () => {
+    // The end-to-end shape, per device kind: the actual line each client's own
+    // declared set puts in the system prompt. A segment equal to its own token is
+    // the bare-word defect, whether it got there by fallback or by being typed.
+    const FLEET: [string, string[]][] = [
+      ['iPhone', ['chat', 'bluetooth_scan', 'location', 'record', 'speak', 'open_app', 'image_gen', 'glasses', 'screenshot', 'flipper_ble']],
+      ['Pixel', ['chat', 'location', 'bluetooth_scan', 'speak', 'open_app', 'screenshot', 'glasses', 'record']],
+      ['Nicla Vision', ['camera', 'mic', 'tof', 'imu', 'ble', 'wifi']],
+      ['Nicla Voice', ['mic', 'wake', 'imu', 'ble']],
+      ['3D printer', ['chat', 'telemetry', 'print', 'cad']],
+    ]
+    for (const [who, caps] of FLEET) {
+      const line = capabilitySummary(caps)
+      expect(line, `${who} renders no capability line at all`).toContain(' — can: ')
+      for (const seg of line.replace(' — can: ', '').split('; ')) {
+        expect(caps, `${who}'s line still contains the bare wire token "${seg}"`).not.toContain(seg)
+        expect(seg, `${who}'s "${seg}" carries an underscore — that is a wire token, not a phrase`)
+          .not.toMatch(/^\w+_\w+$/)
+      }
+    }
+  })
+
+  /**
+   * A hint must not name a device kind that cannot declare it. `chat` is the
+   * catch: BOTH phones declare it and so does the live 3D printer
+   * (["chat","telemetry","print","cad"]), so a hint reading "its own on-phone
+   * agent" told the agent a printer was a phone — in the one line it uses to pick
+   * which device gets the task. Wrong noun, wrong plan, and nothing else in the
+   * file would have noticed, since the segment is a perfectly good phrase.
+   */
+  it('a hint shared by phones and robots never calls the device a phone', () => {
+    for (const shared of ['chat', 'location', 'speak', 'screenshot']) {
+      const hint = capabilitySummary([shared])
+      expect(hint, `the "${shared}" hint says "phone", but a printer/robot can declare ` +
+        `it too — describe the CAPABILITY, not the hardware you had in mind`)
+        .not.toMatch(/\bphones?\b/i)
+    }
+    // The converse: a hint for something only a phone HAS may say so freely.
+    expect(capabilitySummary(['glasses'])).toMatch(/glasses/i)
+  })
+
+  /**
+   * ⚠️⚠️ A TOOL NAMED IN THIS LINE MUST BE CALLABLE BY WHOEVER READS THE LINE.
+   *
+   * c51 gave every capability a hint naming its tool, which is right for the tools
+   * that RESOLVE a device (`nicla_voice_record` → resolvePhone by RECORD_CAP) and
+   * wrong for the ones that don't. `screenshot`, `generate_image` and the four
+   * `meta_*` tools take **no device_id** — they act on whatever device holds the
+   * stream — and app/api/chat/route.ts mounts them only behind
+   * `x-tiny-session: tiny-ios` / `tiny-android` (`generate_image` on iOS alone).
+   *
+   * But `buildDeviceBlock` renders ONE text for every surface, describing OTHER
+   * devices. So naming the raw tool was wrong in both directions: from the web the
+   * agent has no such tool (the cron's reported bug is a web turn), and from a
+   * phone the tool would capture the READER instead of the row it is written on.
+   * The reachable path is the one the block's own closing sentence already names —
+   * `use_device invoke`, which proxies to that device's native turn where these
+   * tools really are mounted.
+   *
+   * 🔑 The census is DERIVED from the route's mount gates, never transcribed: a
+   * tool moved behind a gate later must fail this, which is the whole reason c51's
+   * roster pin exists one file over.
+   */
+  it('no hint names a tool the reading surface cannot call', () => {
+    const route = source('app/api/chat/route.ts')
+    const block = route.match(/const allNamedToolsUnfiltered = \[([\s\S]*?)\n {2}\]/)
+    expect(block, 'the chat route\'s mount list moved — re-anchor this pin on wherever it ' +
+      'went rather than leaving it to pass on an empty read').not.toBeNull()
+
+    // Every tool var mounted behind a session gate, from the gates themselves.
+    const gated = Array.from(
+      block![1].matchAll(/(?:tinySession === '[a-z-]+'|isNativeApp) \? \[([^\]]+)\]/g),
+      (m) => m[1].split(',').map((v) => v.trim()).filter(Boolean),
+    ).reduce<string[]>((all, vs) => all.concat(vs.filter((v) => all.indexOf(v) < 0)), [])
+    expect(gated.length, 'parsed no gated tools out of the chat route — the extractor is ' +
+      'reading nothing, so this pin would pass on any hint at all').toBeGreaterThanOrEqual(6)
+
+    // var → wire name, read from the factory the route calls (never hand-mapped).
+    // Factories are spread over lib/chat/tools/*, so search all of them: pinning
+    // one file made an unrelated gate change fail with "not in platform.ts",
+    // which points at the wrong repair.
+    const factorySources = readdirSync(new URL('../lib/chat/tools/', import.meta.url))
+      .filter(f => f.endsWith('.ts'))
+      .map(f => source(`lib/chat/tools/${f}`))
+    expect(factorySources.length, 'read no tool sources — the factories moved')
+      .toBeGreaterThanOrEqual(5)
+    const wire: string[] = []
+    for (const v of gated) {
+      const factory = route.match(new RegExp(`const ${v} = (make\\w+)\\(`))
+      expect(factory, `${v} is mounted behind a gate but nothing constructs it`).not.toBeNull()
+      const named = factorySources
+        .map(s => s.match(new RegExp(`export const ${factory![1]} =[\\s\\S]{0,200}?name: '([a-z_]+)'`)))
+        .find(Boolean)
+      expect(named, `${factory![1]} declares no tool name anywhere under lib/chat/tools`).toBeTruthy()
+      if (wire.indexOf(named![1]) < 0) wire.push(named![1])
+    }
+    // The set this is really about, asserted so a gate REMOVED can't silently
+    // shrink the census to nothing interesting.
+    for (const must of ['screenshot', 'generate_image', 'meta_take_photo']) {
+      expect(wire, `${must} is no longer gated — if it is mounted everywhere now, ` +
+        `its hint may name it directly again`).toContain(must)
+    }
+
+    // No hint may name any of them. `\b` alone is not enough: "screenshot" is a
+    // substring of nothing here, but `use_device` must stay allowed, and a hint
+    // that says "shows its screen" is exactly what we want instead.
+    for (const label of DEVICE_LABELS) {
+      const hint = capabilitySummary([label])
+      for (const t of wire) {
+        expect(hint, `the "${label}" hint names \`${t}\`, which app/api/chat/route.ts mounts ` +
+          `ONLY for a native session and which takes no device_id — so a web turn cannot ` +
+          `call it, and a phone turn would point it at ITSELF rather than at this row. ` +
+          `Name \`use_device invoke\` instead: it proxies to that device's own turn, where ` +
+          `${t} really is mounted.`)
+          .not.toMatch(new RegExp(`\\b${t}\\b`))
+      }
+    }
+  })
+
+  /**
+   * The converse, so the fix above cannot be "delete every tool name": a tool that
+   * RESOLVES its own target is mounted on every surface and must still be named.
+   * `nicla_voice_record` is the one this cycle turned on — it picks the phone by
+   * capability (nicla-voice.ts RECORD_CAP / resolvePhone), so whoever reads the
+   * line can call it about the device the line describes.
+   */
+  it('a hint for a device-resolving tool still names it', () => {
+    expect(capabilitySummary(['record'])).toContain('nicla_voice_record')
+    expect(capabilitySummary(['camera'])).toContain('nicla_take_photo')
+    expect(capabilitySummary(['wake'])).toContain('nicla_voice_status')
+    // ⚠️ No "…and these are mounted ungated" loop here on purpose. One was written,
+    // and a mutant proved it dead: gating any of these three makes the pin ABOVE
+    // fail — it derives the gated set from the route and then forbids exactly these
+    // names — so a second copy of the check could only ever agree with it. What
+    // this test owns is the other half: that the names are PRESENT at all.
+    const route = source('app/api/chat/route.ts')
+    const block = route.match(/const allNamedToolsUnfiltered = \[([\s\S]*?)\n {2}\]/)![1]
+    for (const v of ['niclaVoiceRecordTool', 'niclaTakePhotoTool', 'niclaVoiceStatusTool']) {
+      expect(block, `${v} is not in the mount list at all, so its hint promises a tool ` +
+        `no surface has`).toContain(v)
+    }
+  })
+
   it('the five formerly-bare labels each name the tool the agent must call', () => {
     // Naming the tool is the point: the block tells the model to match a task to a
     // device, and it cannot do that from a capability whose tool it has to guess.
@@ -425,6 +639,152 @@ describe('buildDeviceBlock — capabilities reach the agent', () => {
     expect(parseCapabilities('{not json')).toEqual([])
     expect(parseCapabilities('{"a":1}')).toEqual([])
     expect(parseCapabilities(['Apple', ' Desktop ', '', null])).toEqual(['apple', 'desktop'])
+  })
+})
+
+/**
+ * 📱📱 TWO ROWS, ONE PHONE — the block that made the agent understate a device
+ * it had just successfully driven.
+ *
+ * Observed, not hypothesised. On the shipping account `use_device action:'list'`
+ * returned TWO rows named `studio-iphone`: `b2b7179d…`, last seen minutes
+ * earlier, declaring ten capabilities including `open_app`; and `156e3c11…`, six
+ * days dead, declaring three. The agent invoked the live one, Mail genuinely
+ * opened on the phone, and it then told the user their "iPhone daemon only
+ * advertises chat + bluetooth_scan + location" — the dead row's list, word for
+ * word. The tool call was right and the sentence about it was false.
+ *
+ * Duplicates are not an anomaly to be swept: the device id lives in the
+ * Keychain, so a reinstall, a restore, or iOS's own `reEnroll()` after two
+ * "unknown device" strikes each mint a new row under the same
+ * `"<login>-<model>"` name and orphan the old one, capability list frozen. The
+ * fleet is SUPPOSED to hold both. What was broken is that the prompt rendered
+ * them identically — same name, both `⚫ offline`, no age — so no amount of
+ * model care could have picked the right one.
+ *
+ * 🔑 The rule this pins, and why it's the same rule as the endpoint-`null` one
+ * below: the fix for "the model reasoned from the wrong row" belongs on EVERY
+ * surface that renders the claim. `action:'list'` already returned
+ * `last_seen_seconds_ago` and already preserved `online: null`. The system
+ * prompt — the surface the model reads on every single turn, without calling
+ * anything — had neither.
+ */
+describe('buildDeviceBlock — two rows, one phone (the stale-duplicate bug)', () => {
+  const NOW = 1_785_806_800
+  // The real pair, ids and capability lists as the worker returned them.
+  const LIVE = {
+    id: 'b2b7179d', name: 'studio-iphone', kind: 'mobile', platform: 'ios',
+    online: 0, last_seen: NOW - 240,          // 4m — the phone in the pocket
+    capabilities: JSON.stringify(['chat', 'bluetooth_scan', 'location', 'record',
+      'speak', 'open_app', 'image_gen', 'glasses', 'screenshot', 'flipper_ble']),
+  }
+  const DEAD = {
+    id: '156e3c11', name: 'studio-iphone', kind: 'mobile', platform: 'ios',
+    online: 0, last_seen: NOW - 6 * 86400,    // 6d — an abandoned enrollment
+    capabilities: JSON.stringify(['chat', 'bluetooth_scan', 'location']),
+  }
+  /** The line the model reads for one specific row. */
+  const lineFor = (block: string, id: string) =>
+    block.split('\n').find(l => l.includes(`[id: ${id}]`)) || ''
+
+  it('the two rows are DISTINGUISHABLE — ages differ and the dead one is marked', () => {
+    const b = buildDeviceBlock([LIVE, DEAD], NOW)
+    expect(lineFor(b, 'b2b7179d')).toContain('last seen 4m ago')
+    expect(lineFor(b, '156e3c11')).toContain('last seen 6d ago')
+    expect(lineFor(b, 'b2b7179d')).toContain('✅ CURRENT')
+    expect(lineFor(b, '156e3c11')).toContain('⚠️ SUPERSEDED')
+    // …and not the other way round. Without this the markers could both be
+    // present while attached to the wrong rows, which is the original bug with
+    // extra words.
+    expect(lineFor(b, 'b2b7179d')).not.toContain('SUPERSEDED')
+    expect(lineFor(b, '156e3c11')).not.toContain('CURRENT')
+  })
+
+  it('the verdict is derived from last_seen, NOT from the order rows arrive in', () => {
+    // The worker's ORDER BY last_seen DESC lives in another repo. "The first row
+    // wins" would pass every assertion above and silently invert the day that
+    // clause changes — so the dead row is fed FIRST here on purpose.
+    const b = buildDeviceBlock([DEAD, LIVE], NOW)
+    expect(lineFor(b, 'b2b7179d')).toContain('✅ CURRENT')
+    expect(lineFor(b, '156e3c11')).toContain('⚠️ SUPERSEDED')
+  })
+
+  it('the block forbids the FALSE NEGATIVE the agent actually said', () => {
+    // The harm was not picking the wrong row — it was making a confident claim
+    // about what the user's phone cannot do, from a row visibly six days dead.
+    const b = buildDeviceBlock([LIVE, DEAD], NOW)
+    expect(b).toContain('Never tell the user a device lacks something')
+    expect(b).toContain("use_device action:'invoke'")
+    // The live row's real abilities are still rendered in full — the marker must
+    // not become a reason to stop describing the device.
+    expect(lineFor(b, 'b2b7179d')).toContain('opens an app or link')
+  })
+
+  it('a normal one-row-per-name fleet gets NO duplicate markers and no paragraph', () => {
+    // These words cost tokens on every turn of every chat. They have to appear
+    // only when a superseded row is actually on screen.
+    const b = buildDeviceBlock([LIVE, {
+      id: '8c6f8990', name: 'studio-pixel', kind: 'mobile', platform: 'android',
+      online: 1, last_seen: NOW - 5, capabilities: JSON.stringify(['chat', 'open_app']),
+    }], NOW)
+    expect(b).not.toContain('SUPERSEDED')
+    expect(b).not.toContain('CURRENT')
+    expect(b).not.toContain('Never tell the user a device lacks something')
+  })
+
+  it('⚫ offline always carries an age — a bare "offline" cannot be compared', () => {
+    const b = buildDeviceBlock([DEAD], NOW)
+    expect(b).toContain('⚫ offline, last seen 6d ago')
+    // A row that never once heartbeated says so, rather than claiming an age.
+    const never = buildDeviceBlock([{ ...DEAD, last_seen: null }], NOW)
+    expect(never).toContain('never connected')
+  })
+
+  /**
+   * ⚠️ `online: null` IS NOT `offline`. An endpoint device — a printer, a robot
+   * behind its own always-on authenticated API — never heartbeats, so the worker
+   * deliberately reports `null` (devices.ts: "would pin it to false forever and
+   * the agent would refuse to use a perfectly healthy robot") and
+   * `use_device action:'list'` deliberately preserves it. This block tested
+   * `d.online ?` and rendered every one of them ⚫ offline — the single reading
+   * most likely to make an agent decline to try the machine.
+   */
+  it('an endpoint device is "unknown until invoked", never ⚫ offline', () => {
+    const printer = {
+      id: 'ep_1', name: 'bambu-p1s', kind: 'endpoint', platform: 'bambu',
+      online: null, last_seen: null,
+      capabilities: JSON.stringify(['print', 'telemetry', 'cad']),
+    }
+    const b = buildDeviceBlock([printer], NOW)
+    expect(b).toContain('reachability unknown until invoked')
+    expect(b).not.toContain('⚫ offline')
+    // Its abilities still reach the agent, so it can be matched to a job.
+    expect(b).toContain('3D printer')
+  })
+
+  it('lastSeenPhrase steps at every unit boundary', () => {
+    expect(lastSeenPhrase(0)).toBe('last seen 0s ago')
+    expect(lastSeenPhrase(59)).toBe('last seen 59s ago')
+    expect(lastSeenPhrase(60)).toBe('last seen 1m ago')
+    expect(lastSeenPhrase(3599)).toBe('last seen 59m ago')
+    expect(lastSeenPhrase(3600)).toBe('last seen 1h ago')
+    expect(lastSeenPhrase(86_399)).toBe('last seen 23h ago')
+    expect(lastSeenPhrase(86_400)).toBe('last seen 1d ago')
+    expect(lastSeenPhrase(6 * 86_400)).toBe('last seen 6d ago')
+    // Never a lie and never a throw: no timestamp, a bad one, or a clock that
+    // ran backwards all have to render inside a system prompt.
+    for (const bad of [null, undefined, NaN, 'soon', {}]) {
+      expect(() => lastSeenPhrase(bad)).not.toThrow()
+      expect(lastSeenPhrase(bad)).toBe('never connected')
+    }
+    expect(lastSeenPhrase(-5)).toBe('last seen 0s ago')
+  })
+
+  it('the default clock is now — an age is never rendered from a missing argument', () => {
+    // Called without nowSeconds (the production call site), a row that beat
+    // seconds ago must not read as decades old.
+    const fresh = { ...DEAD, last_seen: Math.floor(Date.now() / 1000) - 30 }
+    expect(buildDeviceBlock([fresh])).toContain('last seen 30s ago')
   })
 })
 
@@ -706,73 +1066,5 @@ describe('selectEvents', () => {
     // the prompt has. Slicing to the next heading and splitting on '- ' picked up
     // the covenant's bullets and reported 18.
     expect(p.match(/^- \[\d\d:\d\d UTC\]/gm) || []).toHaveLength(EVENT_BLOCK_ROWS)
-  })
-
-  /**
-   * ⚠️⚠️ THE OTHER HALF OF THIS FIX, AND THE ONLY HALF NO OTHER TEST CAN SEE.
-   *
-   * `selectEvents` returns its input untouched when `events.length <= rows` —
-   * correctly, since there is nothing to choose between. So the selector is only
-   * ever reached because the FETCH asks for more rows than the block renders. Put
-   * the request back to `limit=15` and every test in this file still passes, while
-   * the block goes back to being "whatever wrote most recently": the early return
-   * fires, nothing is selected, and the voice row is evicted exactly as before.
-   *
-   * Measured, not reasoned about — `&limit=50` → `&limit=15` survived the whole
-   * mutation battery for this increment. Two halves, one pin between them.
-   *
-   * The load-bearing assertion is the RELATION (`> EVENT_BLOCK_ROWS`), not the
-   * number: 50 is the worker's own clamp on `/events` and may move. What must
-   * never hold is fetched ≤ rendered.
-   */
-  it('the fetch asks for more rows than the block renders, or selection is dead code', () => {
-    const route = readFileSync(join(__dirname, '..', 'app/api/chat/route.ts'), 'utf8')
-      .replace(/\/\*[\s\S]*?\*\//g, '')
-      .replace(/^\s*\/\/.*$/gm, '')
-    const call = route.match(/plugin\.tiny\.technology\/events\?[^`]*`/)
-    expect(call, 'the events fetch is gone or reshaped — re-point this pin').toBeTruthy()
-    const width = call![0].match(/&limit=(\d+)/)
-    expect(width, 'the events fetch no longer states a width, so the worker default decides it')
-      .toBeTruthy()
-    expect(Number(width![1]), 'fetching only what is rendered makes selectEvents a no-op')
-      .toBeGreaterThan(EVENT_BLOCK_ROWS)
-  })
-
-  it('a ring fetched no wider than the block cannot be selected — why the pin above exists', () => {
-    // The early return, stated as behaviour so the source pin above has a reason
-    // a reader can check. Fifteen rows of one kind plus nothing else: the flood
-    // survives whole and the selector never runs.
-    const flood = Array.from({ length: EVENT_BLOCK_ROWS }, (_, i) => ev('job_result', 1_750_000_000 + i))
-    flood[0] = ev('nicla_transcript', 1_749_999_999)
-    const narrow = flood.slice(-EVENT_BLOCK_ROWS)
-    expect(selectEvents(narrow)).toEqual(narrow)
-  })
-
-  /**
-   * ⚠️ THE CAP IS A NUMBER CHOSEN AGAINST THE BLOCK'S SIZE, so it has to be
-   * asserted against it. `n >= CAP` → `n > CAP` — one character, letting a fifth
-   * row of each kind through — survives every other fixture here, because the
-   * give-back always tops the block up to 15 either way.
-   *
-   * It only bites when enough kinds are competing that the FIRST pass fills the
-   * block on its own: four flooding kinds at a cap of 4 spend 4+4+4+3, so the
-   * oldest kind still gets a row; at a cap of 5 the first three take all fifteen
-   * and the fourth is shut out completely — the very failure this whole increment
-   * is about, reintroduced by the off-by-one in its own guard.
-   *
-   * So the property is: CAP × (competing kinds) must leave room for every kind.
-   */
-  it('the cap leaves room for every competing kind, not just for four of them', () => {
-    const kinds = ['job_result', 'tiny_visit', 'dm', 'nicla_transcript']
-    expect(PER_KIND_SOFT_CAP * (kinds.length - 1)).toBeLessThan(EVENT_BLOCK_ROWS)
-    const rows: Array<{ kind: string; detail: string; created: number }> = []
-    let t = 1_750_000_000
-    for (const k of kinds) for (let i = 0; i < 10; i++) rows.push(ev(k, t++))
-    const out = selectEvents(rows)
-    expect(out).toHaveLength(EVENT_BLOCK_ROWS)
-    for (const k of kinds) {
-      expect(out.some(e => e.kind === k), `${k} was shut out — the cap is too large for ${kinds.length} kinds`)
-        .toBe(true)
-    }
   })
 })

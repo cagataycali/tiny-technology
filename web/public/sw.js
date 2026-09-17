@@ -13,6 +13,11 @@
 //     Android rendered it squished in every push notification)
 // v5: brand mark redesign (meta-agent orbit node, scripts/gen-logo.mjs) —
 //     purge the precached old-sprout icon-192 so pushes show the new mark
+// (no v6: the loudness ladder below changes no cached asset. Every bump above
+//  exists to PURGE something stale; this file is not itself cacheable — the
+//  fetch handler skips it (not /_next/static/, not a navigation, not in the
+//  media regex), so the browser's own SW update check delivers it and a bump
+//  would only evict working caches for nothing.)
 const CACHE = 'tiny-v5'
 const DEV = self.location.hostname === 'localhost' || self.location.hostname === '127.0.0.1'
 // icon-192 precached: it's the notification icon/badge — offline pushes
@@ -80,19 +85,55 @@ self.addEventListener('fetch', (e) => {
   }
 })
 
+/**
+ * 🔔 How loudly a push arrives — the WEB twin of lib/push/loudness.ts
+ * (AMBIENT_TAG_PREFIXES / webNotificationLoudness), mirrored here because a
+ * service worker has no bundler and cannot import it.
+ * tests/push-loudness.test.ts compares the two so they cannot drift.
+ *
+ * ⚠️ THIS FILE USED TO SET `vibrate: [100, 50, 100]` AND `renotify: true` FOR
+ * EVERY TAG, which is not the absence of a loudness decision but the loud end
+ * chosen for every case at once — the same defect Android had at the quiet end
+ * and iOS had at this one. `renotify` is the sharp part: `tiny-visit-<slug>` is
+ * stable per tiny, so each visit REPLACES the last notification, and renotify
+ * makes every replacement re-alert. The worker throttles that push to one per
+ * 5 min per tiny *because* it repeats; this file then made the repetition the
+ * loudest thing about it.
+ *
+ * ⚠️⚠️ `silent: true` AND `vibrate` TOGETHER THROW A TypeError (Notifications
+ * spec, "create a notification" step 2) — and showNotification is awaited inside
+ * waitUntil below, so a throw shows NOTHING AT ALL. The two arms are therefore
+ * exclusive: never add `silent` alongside the `vibrate` line, or "too loud"
+ * becomes "never arrives".
+ *
+ * ⚠️ `silent` is not Baseline (Firefox ignores it). An unknown dictionary member
+ * is dropped, not thrown, so where it is unsupported the notification falls back
+ * to the device's own default — quieter than the forced buzz it replaces, never
+ * louder. Degrading monotonically is what makes it worth setting.
+ */
+const AMBIENT_TAG_PREFIXES = ['tiny-visit-']
+
+function notificationLoudness(tag) {
+  const t = String(tag || '')
+  return AMBIENT_TAG_PREFIXES.some((p) => t.startsWith(p))
+    ? { silent: true, renotify: false }
+    : { vibrate: [100, 50, 100], renotify: true }
+}
+
 // Web Push — payload: { title, body, icon?, tag?, data?: { url? }, actions? }
 self.addEventListener('push', (e) => {
   let data = { title: 'tiny', body: 'New activity on your tiny' }
   try { if (e.data) data = { ...data, ...e.data.json() } }
   catch (_) { if (e.data) data.body = e.data.text() }
+  // Non-empty either way — renotify with an empty tag is spec step 3's TypeError.
+  const tag = data.tag || 'tiny-notification'
   e.waitUntil(
     self.registration.showNotification(data.title, {
       body: data.body,
       icon: data.icon || '/icon-192.png',
       badge: '/icon-192.png',
-      vibrate: [100, 50, 100],
-      tag: data.tag || 'tiny-notification',
-      renotify: true,
+      tag,
+      ...notificationLoudness(tag),
       data: data.data || {},
       actions: data.actions || [],
     })
@@ -131,13 +172,18 @@ self.addEventListener('notificationclick', (e) => {
 self.addEventListener('message', (e) => {
   const msg = e.data || {}
   if (msg.type === 'SHOW_NOTIFICATION') {
+    // Same ladder as the push handler — a page-posted notification carries the
+    // same tags, so hardcoding loudness here would re-open the hole on the
+    // other half of the file. The default tag is unique per call, so it never
+    // matches an ambient prefix and this path stays loud unless a caller passes
+    // a genuinely ambient tag.
+    const tag = msg.tag || `tiny-${Date.now()}`
     self.registration.showNotification(msg.title || 'tiny', {
       body: msg.body,
       icon: msg.icon || '/icon-192.png',
       badge: '/icon-192.png',
-      vibrate: [100, 50, 100],
-      tag: msg.tag || `tiny-${Date.now()}`,
-      renotify: true,
+      tag,
+      ...notificationLoudness(tag),
       data: { url: msg.url || '/' },
       actions: msg.actions || [],
     })

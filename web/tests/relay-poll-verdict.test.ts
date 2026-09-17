@@ -56,27 +56,6 @@ const relayPoll = () =>
   between(raw('ios/Tiny/Sources/TinyLive.swift'), 'enum RelayPoll {', '\nfinal class SegmentAudio',
           'RelayPoll')
 
-/**
- * The body of ONE `switch` arm: from its label to the next label, `default:`, or
- * the brace closing the switch — whichever comes first.
- *
- * ⚠️ Order-INDEPENDENT on purpose. This began as `slice(from .deviceSilent, to
- * .couldNotAsk)`, which quietly required the arms to be written in that order —
- * and Swift is indifferent to the order of two distinct cases. A probe that
- * merely SWAPPED them, changing nothing a compiler or a user could observe,
- * turned this suite red. A pin that punishes a neutral refactor teaches the next
- * reader to delete it, and it would have been deleted for the wrong reason.
- * (A continuation line — `+ "…"` — is not a label, so a multi-line arm survives
- * the scan.)
- */
-const armOf = (body: string, label: string, what: string) => {
-  const at = body.indexOf(label)
-  expect(at, `${what}: the ${label} arm is gone — re-anchor`).toBeGreaterThan(-1)
-  const rest = body.slice(at + label.length)
-  const end = /\n\s*(?:case\s|default:|\})/.exec(rest)
-  return end ? rest.slice(0, end.index) : rest
-}
-
 describe('a timeout must be EARNED by reading the mailbox', () => {
   /**
    * The rule, on both loops at once. `.noReply` / "didn't answer" is a claim
@@ -88,13 +67,14 @@ describe('a timeout must be EARNED by reading the mailbox', () => {
       ['frameResult', frameResult(), '.noReply(seconds:'],
       ['flipper', flipperCheck(), "didn't answer in"],
     ] as const) {
+      const silent = body.indexOf('case .deviceSilent:')
+      const other = body.indexOf('case .couldNotAsk', silent)
+      expect(silent, `${what}: the verdict switch is gone`).toBeGreaterThan(-1)
+      expect(other, `${what}: the .couldNotAsk arm is gone`).toBeGreaterThan(silent)
       // ⚠️ Containment, not `claim > silent`: an index merely GREATER than the
       // `.deviceSilent` label is also satisfied by the blame moved INTO
-      // `.couldNotAsk`, which is the original bug wearing the new switch. And
-      // containment of the ARM (see `armOf`), not of the span between the two
-      // labels, so the arms may be written in either order.
-      expect(body, `${what}: the .couldNotAsk arm is gone`).toContain('case .couldNotAsk')
-      const observed = armOf(body, 'case .deviceSilent:', what)
+      // `.couldNotAsk`, which is the original bug wearing the new switch.
+      const observed = body.slice(silent, other)
       expect(observed, `${what}: the timeout copy left the .deviceSilent arm`).toContain(blame)
       // …and exactly once in the whole loop, so a second unguarded copy can't
       // creep back into the refusal path beside it.

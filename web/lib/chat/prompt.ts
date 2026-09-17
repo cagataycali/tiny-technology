@@ -107,7 +107,16 @@ const CAPABILITY_HINTS: Record<string, string> = {
   // Bluetooth so it answers with no cable and no laptop awake. A separate label
   // because the two transports are not interchangeable — BLE has no receive
   // command at all (lib/chat/tools/flipper.ts FLIPPER_BLE_CAP).
-  flipper_ble: 'a Flipper Zero over Bluetooth from that phone — status, SD card, beep, but no radio capture (flipper_status / flipper_files)',
+  //
+  // ⚠️ Every capability here names the tool that does it, and "beep" is why the
+  // rule is written down: this hint offered one while the roster held only
+  // flipper_status and flipper_files, so the agent read a capability it had no
+  // way to use — and the phone has executed `alert` since P1. Deliberately NOT
+  // imported from flipper.ts (this module must stay free of the tool stack:
+  // buildSoulPrompt runs everywhere and its tests import it directly), so the
+  // pin lives in tests/flipper-ble.test.ts instead: a capability claimed with no
+  // tool beside it is the same defect either side of the seam.
+  flipper_ble: 'a Flipper Zero over Bluetooth from that phone — status, SD-card listing, and its find-me alert (a beep if that board has sound on), but no radio capture (flipper_status / flipper_files / flipper_find)',
   files: 'shell + files',
   mcp: '',   // every CLI node speaks MCP — noise in a per-device line
   // Always registered, so it carries no information about THIS machine — but it
@@ -115,29 +124,133 @@ const CAPABILITY_HINTS: Record<string, string> = {
   // user through connecting Google/Spotify/Telegram/WhatsApp on that box. Named
   // rather than blanked like `mcp`, because it is a route the agent can take.
   integrations: 'can be walked through connecting Google/Spotify/Telegram/WhatsApp (use_integrations)',
+
+  // ── 📱 THE PHONES, and the necklaces they carry ───────────────────────────
+  //
+  // ⚠️ Everything above is a LAPTOP label. The table stopped there for its whole
+  // life, and the roster below said "plus the ones a PHONE declares" while
+  // holding exactly one of them (`flipper_ble`). So a Pixel's whole line read
+  //
+  //     — can: chat; location; bluetooth_scan; speak; open_app; screenshot; glasses; record
+  //
+  // eight wire tokens, underscores and all, and an iPhone's read the same plus
+  // image_gen. That IS the reported bug: asked to open Mail on the iPhone, the
+  // agent recited "your iPhone daemon only advertises chat + bluetooth_scan +
+  // location" — the bare tokens, verbatim — and reasoned from them that opening
+  // an app was merely "lightweight" rather than a thing `open_app` names. The
+  // phone's own Session.swift calls that the canonical mis-inference.
+  //
+  // These are not cosmetic. `record` RESOLVES a device (nicla-voice.ts
+  // RECORD_CAP filters the fleet by it), and the whole block instructs the model
+  // to "match the task to a device that can do it" — from this line alone.
+  //
+  // Each hint names the TOOL, same rule as above, and each was checked against
+  // what the phones really run. Where the honest answer is "the invoke itself",
+  // it says so rather than inventing a tool: use_device action:'invoke' proxies
+  // the prompt to the phone's own agent turn, which appends live context for
+  // location/bluetooth/motion questions (Session.swift's relay loop).
+  // ⚠️ NO '; ' INSIDE A HINT. capabilitySummary joins the segments with '; ', so
+  // a semicolon here splits one capability into two — which the roster test reads
+  // as a bare word and the agent reads as a capability nobody declared. Commas
+  // and em-dashes only; tests/prompt.test.ts and flipper-ble.test.ts both pin it.
+  //
+  // ⚠️ And `chat` is declared by ROBOTS as well as phones (the live printer sends
+  // ["chat","telemetry","print","cad"]), so no hint here may say "phone" unless
+  // only a phone can declare it. This line is the agent's whole model of the
+  // device — a wrong noun in it is a wrong plan.
+  chat: 'answers a prompt with its own local agent (use_device invoke)',
+  location: "reports where it is, live (use_device invoke — ask 'where are you')",
+  bluetooth_scan: 'scans for Bluetooth devices around it (use_device invoke — ask what is nearby)',
+  speak: 'says something out loud (use_device invoke — "say …"), quiet-hours gated',
+  // The reported bug's own capability. Naming the shape is what lets the agent
+  // ask for a link instead of guessing whether "open Mail" is possible at all —
+  // the schemes are the phone's allowlist (DeviceTools.openURLSchemes).
+  open_app: 'opens an app or link — mail, maps, music, a web page (use_device invoke, tiny app foregrounded)',
+  // `nicla_voice_record` is safe to name here and the three below are NOT: it
+  // RESOLVES a phone (resolvePhone filters the fleet by RECORD_CAP) and is
+  // mounted on every surface, so whoever reads this line can actually call it.
+  record: 'records its mic and answers with a TRANSCRIPT (nicla_voice_record)',
+  // ⚠️⚠️ THESE THREE NAME `use_device invoke`, NOT THEIR TOOL, AND THAT IS THE
+  // WHOLE POINT. `screenshot`, `generate_image` and the four `meta_*` tools take
+  // NO device_id — they act on whichever device is holding the stream — and the
+  // chat route mounts them only for `x-tiny-session: tiny-ios`/`tiny-android`
+  // (generate_image: iOS alone). This block, though, is rendered from ONE text
+  // for every surface and describes OTHER devices, so naming the raw tool was
+  // wrong twice over: on the web the agent has no such tool at all, and on a
+  // phone the tool would capture the READER rather than the row it is written on.
+  //
+  // The path that really reaches a listed device is the one the block's own
+  // closing sentence names. `use_device invoke` proxies the prompt to that
+  // device's own agent turn, which announces itself as a native session and so
+  // mounts these tools for real (Session.runDeviceEvent's `.screenshot` /
+  // `.generateImage` / `.metaTakePhoto` arms → consent → capture → the
+  // tool-result mailbox). Nothing is lost by not naming them: a phone chatting
+  // locally still has each tool mounted with its own description.
+  screenshot: 'shows its screen, one consent tap per capture (use_device invoke — ask it for its screen, tiny app foregrounded)',
+  image_gen: 'generates an image on the device itself, privately (use_device invoke — ask it for the picture)',
+  glasses: 'bridges the Meta glasses it is paired with — camera, mic, status (use_device invoke — ask it to look, listen, or check the link)',
+  // ── The necklaces (TinySetup/Nearby enrol these) — BOARDS, not phones ──
+  camera: 'a wearable camera — what is in front of the user (nicla_take_photo / nicla_take_video)',
+  mic: 'a wearable microphone (nicla_listen on the Vision — the Voice board only spots wake words)',
+  wake: 'listens for a wake word on its own neural chip, always on (nicla_voice_status / nicla_voice_wakes)',
+  // No tool reaches these, and saying so is the point: they are why the board is
+  // where it is, and a hint that named a tool would be a promise nobody keeps.
+  tof: 'a distance sensor, reported by nicla_status but read by no tool directly',
+  imu: 'motion + orientation, reported by nicla_status but read by no tool directly',
+  ble: "the board's Bluetooth radio — how a phone relays it (no tool of its own)",
+  wifi: "its own WiFi, so it reaches the internet with no phone (no tool of its own)",
+  // ── Endpoint robots: machines running their own always-on authenticated API ──
+  print: 'a 3D printer that can be sent a job and watched (use_device invoke)',
+  telemetry: 'reports its own live sensor readings (use_device invoke)',
+  cad: 'accepts a CAD/model file to build (use_device invoke)',
 }
 
 /**
- * Every label a current daemon can declare — the roster, in the order
- * makeDeviceTools() pushes them (tiny-tech/src/agent/device-tools.ts) after
- * buildCapabilities prepends the base pair (tiny-tech/src/device.ts) — plus the
- * ones a PHONE declares, which are not daemon labels at all but reach the same
- * prompt line through the same column (`flipper_ble`, from the tiny app's
- * Session.beatCapabilities).
+ * Every label ANY device on this account can declare — the roster: CLI daemons
+ * in the order makeDeviceTools() pushes them (tiny-tech/src/agent/device-tools.ts)
+ * after buildCapabilities prepends the base pair (tiny-tech/src/device.ts), then
+ * the two PHONES, the two necklace BOARDS, and the endpoint robots. All five
+ * kinds reach the same prompt line through the same `capabilities` column, so
+ * they all belong to the same guard.
  *
  * ⚠️ Why a hand-kept copy instead of an import: tiny-tech is a SEPARATE repo,
  * gitignored here and not an npm dependency of the web app, so there is nothing
  * to import at build or test time. That makes drift possible, so the point of
  * this list is not to be authoritative — it is to make the drift FAIL A TEST
- * instead of silently degrading one line of a system prompt. When tiny-tech
- * gains a label, add it here WITH a sentence in CAPABILITY_HINTS above.
+ * instead of silently degrading one line of a system prompt. When a client gains
+ * a label, add it here WITH a sentence in CAPABILITY_HINTS above.
+ *
+ * ⚠️⚠️ AND THAT IS EXACTLY WHAT DRIFTED, IN THE DIRECTION THIS COMMENT DIDN'T
+ * WATCH. It used to end at `flipper_ble` while claiming to hold "the ones a PHONE
+ * declares" — one of seventeen. Counted from the clients themselves, 20 tokens are
+ * declared on the wire (17 by the phones and boards, 3 more by the live printer)
+ * and 19 of them were outside this list, so the test below could not see a single
+ * one, and every one of them reached the agent as a bare wire token. Whole classes
+ * of device were invisible to a guard that read as if it covered everything.
+ *
+ * 🔑 Why it hid for so long, and the rule to take from it: the guard's own
+ * failure message ("add a CAPABILITY_HINTS sentence") speaks as if the ROSTER
+ * were the fixed input and the hints the thing to maintain. But the roster IS the
+ * input, and a guard cannot report what its input omits — a missing entry is
+ * silent by construction, and the more confidently the docstring describes the
+ * coverage, the less anyone re-derives it. So `tests/prompt.test.ts` now DERIVES
+ * this list from the clients that declare the tokens rather than trusting it.
  */
 export const DEVICE_LABELS = [
   'mcp', 'files',                                   // base pair, every CLI node
   'apple', 'spotify', 'computer', 'browse', 'desktop',
   'windows', 'voice', 'ocr', 'see',                 // label-only: ride on the two above
   'flipper', 'adb', 'whatsapp', 'google', 'telegram', 'integrations',
+  // 📱 The phones (iOS Session.capabilities + beatCapabilities, Android
+  // FleetManager.capabilities) — not daemon labels at all.
+  'chat', 'location', 'bluetooth_scan', 'speak', 'open_app', 'record',
+  'screenshot', 'glasses', 'image_gen',             // image_gen: iPhone only
   'flipper_ble',                                    // app-declared, not a daemon
+  // 💎 The necklace boards (iOS TinySetup, Android Nearby): a Nicla Vision
+  // declares the first six, a Nicla Voice mic/wake/imu/ble.
+  'camera', 'mic', 'tof', 'imu', 'ble', 'wifi', 'wake',
+  // 🖨️ Endpoint robots, which declare whatever their own API says it can do.
+  'print', 'telemetry', 'cad',
 ] as const
 
 /**
@@ -167,17 +280,159 @@ export function capabilitySummary(raw: unknown): string {
 }
 
 /**
+ * ⏱️ How long ago a row last spoke — in words the model can COMPARE.
+ *
+ * Presence in this block was a BOOLEAN, and a boolean cannot rank two offline
+ * rows. That costs nothing until one device enrolls twice, which is routine: the
+ * id lives in the Keychain, so a reinstall, a restore, or iOS's own `reEnroll()`
+ * after two "unknown device" strikes all mint a NEW row under the same
+ * `"<login>-<model>"` name and abandon the old one. Nothing deletes the corpse —
+ * `last_seen` just freezes, with the capability list the device happened to
+ * declare back then.
+ *
+ * The account this shipped from held exactly that: two rows named
+ * `studio-iphone`, both `⚫ offline`, one declaring ten capabilities
+ * (including `open_app`) and one declaring three. The agent ran
+ * `use_device invoke` against the live row, Mail really opened on the phone —
+ * and then told the user their "iPhone daemon only advertises chat +
+ * bluetooth_scan + location", which is the dead row's list, verbatim. The action
+ * succeeded and the sentence about it was false, because the block rendered both
+ * rows identically and the model had no way to tell a phone in a pocket from a
+ * row six days dead. `use_device action:'list'` already returns
+ * `last_seen_seconds_ago` for exactly this reason; the prompt is the surface that
+ * never got it.
+ */
+export function lastSeenPhrase(secondsAgo: unknown): string {
+  const n = Number(secondsAgo)
+  if (secondsAgo === null || secondsAgo === undefined || !Number.isFinite(n)) return 'never connected'
+  const s = Math.max(0, Math.floor(n))
+  if (s < 60) return `last seen ${s}s ago`
+  if (s < 3600) return `last seen ${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `last seen ${Math.floor(s / 3600)}h ago`
+  return `last seen ${Math.floor(s / 86400)}d ago`
+}
+
+/**
+ * ⚠️ `Number(null)` is 0, not NaN — so `Number.isFinite` ALONE accepts a missing
+ * timestamp as "the epoch" and reports an age of 20669 days for a device that has
+ * simply never heartbeated (every endpoint row carries `last_seen: null` by
+ * design). A fabricated age is worse than none, because it reads as a
+ * measurement.
+ */
+function seenAt(d: any): number | null {
+  const raw = d?.last_seen
+  if (raw === null || raw === undefined || raw === '') return null
+  const n = Number(raw)
+  return Number.isFinite(n) ? n : null
+}
+
+export type DuplicateRole = 'current' | 'superseded'
+
+/**
+ * 🔀 Which row currently OWNS each device name, and which rows are its corpses.
+ *
+ * Returned keyed by device id; a row whose name is unique is ABSENT from the map
+ * (no claim to make). Shared by the system prompt's device block and
+ * `use_device action:'list'` for the same reason `parseCapabilities` is: those
+ * two surfaces describe the same rows to the same model, and the failure mode
+ * here is the model believing the surface that happened to be wrong.
+ *
+ * Ranking is by `last_seen`, never by arrival order — the worker sorts
+ * `last_seen DESC` today, but that is an ORDER BY in a different repo, and the
+ * price of it changing is the agent quoting a dead phone's capability list as a
+ * live phone's limits.
+ *
+ * Two rows that cannot be ranked (both without a timestamp, or an exact tie) are
+ * left unmarked rather than guessed at: this map exists to stop a false claim,
+ * so inventing one would defeat it.
+ */
+export function duplicateRoles(devices: unknown): Map<string, DuplicateRole> {
+  const out = new Map<string, DuplicateRole>()
+  if (!Array.isArray(devices)) return out
+
+  const nameKey = (d: any) => String(d?.name ?? '').trim().toLowerCase()
+  const freshest = new Map<string, number>()
+  const rows = new Map<string, number>()
+  for (const d of devices as any[]) {
+    const key = nameKey(d)
+    rows.set(key, (rows.get(key) || 0) + 1)
+    const seen = seenAt(d)
+    if (seen === null) continue
+    const cur = freshest.get(key)
+    if (cur === undefined || seen > cur) freshest.set(key, seen)
+  }
+
+  for (const d of devices as any[]) {
+    const key = nameKey(d)
+    if ((rows.get(key) || 0) < 2) continue
+    const top = freshest.get(key)
+    if (top === undefined) continue          // nothing in this group ever beat
+    const seen = seenAt(d)
+    out.set(String(d?.id), seen !== null && seen === top ? 'current' : 'superseded')
+  }
+  return out
+}
+
+/**
  * The `## 💻 Enrolled devices` block. Extracted from app/api/chat/route.ts so
  * the capability rendering is testable without a request.
+ *
+ * `nowSeconds` is a parameter, not a `Date.now()` read inside the loop, so the
+ * age words are a pure function of the rows and a test can pin them.
  */
-export function buildDeviceBlock(devices: unknown): string {
+export function buildDeviceBlock(devices: unknown, nowSeconds = Math.floor(Date.now() / 1000)): string {
   if (!Array.isArray(devices) || !devices.length) return ''
-  const lines = devices.map((d: any) =>
-    `- ${d.name} (${d.kind || 'cli'}, ${d.platform || '?'}) — ${d.online ? '🟢 ONLINE' : '⚫ offline'} [id: ${d.id}]${capabilitySummary(d.capabilities)}`,
-  )
+
+  const roles = duplicateRoles(devices)
+
+  let anySuperseded = false
+  const lines = (devices as any[]).map((d: any) => {
+    const seen = seenAt(d)
+    const ageSeconds = seen === null ? null : nowSeconds - seen
+
+    // ⚠️ `online: null` is NOT offline. An endpoint device (a printer, a robot
+    // behind its own always-on API) never heartbeats, so the worker reports
+    // `null` — unknown from here — precisely so nothing pins it to false
+    // forever. `use_device action:'list'` preserves that null and says
+    // "reachability unknown until invoked"; this line coerced it with a truthy
+    // test and called every healthy robot ⚫ offline, which is the one reading
+    // that makes an agent refuse to try. Same claim, two surfaces, fixed on one.
+    const presence = d?.online
+      ? '🟢 ONLINE'
+      : d?.online === null || d?.online === undefined
+        ? '◽ reachability unknown until invoked'
+        : `⚫ offline, ${lastSeenPhrase(ageSeconds)}`
+
+    // Only speak about duplicates when there ARE duplicates: on the common
+    // one-row-per-name fleet these markers would be noise the model has to
+    // reason past on every single turn.
+    let dup = ''
+    const role = roles.get(String(d?.id))
+    if (role === 'current') {
+      dup = ' ✅ CURRENT row for this name'
+    } else if (role === 'superseded') {
+      // ⚠️ Deliberately does NOT contain the word CURRENT. Both markers are read
+      // per LINE, and a marker that quotes the other one makes "this row is not
+      // marked current" unassertable — the attribution could invert with every
+      // test still green, which is the original bug wearing extra words.
+      dup = ' ⚠️ SUPERSEDED — an older enrollment of this same name, replaced by the row marked ✅'
+      anySuperseded = true
+    }
+
+    return `- ${d?.name} (${d?.kind || 'cli'}, ${d?.platform || '?'}) — ${presence} [id: ${d?.id}]${dup}${capabilitySummary(d?.capabilities)}`
+  })
+
+  // The duplicate paragraph earns its tokens only when a superseded row is
+  // actually on screen — and when it is, it has to say the thing the model got
+  // wrong: not "prefer the newer row" but "do not make a NEGATIVE claim to the
+  // user from a row you can see is dead".
+  const dupNote = anySuperseded
+    ? `\nA ⚠️ SUPERSEDED row is the same physical device enrolled again (reinstall, restore, or re-enrollment); its listed abilities are frozen at its last heartbeat and are NOT what the device has today. When rows share a name, the ✅ CURRENT row is the device. Never tell the user a device lacks something you read off a superseded row — check the current row, or just try use_device action:'invoke', because a real attempt is the only proof and understating a device the user owns is worse than attempting it.`
+    : ''
+
   return `\n## 💻 Enrolled devices (${devices.length}) — reachable via use_device
 ${lines.join('\n')}
-Online devices execute prompts locally (real shell/files) via use_device action:'invoke'. Their listed capabilities are the tools that device ACTUALLY has — match the task to a device that can do it, and don't ask a device for a tool it never declared. A prompt that outlives the ~45s wait comes back later as a device_result event with a claim ticket.`
+Online devices execute prompts locally (real shell/files) via use_device action:'invoke'. Their listed capabilities are the tools that device ACTUALLY has — match the task to a device that can do it, and don't ask a device for a tool it never declared. A prompt that outlives the ~45s wait comes back later as a device_result event with a claim ticket.${dupNote}`
 }
 
 /**
@@ -265,12 +520,6 @@ export const EVENT_ICONS: Record<string, string> = {
   job_missed: '⛔',
   tiny_visit: '🚶', follow: '🤝', dm: '💬',
   device_result: '💻',
-  // 🚫 not 💻: the device NEVER ran this one, and the task is gone. The agent's
-  // next sentence differs the same way ⛔ differs from ❌ above — "your laptop
-  // finished, here's the result" vs "it never picked this up; ask again while
-  // it's online". This table is keyed exactly, so it cannot inherit 💻 the way
-  // the prefix-matched HUD tables could.
-  device_missed: '🚫',
   'tool-update': '🔧',                                        // upstream tool moved; needs a marketplace check
   telegram: '✈️', telegram_out: '✈️', telegram_button: '✈️',
   pay_alarm: '🚨',                                            // x402 reconciliation needs a human — the loudest row there is
@@ -296,9 +545,19 @@ export const EVENT_ICONS: Record<string, string> = {
   // the Vision's camera reporting motion.
   //
   // 📝 `device_note` is the one that was actively misleading rather than merely
-  // ℹ: it is NiclaRecorder's fallback rail while /api/devices/transcript is
-  // undeployed (the current production state), so it carries transcript text,
-  // and on the HUD the `device` prefix key rendered it as a finished laptop task.
+  // ℹ: it is NiclaRecorder's fallback rail when /api/devices/transcript does not
+  // answer, so it carries transcript text, and on the HUD the `device` prefix key
+  // rendered it as a finished laptop task.
+  //
+  // ⚠️ That rail is now the EXCEPTION, not the rule — this block used to say the
+  // route was undeployed "(the current production state)" and that has been false
+  // since it shipped. Probed 2026-08-02: POST https://tiny.technology/api/devices/
+  // transcript answers 401 `unknown device`, which is the worker's own device-auth
+  // SQL declining an unenrolled probe — byte-identical in kind to what
+  // /api/devices/event returns, and unreachable unless the route exists. So most
+  // takes now land as `nicla_transcript` with a fetchable id, and a `device_note`
+  // means the POST actually failed. The glyph still has to be its own, for the
+  // same reason: when this rail carries words, they are the user's own voice.
   // Of every row in this block these are the ones most likely to be worth
   // raising unprompted — they are the user's own voice — and they arrived tagged
   // "informational".

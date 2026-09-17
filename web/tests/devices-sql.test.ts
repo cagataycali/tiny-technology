@@ -417,6 +417,184 @@ describe.skipIf(!present)('worker DEVICE_ROTATE_TOKEN_SQL (adopt without re-enro
   })
 })
 
+/**
+ * DEVICE_ADOPTABLE_BY_NAME_SQL + DEVICE_REENROLL_SQL — the duplicate-name guard.
+ *
+ * Measured 2026-08-14: a Nicla Vision whose flash had been wiped left THREE rows
+ * named `tiny-ae1d` in one fleet, two of them dead on arrival, because enroll
+ * inserted unconditionally. `enroll_vision.py` already refused this on the CLI
+ * path ("the same orphan by another route") while the server did not, so the app
+ * and the daemon had no way to be told.
+ *
+ * These tests pin the shape that makes adoption preferable to a 409. Refusing is
+ * not available: tiny-tech/src/device.ts enrollDevice() re-enrolls automatically
+ * whenever its identity file is gone or its heartbeat 401s, and throws when no
+ * token comes back — a 409 would strand every daemon that lost device.json. So
+ * the invariants are STALE-ONLY (a live namesake is a different device) plus the
+ * same privilege guards rotation carries, since this path is reached with only a
+ * session, never a device token.
+ */
+describe.skipIf(!present)('worker adopt-on-enroll (duplicate-name guard)', () => {
+  const NOW = 1_800_000
+  // What the handler binds as ?3: anything older than this is stale.
+  const cutoff = () => NOW - PRESENCE_WINDOW_S
+  const adoptable = (userId: string, name: string) =>
+    first(SQL.DEVICE_ADOPTABLE_BY_NAME_SQL, { 1: userId, 2: name, 3: cutoff() }) as any
+
+  it('a stale row with the same name is the one adopted', async () => {
+    await enroll('ad1', 'u-ad', 'tind_lost', { name: 'tiny-ae1d', now: NOW - 600 })
+    expect(adoptable('u-ad', 'tiny-ae1d')?.id).toBe('ad1')
+  })
+
+  it('a LIVE namesake is NOT adoptable — that would start a re-enroll war', async () => {
+    // Two machines sharing a hostname are two devices. Stealing the token of one
+    // that is heartbeating means it 401s, re-enrols, steals it back, forever —
+    // and the symptom is both devices flickering offline rather than an error.
+    await enroll('ad2', 'u-live', 'tind_here', { name: 'laptop', now: NOW - 5 })
+    expect(adoptable('u-live', 'laptop')).toBeFalsy()
+  })
+
+  it('the boundary is the presence window, not "recently"', async () => {
+    // Exactly at the cutoff is still live (`last_seen < ?3` is strict), one
+    // second older is stale. Pinned because an off-by-one here decides whether a
+    // working device gets its credential yanked.
+    await enroll('ad3', 'u-edge', 'tind_edge', { name: 'edge', now: cutoff() })
+    expect(adoptable('u-edge', 'edge')).toBeFalsy()
+    run('UPDATE devices SET last_seen = ?2 WHERE id = ?1', { 1: 'ad3', 2: cutoff() - 1 })
+    expect(adoptable('u-edge', 'edge')?.id).toBe('ad3')
+  })
+
+  it('a row that never once heartbeat (NULL last_seen) counts as stale', async () => {
+    // The emptiest orphan of all: a failed enrolment. If NULL were treated as
+    // "not stale" it would be the ONE state adoption can never clean up, and it
+    // is the exact state the two dead tiny-ae1d rows were in.
+    await enroll('ad4', 'u-null', 'tind_never', { name: 'never-seen' })
+    run('UPDATE devices SET last_seen = NULL WHERE id = ?1', { 1: 'ad4' })
+    expect(adoptable('u-null', 'never-seen')?.id).toBe('ad4')
+  })
+
+  it('a REVOKED row is never adoptable — revoke must stay enforceable', async () => {
+    // This is the sharpest edge of the whole feature. A daemon re-enrols on the
+    // very 401 that revoking causes, so if enroll adopted revoked rows, "revoke
+    // this device" would be undone by the device itself within 30 seconds.
+    await enroll('ad5', 'u-rev', 'tind_killed', { name: 'killed', now: NOW - 600 })
+    run(SQL.DEVICE_REVOKE_SQL, { 1: 'ad5', 2: 'u-rev' })
+    expect(adoptable('u-rev', 'killed')).toBeFalsy()
+    // And the UPDATE refuses independently — the SELECT is not the only gate,
+    // because the row can be revoked between the two.
+    expect(run(SQL.DEVICE_REENROLL_SQL, {
+      1: 'ad5', 2: 'u-rev', 3: await hashDeviceToken('tind_zombie'),
+      4: 'darwin', 5: 'cli', 6: sanitizeCapabilities([]),
+    }).changes).toBe(0)
+  })
+
+  it('an ENDPOINT row is never adoptable — it has no inbound token by design', async () => {
+    run(SQL.ENDPOINT_INSERT_SQL, {
+      1: 'ad6', 2: 'u-ep', 3: 'printer', 4: 'http', 5: 'endpoint',
+      6: sanitizeCapabilities(['print']), 7: NOW - 600, 8: 'https://printer.example', 9: 'sekret',
+    })
+    expect(adoptable('u-ep', 'printer')).toBeFalsy()
+    // Same escalation as DEVICE_ROTATE_TOKEN_SQL: adopting one would mint a
+    // working INBOUND credential for a device that must never have one.
+    expect(run(SQL.DEVICE_REENROLL_SQL, {
+      1: 'ad6', 2: 'u-ep', 3: await hashDeviceToken('tind_escalate'),
+      4: 'http', 5: 'cli', 6: sanitizeCapabilities([]),
+    }).changes).toBe(0)
+    expect((first('SELECT token_hash FROM devices WHERE id=?1', { 1: 'ad6' }) as any).token_hash).toBe('')
+  })
+
+  it('is owner-scoped — a shared name across accounts adopts nothing', async () => {
+    // "laptop" and "iphone" are the two commonest device names there are, so
+    // without user_id in the WHERE this would hand strangers each other's rows.
+    await enroll('ad7', 'user-a', 'tind_a', { name: 'laptop', now: NOW - 600 })
+    expect(adoptable('user-b', 'laptop')).toBeFalsy()
+    expect(run(SQL.DEVICE_REENROLL_SQL, {
+      1: 'ad7', 2: 'user-b', 3: await hashDeviceToken('tind_stolen'),
+      4: 'darwin', 5: 'cli', 6: sanitizeCapabilities([]),
+    }).changes).toBe(0)
+  })
+
+  it('a different name adopts nothing — this is not a fuzzy match', async () => {
+    await enroll('ad8', 'u-name', 'tind_n', { name: 'tiny-ae1d', now: NOW - 600 })
+    for (const other of ['tiny-ae1e', 'tiny-ae1', 'tiny-ae1d ', 'TINY-AE1D']) {
+      expect(adoptable('u-name', other), other).toBeFalsy()
+    }
+  })
+
+  it('among several stale rows the most-recently-seen wins, and NULL is last resort', async () => {
+    await enroll('ad9a', 'u-many', 'tind_1', { name: 'dup', now: NOW - 5000 })
+    await enroll('ad9b', 'u-many', 'tind_2', { name: 'dup', now: NOW - 600 })
+    await enroll('ad9c', 'u-many', 'tind_3', { name: 'dup', now: NOW - 900 })
+    run('UPDATE devices SET last_seen = NULL WHERE id = ?1', { 1: 'ad9a' })
+    // ORDER BY last_seen DESC, and sqlite sorts NULL last under DESC — so a row
+    // that never heartbeat is only picked when nothing better exists.
+    expect(adoptable('u-many', 'dup')?.id).toBe('ad9b')
+    run(SQL.DEVICE_REVOKE_SQL, { 1: 'ad9b', 2: 'u-many' })
+    expect(adoptable('u-many', 'dup')?.id).toBe('ad9c')
+    run(SQL.DEVICE_REVOKE_SQL, { 1: 'ad9c', 2: 'u-many' })
+    expect(adoptable('u-many', 'dup')?.id).toBe('ad9a')
+  })
+
+  it('re-enroll rotates the token and refreshes what the device says it is', async () => {
+    await enroll('ad10', 'u-re', 'tind_before', {
+      name: 'tiny-ae1d', platform: 'nicla-vision', kind: 'daemon',
+      capabilities: ['stream'], now: NOW - 600,
+    })
+    const res = run(SQL.DEVICE_REENROLL_SQL, {
+      1: 'ad10', 2: 'u-re', 3: await hashDeviceToken('tind_after'),
+      4: 'nicla-vision', 5: 'daemon', 6: sanitizeCapabilities(['stream', 'snapshot']),
+    })
+    expect(res.changes).toBe(1)
+    // New credential works, old one is dead — a handover, not a share.
+    expect(run(SQL.DEVICE_HEARTBEAT_SQL,
+      { 1: 'ad10', 2: NOW, 3: null, 4: await hashDeviceToken('tind_before'), 5: null }).changes).toBe(0)
+    const row: any = first(
+      'SELECT id, name, created_at, capabilities FROM devices WHERE id=?1', { 1: 'ad10' })
+    // The point of adopting instead of inserting: events and transcripts hang
+    // off the id, so the row identity and its history must survive.
+    expect(row.id).toBe('ad10')
+    expect(row.name).toBe('tiny-ae1d')
+    expect(row.created_at).toBe(NOW - 600)
+    // …while capabilities follow the enroller, which is the authority on what
+    // the hardware is NOW (a reflashed board can gain or lose a camera).
+    expect(row.capabilities).toBe(JSON.stringify(['stream', 'snapshot']))
+  })
+
+  it('re-enroll does NOT mark the device seen — presence is earned by heartbeat', async () => {
+    // Writing "seen now" here would show an unreachable board as online for a
+    // full presence window after a failed provisioning, which is the single most
+    // misleading state the fleet list can be in.
+    await enroll('ad11', 'u-seen', 'tind_p', { name: 'stale-board', now: NOW - 600 })
+    run(SQL.DEVICE_REENROLL_SQL, {
+      1: 'ad11', 2: 'u-seen', 3: await hashDeviceToken('tind_p2'),
+      4: 'nicla-vision', 5: 'daemon', 6: sanitizeCapabilities([]),
+    })
+    expect((first('SELECT last_seen FROM devices WHERE id=?1', { 1: 'ad11' }) as any).last_seen)
+      .toBe(NOW - 600)
+    // It is therefore STILL adoptable — a second lost token is not a second row.
+    expect(adoptable('u-seen', 'stale-board')?.id).toBe('ad11')
+  })
+
+  it('the reported bug: three enrolments of one board leave ONE row', async () => {
+    // The regression stated end to end. Each pass is a client that lost its
+    // token re-enrolling the same hardware; before the guard each minted a row
+    // and left the previous one frozen and offline in the owner's fleet.
+    await enroll('orph', 'u-bug', 'tind_v1', { name: 'tiny-ae1d', now: NOW - 7 * 86_400 })
+    for (const token of ['tind_v2', 'tind_v3']) {
+      const target = adoptable('u-bug', 'tiny-ae1d')
+      expect(target?.id, 'each re-enrolment must find the SAME row').toBe('orph')
+      run(SQL.DEVICE_REENROLL_SQL, {
+        1: target.id, 2: 'u-bug', 3: await hashDeviceToken(token),
+        4: 'nicla-vision', 5: 'daemon', 6: sanitizeCapabilities(['stream']),
+      })
+    }
+    expect((first(SQL.DEVICE_COUNT_SQL, { 1: 'u-bug' }) as any).n).toBe(1)
+    // And the credential in hand is the last one issued.
+    expect(run(SQL.DEVICE_HEARTBEAT_SQL,
+      { 1: 'orph', 2: NOW, 3: null, 4: await hashDeviceToken('tind_v3'), 5: null }).changes).toBe(1)
+  })
+})
+
 describe.skipIf(!present)('sanitizeCapabilities (bounded, safe)', () => {
   it('passes a clean array through', () => {
     expect(sanitizeCapabilities(['shell', 'files'])).toBe(JSON.stringify(['shell', 'files']))

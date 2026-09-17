@@ -17,7 +17,7 @@ import { makeLearnTool, makeRecallTool, makeUnlearnTool } from '@/lib/chat/tools
 import { makeSendMessageTool, makeReadMessagesTool } from '@/lib/chat/tools/messages'
 import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
 import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
-import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool, makeFlipperFindTool } from '@/lib/chat/tools/flipper'
 
 export const runtime = 'edge'
 
@@ -86,15 +86,20 @@ export async function POST(req: Request) {
     makeNiclaVoiceRecordTool(session.sub),
     makeNiclaVoiceTranscriptsTool(session.sub),
     makeNiclaVoiceTranscriptTool(session.sub),
-    // 🐬 All three take this bridge's budget — see VOICE_TOOL_BUDGET_S. A
+    // 🐬 All four take this bridge's budget — see VOICE_TOOL_BUDGET_S. A
     // spoken "is my Flipper reachable?" is the whole reason they are declared
     // to a web session (lib/voice/tools.ts), and until the bridge forwarded
     // unknown names (Chat.tsx runVoiceTool) it was answered "not available on
     // this device". flipper_listen keeps its refusals: capture is cable-only,
     // and a window this turn cannot host is declined in words.
+    //
+    // 🔔 flipper_find is the most spoken-word tool on this rail: "where's my
+    // Flipper?" out loud, hands empty, room to listen in. The board answers with
+    // a noise instead of a sentence, which is the only answer that helps here.
     makeFlipperStatusTool(session.sub, VOICE_TOOL_BUDGET_S),
     makeFlipperListenTool(session.sub, VOICE_TOOL_BUDGET_S),
     makeFlipperFilesTool(session.sub, VOICE_TOOL_BUDGET_S),
+    makeFlipperFindTool(session.sub, VOICE_TOOL_BUDGET_S),
   ]
   const tool = roster.find((t: any) => t.toolSpec?.name === toolName)
   if (!tool) return json({ ok: false, error: `'${toolName}' is not available on the voice bridge` }, 404)

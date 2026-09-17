@@ -17,6 +17,38 @@ const MEMORY_MAX = 100;
 const turnKey = (name: string) => `tiny_turnlog_${name}`;
 const memKey = (name: string) => `tiny_memories_${name}`;
 
+/**
+ * Truncate on a CODE-POINT boundary, never inside a surrogate pair.
+ *
+ * Three reasons this cannot be `slice`, all measured:
+ *
+ * 1. A `slice` counts UTF-16 code units, so a cut can land between the halves of
+ *    one emoji and leave a LONE SURROGATE (0xd83d). It is unpaired, so encoding
+ *    it to UTF-8 is lossy and the platforms disagree on the loss: the browser
+ *    writes U+FFFD (`ef bf bd`), the JVM writes `?` (`3f`). The same memory
+ *    therefore reaches the model as DIFFERENT BYTES depending on the phone —
+ *    and this file's whole promise is that it doesn't (iOS Continuity.swift:8,
+ *    Android Continuity.kt:30: "byte-compatible ... so the server-side agent
+ *    sees an identical context section regardless of platform").
+ * 2. The counts diverge even when nothing splits. Swift's `String.prefix`
+ *    counts GRAPHEME CLUSTERS, so one string is 499 characters to iOS and 502 to
+ *    web/Android — a cap of 500 cuts three surfaces at three different places.
+ *    Code points are the one unit all three can agree on (`Array.from` here,
+ *    `unicodeScalars` in Swift, `codePointCount` on the JVM).
+ * 3. It is not fixable by matching the browser instead: Swift's String CANNOT
+ *    represent a lone surrogate at all — it substitutes U+FFFD on construction
+ *    (measured). So "never split a character" is the only rule all three can
+ *    actually keep.
+ *
+ * Same rule, same rationale as the DM rail's `clipToCodePoints`
+ * (worker/src/messages.ts), which fixed this class for message
+ * previews. The continuity store never got it.
+ */
+export function clipToCodePoints(text: string, max: number): string {
+  const cps = Array.from(text);
+  return cps.length <= max ? text : cps.slice(0, max).join("");
+}
+
 function read<T>(key: string): T[] {
   if (typeof window === "undefined") return [];
   try {
@@ -75,7 +107,7 @@ function drop(key: string): boolean {
 export function appendTurn(name: string, q: string, a: string) {
   if (!q?.trim() || !a?.trim()) return;
   const log = read<TurnEntry>(turnKey(name));
-  log.push({ q: q.slice(0, 500), a: a.slice(0, 800), ts: Date.now() });
+  log.push({ q: clipToCodePoints(q, 500), a: clipToCodePoints(a, 800), ts: Date.now() });
   // Deliberately still void. Nothing claims a turn was logged — it is
   // background bookkeeping after every reply, and a toast per turn would be
   // noise. A legitimate silence is a pass (G2's own rule).
@@ -100,7 +132,7 @@ export function addMemory(name: string, content: string, tags?: string[]): boole
   const mems = read<MemoryEntry>(memKey(name));
   mems.push({
     id: Math.random().toString(36).slice(2),
-    content: content.slice(0, 1000),
+    content: clipToCodePoints(content, 1000),
     tags,
     ts: Date.now(),
   });

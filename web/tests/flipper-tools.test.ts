@@ -3,9 +3,11 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import * as flipperModule from '../lib/chat/tools/flipper'
 import {
-  makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool,
+  makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool, makeFlipperFindTool,
   resolveFlipperHosts, parseCaps, listenBudget, FLIPPER_CAP, FLIPPER_BLE_CAP, MAX_LISTEN_S,
+  ALERT_WAIT_S, BLE_ROUND_TRIP_S,
 } from '../lib/chat/tools/flipper'
 
 /** The cabled route only — what this suite was written about. */
@@ -40,7 +42,18 @@ const resolveCable = async (u: string) => (await resolveFlipperHosts(u)).cable
  *    sends the user to charge a device whose battery is fine; the fix is to wake
  *    the laptop or start the CLI.
  */
-const NAMES = ['flipper_status', 'flipper_listen', 'flipper_files']
+const NAMES = ['flipper_status', 'flipper_listen', 'flipper_files', 'flipper_find']
+
+/**
+ * ⚠️ DERIVED from the module, never typed again. Bug class 3 is roster drift, and
+ * a hand-written list of factories in the suite that guards against it is the
+ * same defect one layer up: flipper_find (c22) could be written, exported and
+ * wired into all four routes while every test here still said "the three
+ * factories" and passed. The module IS the registry — so read it, and NAMES
+ * above stays hand-written as the expected contract, which is what makes the
+ * comparison mean something in both directions.
+ */
+const FACTORIES = Object.keys(flipperModule).filter(k => /^makeFlipper\w+Tool$/.test(k))
 const src = (p: string) => readFileSync(join(__dirname, '..', p), 'utf8')
 
 const realFetch = global.fetch
@@ -63,22 +76,24 @@ function stubWorker(devices: any[], reply?: string) {
 
 /** A laptop node with a Flipper on a serial port right now. */
 const host = (over: any = {}) => ({
-  id: 'h1', name: "studio mac", platform: 'darwin-arm64', online: true,
+  id: 'h1', name: "cagatay's mac", platform: 'darwin-arm64', online: true,
   capabilities: JSON.stringify(['mcp', 'files', 'computer', 'flipper']), ...over,
 })
 
 describe('flipper tool identity', () => {
-  it('the three factories produce exactly the three expected names', () => {
-    const tools = [makeFlipperStatusTool('u1'), makeFlipperListenTool('u1'), makeFlipperFilesTool('u1')]
-    expect(tools.map((t: any) => t.toolSpec.name)).toEqual(NAMES)
+  it('every factory the module exports produces exactly one expected name', () => {
+    expect(FACTORIES.length, 'no makeFlipper*Tool exports found — the derivation is broken')
+      .toBe(NAMES.length)
+    const tools = FACTORIES.map(f => (flipperModule as any)[f]('u1'))
+    expect(tools.map((t: any) => t.toolSpec.name).sort()).toEqual([...NAMES].sort())
   })
 
-  it('all three refuse without a user — devices belong to an account', async () => {
-    for (const make of [makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool]) {
-      const t: any = make(null)
+  it('all of them refuse without a user — devices belong to an account', async () => {
+    for (const f of FACTORIES) {
+      const t: any = (flipperModule as any)[f](null)
       const out = await t._callback({ radio: 'ir' })
-      expect(out.ok).toBe(false)
-      expect(String(out.error)).toMatch(/login/i)
+      expect(out.ok, `${f} ran without a user`).toBe(false)
+      expect(String(out.error), `${f} refused for the wrong reason`).toMatch(/login/i)
     }
   })
 
@@ -120,7 +135,7 @@ describe('resolving the host', () => {
 
   it('resolves both routes independently', async () => {
     stubWorker([
-      host({ id: 'phone', name: 'my-iphone', platform: 'ios-arm64',
+      host({ id: 'phone', name: 'owner-phone', platform: 'ios-arm64',
              capabilities: JSON.stringify(['flipper_ble']) }),
       host(),
     ])
@@ -170,7 +185,7 @@ describe('unreachable is not broken', () => {
     expect(out.reachable).toBe(false)
     // The remedy is to wake the machine — saying "your Flipper is offline" would
     // send the user to charge a device whose battery is irrelevant.
-    expect(String(out.note)).toMatch(/studio mac/)
+    expect(String(out.note)).toMatch(/cagatay's mac/)
     expect(String(out.note)).toMatch(/no network of its own/i)
   })
 
@@ -189,6 +204,142 @@ describe('unreachable is not broken', () => {
     expect(out.ok).toBe(true)
     expect(out.reachable).toBe(true)
     expect(String(out.details)).toMatch(/unlshd-075/)
+  })
+})
+
+/**
+ * The overnight state of this account: the Flipper cabled to a mac mini that is
+ * asleep, AND bonded over BLE to the phone in the user's pocket (USB and BLE are
+ * independent transports — the board holds both at once). A capture asked in
+ * that state cannot use the phone, so it reports the sleeping machine. What it
+ * says about the phone while doing so is the whole finding: "not answering
+ * either" was emitted on the mere EXISTENCE of a BLE route, so the one link that
+ * was working got a hardware verdict nobody had tested, and the user was sent to
+ * debug Bluetooth instead of waking a mac.
+ */
+describe('a capture with the machine asleep and the phone awake', () => {
+  const sleeping = () => host({ online: false })
+  const phone = (over: any = {}) => host({
+    id: 'phone', name: 'owner-phone', platform: 'ios-arm64',
+    capabilities: JSON.stringify(['flipper_ble']), ...over,
+  })
+  const listen = (radio = 'ir') => (makeFlipperListenTool('u1') as any)._callback({ radio })
+
+  it('does not tell the user their working Bluetooth link is dead', async () => {
+    stubWorker([sleeping(), phone()])
+    const out = await listen()
+    expect(out.ok).toBe(false)
+    const err = String(out.error)
+    expect(err, 'this phone is heartbeating — nothing asked it anything').not.toMatch(/not answering/)
+    expect(err, 'still named, because it is the route that works').toMatch(/owner-phone/)
+    expect(err).toMatch(/is answering/)
+  })
+
+  it('names the real reason that phone cannot take a capture, and what to wake', async () => {
+    stubWorker([sleeping(), phone()])
+    const out = await listen('subghz')
+    const err = String(out.error)
+    // Not "offline", not "out of range" — a firmware fact, permanent.
+    expect(err).toMatch(/no receive command over BLE/)
+    // …and the remedy is this machine, since the phone can never do it.
+    expect(err).toMatch(/cagatay's mac/)
+    expect(err).toMatch(/is not heartbeating/)
+    // WAKE it — the cable is already in. "Plug it into a machine running the
+    // tiny CLI" is the right sentence for the no-cable-route-at-all branch and
+    // a nonsense one here, so it must not be copied across.
+    expect(err).toMatch(/waking this machine/)
+    expect(err).not.toMatch(/tiny-tech mesh/)
+    expect(out.offline).toBe(true)
+  })
+
+  it('still reports a silent phone when the phone really is silent', async () => {
+    // The clause was not wrong, it was unconditional. Both asleep = both said so.
+    stubWorker([sleeping(), phone({ online: false })])
+    const err = String((await listen()).error)
+    expect(err).toMatch(/The Bluetooth link on "owner-phone" is not answering either/)
+    expect(err).not.toMatch(/is answering —/)
+  })
+
+  it('a lone sleeping machine claims nothing about a phone that is not there', async () => {
+    stubWorker([sleeping()])
+    const err = String((await listen()).error)
+    expect(err).toMatch(/no network of its own/)
+    expect(err).not.toMatch(/Bluetooth/)
+    expect(err).not.toMatch(/owner-phone/)
+  })
+
+  it('a browsable action in the SAME state goes to the phone, not to that message', async () => {
+    // The invariant the wording leans on: an online phone is only ever *seen* by
+    // the offline branch when the action has no BLE form. If this ever routes to
+    // the sleeping cable instead, the sentence above becomes the wrong one.
+    stubWorker([sleeping(), phone()], '/ext/subghz  gate.sub 412B')
+    const out = await (makeFlipperFilesTool('u1') as any)._callback({ folder: '/ext/subghz' })
+    expect(out.ok).toBe(true)
+    expect(out.transport).toBe('ble')
+    expect(out.host).toBe('owner-phone')
+  })
+})
+
+/**
+ * P5's state, and the one this suite never had a test for: the cable is OUT, so
+ * the mac dropped the `flipper` capability within 30s, and the only route on the
+ * account is the phone — which is not heartbeating.
+ *
+ * This is where a phone's 🟢 stops being a proxy for "listening". The heartbeat
+ * (30s, 45s in Low Power Mode) and the relay poll (5s/15s) are started and
+ * cancelled TOGETHER by startDeviceLoops/stopDeviceLoops, TinyApp calls the second
+ * on `.background`, and the worker's presence window is 60s with the heartbeat as
+ * its only writer — so a pocketed phone shows online for up to a minute with
+ * nothing polling, and there is no silent push to wake it inside a tool's wait.
+ * Both sentences the user gets here therefore have to name the one fixable cause:
+ * the app has to be open. Neither of them named anything at all before.
+ */
+describe('the cable is out and the phone is in a pocket', () => {
+  const phone = (over: any = {}) => host({
+    id: 'phone', name: 'owner-phone', platform: 'ios-arm64', online: false,
+    capabilities: JSON.stringify(['flipper_ble']), ...over,
+  })
+
+  it('flipper_status tells the user to open the app, not just that nobody can ask', async () => {
+    stubWorker([phone()])
+    const out = await (makeFlipperStatusTool('u1') as any)._callback({})
+    expect(out.reachable).toBe(false)
+    expect(out.transport).toBe('ble')
+    const note = String(out.note)
+    // The verdict it always had…
+    expect(note).toMatch(/linked over Bluetooth to "owner-phone"/)
+    expect(note).toMatch(/no network of its own/i)
+    // …and the remedy it did not. "Nobody can ask it" is where this used to stop,
+    // which leaves the one person who could fix it in 2 seconds with nothing.
+    expect(note).toMatch(/Open the tiny app/)
+    expect(note).toMatch(/only while it is OPEN on "owner-phone"/)
+  })
+
+  it('a relayed action names the app before it doubts the Bluetooth', async () => {
+    stubWorker([phone()])
+    const out = await (makeFlipperFilesTool('u1') as any)._callback({ folder: '/ext/subghz' })
+    expect(out.ok).toBe(false)
+    expect(out.offline).toBe(true)
+    const err = String(out.error)
+    expect(err).toMatch(/is not heartbeating/)
+    expect(err).toMatch(/Open the tiny app/)
+    // Not a Bluetooth fault: the phone is the thing that is quiet, and its own
+    // radio was never in question. Sending the user to a pairing screen here is
+    // how a working bond gets forgotten.
+    expect(err).not.toMatch(/out of Bluetooth range/)
+    expect(err).not.toMatch(/switched off/)
+  })
+
+  it('the cable arm gains nothing from this — it has its own remedy', async () => {
+    // Hazard: sharing a sentence with a ternary above it is how the wrong arm
+    // gets the wrong advice. A sleeping mac is woken, not opened, and its note
+    // must not start talking about a phone that isn't on the account.
+    stubWorker([host({ online: false })])
+    const out = await (makeFlipperStatusTool('u1') as any)._callback({})
+    const note = String(out.note)
+    expect(note).toMatch(/plugged into "cagatay's mac"/)
+    expect(note).not.toMatch(/Open the tiny app/)
+    expect(note).not.toMatch(/Bluetooth/)
   })
 })
 
@@ -290,6 +441,114 @@ describe('flipper_files', () => {
   })
 })
 
+/**
+ * flipper_find — the beep, and a fifth bug class: A CAPABILITY IMPLEMENTED,
+ * ADVERTISED, AND REACHABLE BY NOBODY.
+ *
+ * `action: 'alert'` has been live on the phone since P1 (Session's
+ * handleFlipperEnvelope → FlipperGateway.alert() → Gui.PlayAudiovisualAlert), the
+ * cabled CLI has always had an `alert` action, the design doc's envelope contract
+ * lists it, and FIVE shipped sentences promised the model a beep — one of them
+ * inside the system prompt itself (CAPABILITY_HINTS.flipper_ble). No caller ever
+ * sent it. So "make my Flipper beep" was answered either by contradicting the
+ * agent's own prompt, or by an agent reporting success while the room stayed
+ * silent, which leaves the user hunting a board under the cushions.
+ *
+ * It may be a named tool where flipper_tx never will be because it TRANSMITS
+ * NOTHING: no signal is broadcast, no saved capture replayed, no app launched, no
+ * file touched. The board makes a noise wherever it physically is — the sound is
+ * the whole answer, and it is why this is the tool that proves a fresh BLE bond
+ * is real without asking anyone to trust a status line.
+ */
+describe('flipper_find', () => {
+  const phone = (over: any = {}) => host({
+    id: 'phone', name: 'owner-phone', platform: 'ios-arm64',
+    capabilities: JSON.stringify(['flipper_ble']), ...over,
+  })
+
+  /** Run the tool against a given roster and capture what went onto the relay. */
+  const beep = async (devices: any[], reply = 'beeped') => {
+    let payload: any = null
+    global.fetch = (async (url: any, init: any) => {
+      const u = String(url)
+      if (u.includes('/device/list')) return new Response(JSON.stringify({ ok: true, devices }))
+      if (u.includes('/device/relay/send')) {
+        payload = JSON.parse(JSON.parse(init.body).payload)
+        return new Response(JSON.stringify({ ok: true, id: 'e1' }))
+      }
+      return new Response(JSON.stringify({ reply: { payload: JSON.stringify({ result: reply }) } }))
+    }) as any
+    const out = await (makeFlipperFindTool('u1') as any)._callback({})
+    expect(payload, 'nothing reached the relay — the tool refused before sending').not.toBeNull()
+    return { out, payload }
+  }
+
+  it('sends the phone the STRUCTURED alert envelope it already implements', async () => {
+    const { out, payload } = await beep([phone()])
+    // ⚠️ Never a prompt-shaped invoke: the phone answers those by calling
+    // /api/chat, where the agent resolves the same phone again. An unbounded
+    // relay↔chat loop, not a slow beep.
+    expect(payload.type).toBe('flipper')
+    expect(payload.action).toBe('alert')
+    expect(payload.args).toEqual({})
+    expect(payload.prompt, 'a prompt on this envelope is the proxy loop').toBeUndefined()
+    expect(out.ok).toBe(true)
+    expect(out.transport).toBe('ble')
+    expect(out.alerted).toBe('beeped')
+  })
+
+  it('tells the cabled host to beep and NOTHING else', async () => {
+    const { out, payload } = await beep([host()])
+    expect(payload.type).toBe('invoke')
+    const prompt = String(payload.prompt)
+    expect(prompt).toMatch(/action "alert"/)
+    // The three the CLI could do on the same rail and must not: this action is
+    // allowed precisely because it is none of them.
+    expect(prompt).toMatch(/do not transmit/i)
+    expect(prompt).toMatch(/do not read/i)
+    expect(prompt).toMatch(/not run any other action/i)
+    expect(out.transport).toBe('cable')
+  })
+
+  it('beeps the phone when the cabled machine is asleep', async () => {
+    // The state "where is my Flipper?" is actually asked in: the board in a bag
+    // bonded to the phone in the same bag, the mac mini asleep across town. A
+    // capture must refuse here (no receive RPC over BLE); a beep must not, and
+    // must not be answered by the sleeping cable either.
+    const { out, payload } = await beep([host({ online: false }), phone()])
+    expect(out.ok).toBe(true)
+    expect(out.transport).toBe('ble')
+    expect(out.host).toBe('owner-phone')
+    expect(payload.action).toBe('alert')
+  })
+
+  it('waits long enough for a Bluetooth answer to mean anything', () => {
+    // The floor, not a preference: every wait BELOW BLE_ROUND_TRIP_S takes
+    // flipperInvoke's honest short-wait branch, which concludes nothing and sends
+    // the caller to a typed chat — on every single call. 25s would have looked
+    // generous (the RPC allows 10s) and made the tool useless over the route it
+    // exists for. A CEILING at the floor is not enough on its own: the wait is the
+    // ceiling clamped by the caller's budget, and the voice rail clamps under it.
+    expect(ALERT_WAIT_S).toBeGreaterThanOrEqual(BLE_ROUND_TRIP_S)
+  })
+
+  it('describes itself as a noise in a real room, not a link test', async () => {
+    const t: any = makeFlipperFindTool('u1')
+    const d = String(t.toolSpec.description)
+    expect(d).toMatch(/beep/i)
+    // Both routes, said out loud: the model must not withhold it from a
+    // Bluetooth-only account the way a capture has to be withheld.
+    expect(d).toMatch(/Bluetooth/)
+    // Everything it does not do, because the name sounds like a locator and it
+    // reports no position whatsoever.
+    expect(d).toMatch(/does not transmit/i)
+    // And the reason a scheduled job should not reach for it unprompted — the
+    // board makes a real sound in whatever room it is in, possibly at 3am.
+    expect(d).toMatch(/unattended/i)
+    expect(t.toolSpec.inputSchema, 'a beep takes no arguments').toBeTruthy()
+  })
+})
+
 describe('roster wiring', () => {
   const ROSTERS = [
     'app/api/chat/route.ts',
@@ -297,8 +556,9 @@ describe('roster wiring', () => {
     'lib/voice/tools.ts',
     'app/api/voice/tool/route.ts',
   ]
-  const FACTORIES = ['makeFlipperStatusTool', 'makeFlipperListenTool', 'makeFlipperFilesTool']
 
+  // FACTORIES is module-derived (see the top of this file): a flipper tool added
+  // tomorrow is required in all four rosters today, without editing this suite.
   it.each(ROSTERS)('%s imports AND calls every flipper factory', (file) => {
     const text = src(file)
     for (const f of FACTORIES) {

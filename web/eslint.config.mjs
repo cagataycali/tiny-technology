@@ -16,5 +16,5 @@ export default [
       'react/display-name': 'warn',
     },
   },
-  { ignores: ['.next/**', 'node_modules/**', 'chatgpt-plugin-tinyai/**'] },
+  { ignores: ['.next/**', 'node_modules/**', 'worker/**'] },
 ]

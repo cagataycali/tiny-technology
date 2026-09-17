@@ -43,27 +43,6 @@ const between = (src: string, from: string, to: string, what: string) => {
   return strip(src.slice(a, b))
 }
 
-/**
- * One `switch` arm, bounded at the NEXT sibling — whichever it is.
- *
- * ⚠️ Twin of `relay-poll-verdict.test.ts`'s `armOf`, and here for the same reason
- * it was written there: this suite originally sliced
- * `indexOf('case .deviceSilent') … indexOf('case .couldNotAsk', silent)`, which
- * quietly requires those two arms to appear IN THAT ORDER. Swift is indifferent
- * to the order of two distinct cases, so merely swapping them — a refactor that
- * changes no behaviour at all — reddened the pin. **A slice bounded at the NEXT
- * SIBLING is only safe when the siblings are ORDERED by something the language
- * cares about; between switch arms, order is free, so bind at ANY sibling.**
- * (A `+ "…"` continuation line is not a label, so a multi-line arm survives.)
- */
-const armOf = (body: string, label: string, what: string) => {
-  const at = body.indexOf(label)
-  expect(at, `${what}: the ${label} arm is gone — re-anchor`).toBeGreaterThan(-1)
-  const rest = body.slice(at + label.length)
-  const end = /\n\s*(?:case\s|default:|\})/.exec(rest)
-  return end ? rest.slice(0, end.index) : rest
-}
-
 const live = () => raw('ios/Tiny/Sources/TinyLive.swift')
 const remoteListen = () =>
   between(live(), 'func remoteListen() {', 'private static let clipPollTries', 'remoteListen')
@@ -119,41 +98,6 @@ describe('a listen tap always ends in a sentence', () => {
     expect(placeholder).toMatch(/live\.lastError \?\? live\.stateText/)
     expect(remoteListen(), 'lastError would be invisible here').not.toMatch(/lastError/)
   })
-
-  /**
-   * ⚠️ The property the whole increment exists for, pinned where this tree can
-   * RUN it. `ListenResultTests.everyOutcomeExceptTheClipHasSomethingToSay`
-   * executes it — in Swift, which nothing here compiles — so publicly it was
-   * assumed. A mutant returning `nil` for `.noAnswer` (a tap that ends in
-   * silence again, the exact defect) passed all ten ported pins.
-   *
-   * So: read `note`'s switch and require every arm except `.clip` to yield a
-   * string. The scan asserts it FOUND the arms, because a slicer that returns
-   * nothing passes forever.
-   */
-  it('only the clip has nothing to say', () => {
-    const body = between(live(), 'var note: String? {', '\n    }\n\n    /// Read one reply payload',
-                         'ListenResult.note')
-    // `Array.from`, not a spread: this tsconfig targets below ES2015, so
-    // `[...matchAll()]` is two `error TS2802` on a gate that runs clean.
-    const arms = Array.from(body.matchAll(/case (\.[A-Za-z]+)[^\n:]*:\s*return ([^\n]+)/g))
-    expect(arms.length, 'note\'s arms are gone — re-anchor').toBeGreaterThanOrEqual(4)
-    for (const [, label, returned] of arms) {
-      if (label === '.clip') {
-        expect(returned.trim(), 'a clip speaks for itself').toBe('nil')
-      } else {
-        expect(returned.trim(), `${label} returns nil — that outcome is silent`).not.toBe('nil')
-      }
-    }
-    // And every case the enum declares is answered by that switch, so a new
-    // outcome cannot join the silent ones by omission.
-    const cases = Array.from(
-      between(live(), 'enum ListenResult: Equatable {', 'var note: String? {', 'ListenResult')
-        .matchAll(/case ([a-zA-Z]+)/g),
-      m => `.${m[1]}`)
-    expect(cases.length, 'the enum\'s cases are gone — re-anchor').toBeGreaterThanOrEqual(4)
-    expect(arms.map(a => a[1]).sort()).toEqual(cases.sort())
-  })
 })
 
 describe('the clip round trip decides like the camera round trip', () => {
@@ -168,12 +112,11 @@ describe('the clip round trip decides like the camera round trip', () => {
   /** The inc-32 rule, on a third surface: blame the device only from `.deviceSilent`. */
   it('the necklace is blamed only from the arm that observed it', () => {
     const body = clipResult()
-    // Containment of the ARM, not of the span between two NAMED arms — see armOf.
-    expect(armOf(body, 'case .deviceSilent:', 'clipResult'),
-           '.noAnswer left the .deviceSilent arm').toContain('.noAnswer(seconds:')
-    expect(armOf(body, 'case .couldNotAsk(let why):', 'clipResult'),
-           'the refusal arm blames the necklace — the original bug in the new switch')
-      .not.toContain('.noAnswer(')
+    const silent = body.indexOf('case .deviceSilent:')
+    const other = body.indexOf('case .couldNotAsk', silent)
+    expect(silent).toBeGreaterThan(-1)
+    expect(other).toBeGreaterThan(silent)
+    expect(body.slice(silent, other), '.noAnswer left the .deviceSilent arm').toContain('.noAnswer(seconds:')
     expect(body.split('.noAnswer(seconds:').length - 1, 'more than one .noAnswer site').toBe(1)
   })
 

@@ -79,10 +79,7 @@ export function symbolLiterals(source: string): Map<string, number[]> {
         const close = rest.indexOf(')')
         const seg = close === -1 ? rest : rest.slice(0, close)
         if (!isComputed(seg)) {
-          // Array.from around every iterator in this file: tsconfig targets es5
-          // without downlevelIteration, so `for…of` over a matchAll/Map is a
-          // compile error and ci-typecheck-gate.test.ts is a real gate here.
-          Array.from(seg.matchAll(/"([^"\\]*)"/g)).forEach((m) => add(m[1], i + 1))
+          for (const m of seg.matchAll(/"([^"\\]*)"/g)) add(m[1], i + 1)
         }
         idx = line.indexOf(key, idx + key.length)
       }
@@ -100,7 +97,7 @@ export function symbolLiterals(source: string): Map<string, number[]> {
   // have quietly stopped covering it the moment it gained one — a silent loss of
   // coverage on the exact function whose typo started this file.
   const producer = /(?:func\s+\w*(?:Icon|Glyph|Symbol)\w*\s*\([^)]*\)\s*->\s*String\??\s*\{|(?:let|var)\s+\w*(?:ICON|GLYPH|SYMBOL)\w*[^=]*=\s*\[)/g
-  for (const m of Array.from(source.matchAll(producer))) {
+  for (const m of source.matchAll(producer)) {
     const start = m.index! + m[0].length
     const opener = m[0].endsWith('[') ? '[' : '{'
     const closer = opener === '[' ? ']' : '}'
@@ -114,11 +111,11 @@ export function symbolLiterals(source: string): Map<string, number[]> {
     const body = source.slice(start, j)
     const lineOf = (offset: number) =>
       source.slice(0, start + offset).split('\n').length
-    Array.from(body.matchAll(/return\s+"([^"]+)"/g))
-      .forEach((r) => add(r[1], lineOf(r.index!)))
+    for (const r of body.matchAll(/return\s+"([^"]+)"/g)) add(r[1], lineOf(r.index!))
     // Table entries: ("needle", "symbol") or "key": "symbol"
-    Array.from(body.matchAll(/(?:,|:)\s*"([^"]+)"\s*\)?\s*,?\s*(?:\/\/.*)?$/gm))
-      .forEach((r) => add(r[1], lineOf(r.index!)))
+    for (const r of body.matchAll(/(?:,|:)\s*"([^"]+)"\s*\)?\s*,?\s*(?:\/\/.*)?$/gm)) {
+      add(r[1], lineOf(r.index!))
+    }
   }
   return found
 }
@@ -154,14 +151,14 @@ describe.skipIf(db === null)('every SF Symbol the app names is real', () => {
 
   it('finds the sources at all (a silent empty sweep is not a pass)', () => {
     expect(files.length).toBeGreaterThan(40)
-    const all = files.flatMap((f) => Array.from(symbolLiterals(readFileSync(f, 'utf8')).keys()))
+    const all = files.flatMap((f) => [...symbolLiterals(readFileSync(f, 'utf8')).keys()])
     expect(new Set(all).size).toBeGreaterThan(80)
   })
 
   it('no name is a typo — the whole reason the devices panel drew a file icon', () => {
     const bad: string[] = []
     for (const f of files) {
-      for (const [name, lines] of Array.from(symbolLiterals(readFileSync(f, 'utf8')))) {
+      for (const [name, lines] of symbolLiterals(readFileSync(f, 'utf8'))) {
         if (db!.symbols[name] === undefined) {
           bad.push(`${f.slice(ROOT.length + 1)}:${lines.join(',')} → "${name}"`)
         }
@@ -175,7 +172,7 @@ describe.skipIf(db === null)('every SF Symbol the app names is real', () => {
     const target = deploymentTarget()
     const tooNew: string[] = []
     for (const f of files) {
-      for (const [name, lines] of Array.from(symbolLiterals(readFileSync(f, 'utf8')))) {
+      for (const [name, lines] of symbolLiterals(readFileSync(f, 'utf8'))) {
         const year = db!.symbols[name]
         const needs = year === undefined ? undefined : db!.iosOf[String(year)]
         if (needs && parseFloat(needs) > target) {
@@ -218,26 +215,26 @@ describe('the extractor itself', () => {
     for (const n of ['wave.3.right', 'xmark.circle', 'waveform', 'waveform.slash',
                      'antenna.radiowaves.left.and.right', 'circle.dashed',
                      'cube.transparent']) {
-      expect(Array.from(got.keys()), `missed ${n}`).toContain(n)
+      expect([...got.keys()], `missed ${n}`).toContain(n)
     }
   })
 
   it('still reads a producer that returns an optional', () => {
     // capabilityIcon returns nil for words it has no icon for. The `?` must not
     // hide the arms above it: this is the shape shipping today.
-    const got = Array.from(symbolLiterals(`
+    const got = [...symbolLiterals(`
       func capabilityIcon(_ c: String) -> String? {
         switch c {
         case "glasses": return "eyeglasses"
         default: return nil
         }
       }
-    `).keys())
+    `).keys()]
     expect(got).toContain('eyeglasses')
   })
 
   it('does not mistake a call argument or a label map for a symbol', () => {
-    const got = Array.from(symbolLiterals(`
+    const got = [...symbolLiterals(`
       Image(systemName: capabilityIcon("flipper"))
       Image(systemName: "gear").accessibilityLabel("settings")
       func edgeLabel(_ k: String) -> String {
@@ -246,7 +243,7 @@ describe('the extractor itself', () => {
         }
       }
       let headers = ["role": "system"]
-    `).keys())
+    `).keys()]
     expect(got).toContain('gear')
     for (const n of ['flipper', 'settings', 'supersedes', 'system']) {
       expect(got, `false positive: ${n}`).not.toContain(n)

@@ -41,6 +41,7 @@
 import { z } from 'zod'
 import { tool } from '@strands-agents/sdk'
 import { clampWait } from './nicla'
+import { relaySend } from '@/lib/chat/relay-send'
 // The same capability parser the Flipper host resolver uses — one reading of
 // the worker's `capabilities` column (JSON-array string, array, or malformed)
 // for every hardware resolver in this directory. See [RECORD_CAP].
@@ -213,7 +214,7 @@ export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budg
   // the samples and the mic is exclusive — so its reply omits the key entirely
   // and `audio_url` is null (PhoneRecorder's header states the constraint and
   // its scope). The TEXT is what this tool is for and both phones deliver it.
-  description: "Record what the user says next and get it back as TEXT: the user's paired phone (the tiny app) records N seconds through its own mic, transcribes on-device, and answers with a transcript preview + a transcript id — plus the hosted audio URL if that phone could host one. This is the phone's microphone, not the necklace's — the Nicla Voice board only spots wake words; the phone hears the words that follow. IMPORTANT: audio_url is null on an Android phone by platform constraint, because its speech recognizer owns the microphone and never hands this app the samples — that is NOT a failed recording and NOT a missing transcript. Report what was said; only mention audio if the user asks for it, and then say the words were kept and the recording could not be. Needs the tiny app open on the phone. Takes roughly the recording length plus a few seconds.",
+  description: "Record what the user says next and get it back as TEXT: the user's paired phone (the tiny app) records N seconds, transcribes on-device, and answers with a transcript preview + a transcript id — plus the hosted audio URL if that phone could host one. The recording is done by the PHONE, not the necklace — the Nicla Voice board only spots wake words; the phone hears the words that follow. The phone may capture through its own built-in mic OR through a Bluetooth headset the user is wearing, the Meta glasses included: `mic_route` says which one actually heard this take (\"bluetooth\" or \"phone\"), so never state which microphone was used unless that field says so. IMPORTANT: audio_url is null on an Android phone by platform constraint, because its speech recognizer owns the microphone and never hands this app the samples — that is NOT a failed recording and NOT a missing transcript. Report what was said; only mention audio if the user asks for it, and then say the words were kept and the recording could not be. Needs the tiny app open on the phone. Takes roughly the recording length plus a few seconds.",
   inputSchema: z.object({
     seconds: z.number().int().optional().describe('How long to record, in seconds (clamped 5-120, default 10).'),
     reason: z.string().max(200).optional().describe('Optional short reason — the phone shows it while recording.'),
@@ -237,14 +238,12 @@ export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budg
       }
     }
     const seconds = Math.max(5, Math.min(120, Math.round(input.seconds ?? 10)))
-    const sent = await fetch(`${WORKER}/device/relay/send`, {
-      method: 'POST', headers: ikey(),
-      body: JSON.stringify({
-        userId, toDevice: phone.id,
-        payload: JSON.stringify({ type: 'record', seconds, reason: String(input.reason || '').slice(0, 200) }),
-      }),
-    }).then(r => r.json()).catch(e => ({ error: String(e) }))
-    if (sent.error || !sent.id) return { ok: false, error: sent.error || 'relay send failed' }
+    const sent = await relaySend({
+      worker: WORKER, headers: ikey(), userId, toDevice: phone.id,
+      payload: JSON.stringify({ type: 'record', seconds, reason: String(input.reason || '').slice(0, 200) }),
+      deviceName: phone.name,
+    })
+    if (!sent.queued) return { ok: false, error: sent.error }
 
     // The recording itself takes `seconds`; +25 covers pickup on the phone's
     // 5s poll, on-device transcription, and the /api/media upload. Clamped to
@@ -262,11 +261,25 @@ export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budg
         const p = JSON.parse(d.reply.payload)
         if (p.error) return { ok: false, error: String(p.error) }
         const audioUrl = p.audioUrl ? String(p.audioUrl) : null
+        // ⚠️ WHICH MICROPHONE HEARD IT — passed through, never defaulted. Both
+        // phones read the route during the take and omit the field when they
+        // never opened a mic, so an absent value means "not known", not "phone".
+        // Substituting a default here would put the agent back where it was: a
+        // take made through the glasses on the user's face, reported as the
+        // phone in their pocket. The words arrive either way; only the ROOM
+        // differs, and nothing else in the answer can reveal it.
+        const micRoute = p.micRoute === 'bluetooth' || p.micRoute === 'phone' ? p.micRoute : undefined
         return {
           ok: true,
           result: String(p.result ?? ''),
           transcript_id: p.transcriptId ? String(p.transcriptId) : null,
           audio_url: audioUrl,
+          ...(micRoute ? {
+            mic_route: micRoute,
+            ...(micRoute === 'bluetooth' ? {
+              mic_note: 'Heard through a Bluetooth headset the user is wearing — their Meta glasses, if those are linked — not the phone\'s own mic.',
+            } : {}),
+          } : {}),
           // ⚠️ A null audio_url has TWO causes and the agent cannot tell them
           // apart from the value: this phone never had a file to upload, or an
           // upload failed. Only the resolver knows which, so it says so here
@@ -294,7 +307,7 @@ export const makeNiclaVoiceRecordTool = (userId: string | null | undefined, budg
 
 export const makeNiclaVoiceTranscriptsTool = (userId: string | null | undefined) => tool({
   name: 'nicla_voice_transcripts',
-  description: "List the user's stored voice transcripts, newest first — each entry has an id, a label (the wake word or the reason that triggered it), a ~200-char text preview, the hosted audio URL and the duration. Three things file rows here: wake-word follow-ups, nicla_voice_record, and — labelled \"necklace-live\" — continuous speech the Nicla VISION necklace streamed to the phone while its live card was open, transcribed on-device. So this is the place to look for what was actually SAID near the user, not only for clips something deliberately triggered. A necklace-live row has no audio URL, but that does NOT mean the recording is gone: the phone keeps the segment's audio locally and it is playable on the row in the tiny app — it just isn't uploaded, so nothing here can fetch it. Say \"open the tiny app to listen\", never \"there is no audio\". IMPORTANT: a row with truncated=true is a FRAGMENT — `chars` is the real length, and a 2-minute memo is ~1700 characters, so the preview can be under 15% of what was said. Never answer about a truncated row's content from the preview; call nicla_voice_transcript with its id first.",
+  description: "List the user's stored voice transcripts, newest first — each entry has an id, a label (the wake word or the reason that triggered it), a ~200-char text preview, the hosted audio URL and the duration. Three things file rows here: wake-word follow-ups, nicla_voice_record, and — labelled \"necklace-live\" — continuous speech the Nicla VISION necklace streamed to the phone while its live card was open, transcribed on-device. So this is the place to look for what was actually SAID near the user, not only for clips something deliberately triggered. A necklace-live row has no audio URL, but that does NOT mean the recording is gone: the phone keeps the segment's audio locally and it is playable on the row in the tiny app — it just isn't uploaded, so nothing here can fetch it. Say \"open the tiny app to listen\", never \"there is no audio\". Say it about a RECENT row without hedging; for an older one add \"if it's still there\" — the phone bounds automatic audio to tens of megabytes and frees the oldest segments first, keeping every word. That is why the app labels a freed row \"audio freed for space\" instead of just dropping its play button, and it is the only reason a necklace-live row's audio is ever actually gone. The WORDS are never evicted, so the text here is the durable copy either way. IMPORTANT: a row with truncated=true is a FRAGMENT — `chars` is the real length, and a 2-minute memo is ~1700 characters, so the preview can be under 15% of what was said. Never answer about a truncated row's content from the preview; call nicla_voice_transcript with its id first.",
   inputSchema: z.object({
     limit: z.number().int().min(1).max(50).optional().describe('How many recent transcripts to return (default 10).'),
   }),

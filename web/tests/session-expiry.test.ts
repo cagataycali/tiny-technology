@@ -313,9 +313,8 @@ describe('the Android launch gate stays testable (review c4)', () => {
   it('isSessionExpired is a pure function the getter delegates to', async () => {
     const { readFileSync } = await import('node:fs')
     const { join } = await import('node:path')
-    // Resolves through the web/android symlink.
     const src = readFileSync(
-      join(process.cwd(), 'android/app/src/main/java/technology/tiny/app/auth/AuthManager.kt'),
+      join(__dirname, '..', 'android/app/src/main/java/technology/tiny/app/auth/AuthManager.kt'),
       'utf8',
     )
     // The clock is a PARAMETER — that is the whole reason the branch is reachable.
@@ -335,7 +334,7 @@ describe('the Android launch gate stays testable (review c4)', () => {
     const { readFileSync } = await import('node:fs')
     const { join } = await import('node:path')
     const src = readFileSync(
-      join(process.cwd(), 'android/app/src/main/java/technology/tiny/app/MainActivity.kt'),
+      join(__dirname, '..', 'android/app/src/main/java/technology/tiny/app/MainActivity.kt'),
       'utf8',
     )
     // A tested predicate nothing calls is decoration.

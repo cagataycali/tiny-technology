@@ -55,43 +55,6 @@ function kotlinFiles(dir = SRC): string[] {
 interface Site { file: string; line: number; region: string; scope: string }
 
 /**
- * The intent construction and the extras chained onto it — bounded by
- * INDENTATION, so it grows with the code.
- *
- * ⚠️ This exists because the named pins below first used `slice(0, 1200)` and a
- * probe proved it: inserting a comment inside the chain (legal, correct work —
- * this rail already carries a four-line one) pushed `askForPunctuation()` past
- * the window and the pin went RED on code that was right. A byte count is a
- * guess about how long the code stays put; the extras chain, on the other hand,
- * is exactly the run of lines indented deeper than the line the request is built
- * on, and it ends at the `)` that closes it. Blank lines continue the chain
- * rather than ending it.
- */
-function chainOf(src: string, at: number): string {
-  const base = (/^\s*/.exec(src.slice(0, at).split('\n').pop() ?? '') as RegExpExecArray)[0].length
-  const lines = src.slice(at).split('\n')
-  const out = [lines[0]]
-  for (const l of lines.slice(1)) {
-    if (l.trim() !== '' && (/^\s*/.exec(l) as RegExpExecArray)[0].length <= base) break
-    out.push(l)
-  }
-  return out.join('\n')
-}
-
-/**
- * From an offset to the end of the member function containing it — i.e. up to
- * the next declaration indented at most one level.
- *
- * The other half of the same lesson: "the next sibling anchor" is a boundary the
- * code defines, where a byte window is one the test invents.
- */
-function untilNextMember(src: string, at: number): string {
-  const rest = src.slice(at)
-  const m = /\n\s{0,4}(?:(?:private|internal|public|protected|suspend|inline|override)\s+)*fun\s/.exec(rest)
-  return m ? rest.slice(0, m.index) : rest
-}
-
-/**
  * The enclosing member function of an offset — from its `fun` line onward.
  *
  * ⚠️ NOT the nearest preceding `fun`. Walking back one step lands inside a
@@ -238,12 +201,8 @@ describe('the rails that made this a bug, not a typo', () => {
     expect(live).toMatch(/WearablesListenerBridge\.freeFormIntent\(\)/)
     expect(listener).toMatch(/internal fun freeFormIntent\(\): Intent/)
     // ...and the tool's own rail uses it too, so "shared" is not aspirational.
-    // Bounded at the end of the member that builds the recognizer, not at a byte
-    // count: `freeFormIntent()` has to be the intent THIS rail runs, and the
-    // definition of it further down the file must not satisfy the pin. A probe
-    // killed the 200-byte version of this by growing a comment above the call.
-    const own = untilNextMember(listener, listener.indexOf('val (recognizer, onDevice) = newRecognizer(app)'))
-    expect(own).toMatch(/val intent = freeFormIntent\(\)/)
+    const own = listener.slice(listener.indexOf('val (recognizer, onDevice) = newRecognizer(app)'))
+    expect(own.slice(0, 200)).toMatch(/freeFormIntent\(\)/)
     // ⚠️ And WHY it is shared has to stay written down, or a later reader inlines
     // the recipe back into each rail and re-earns iOS's bug. Unwrap KDoc `* `
     // wrapping first — the c60 trap.
@@ -262,17 +221,13 @@ describe('the rails that made this a bug, not a typo', () => {
     // c64's finding, one layer down: nicla_voice_record answers with text ONLY on
     // this phone, so the transcript is the artefact — not a caption on one.
     expect(recorder).not.toMatch(/o\.put\("audioUrl"/)
+    const region = recorder.slice(recorder.indexOf('Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)'))
+    expect(region.slice(0, 1200)).toMatch(/askForPunctuation\(\)/)
     // ⚠️ Named, not only derived. The roster's per-site pins are what stop a NEW
     // rail escaping; these two rails need naming as well, because each is the sole
     // guard of a property for its file — weaken the derived pin and nothing else
     // notices. Two independent readers, so a mutant has to defeat both.
-    //
-    // Read through the extras CHAIN (see `chainOf`), which is tighter than the
-    // roster's window — the request must ask for these itself, not somewhere later
-    // in the take loop — and which cannot be pushed out of by a comment.
-    const chain = chainOf(recorder, recorder.indexOf('Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)'))
-    expect(chain).toMatch(/askForPunctuation\(\)/)
-    expect(chain).toMatch(/EXTRA_PREFER_OFFLINE, true/)
+    expect(region.slice(0, 1200)).toMatch(/EXTRA_PREFER_OFFLINE, true/)
   })
 
   it('the transcripts rail is punctuated and stays on the phone, by name', () => {

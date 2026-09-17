@@ -25,13 +25,6 @@
  * that means a one-shot will NEVER run — and drew it with the same glyph as a
  * job that finished. Keyed in full, like tiny_visit and pay_alarm.
  *
- * 🚫 `device_missed` is the same collision on the device side, and the pair is
- * the clearest illustration of why full keys matter: 💻 `device_result` means
- * "your laptop finished the task", `device_missed` means "your laptop never
- * picked it up and the task is gone" (relay-missed.ts). Under the bare `device`
- * prefix the second renders as the first — not a missing glyph, a confidently
- * WRONG one, on the only surface that reports the loss.
- *
  * 🗣️🎙️👁️ The voice kinds are keyed IN FULL and NOT behind a shared `nicla`
  * prefix, because they say three different things: the necklace heard its name,
  * here is what was said, the camera saw motion. A prefix key would have been
@@ -54,7 +47,7 @@
  */
 export const KIND_ICONS: Record<string, string> = {
   job: "⏰", job_missed: "⛔", telegram: "✈️", tiny_visit: "👀", learn: "🧬", device: "💻",
-  device_missed: "🚫", pay_alarm: "🚨",
+  pay_alarm: "🚨",
   nicla_wake: "🗣️", nicla_transcript: "🎙️", nicla_sentry: "👁️", device_note: "📝",
   pay_earned: "💵", pay_received: "💰", pay_withdrawn: "🏦", pay_refunded: "↩️",
   push: "🔔", share: "🔗", tool: "🔧", follow: "🤝", dm: "💬",
@@ -82,6 +75,14 @@ export const KIND_ICONS: Record<string, string> = {
  * break. Derived by grepping `emitEvent(` across worker/src.
  * When you add an emit site there, add its kind here — the test will tell you
  * what glyph is missing on which surface.
+ *
+ * ⚠️ THAT GREP HAS A BLIND SPOT, and it cost four kinds. The device-event family
+ * is emitted by the PHONES (POST /devices/event), so `emitEvent(` in the worker
+ * finds only one of the four — there is no emit site in worker source for the
+ * other three to grep. The worker does declare them, as the route's allowlist
+ * (`DEVICE_EVENT_KINDS` in devices.ts), so tests/event-icons.test.ts now reads
+ * THAT constant and requires every kind in it to appear below. Adding a kind to
+ * the allowlist without a glyph fails; no grep required.
  */
 export const EMITTED_KINDS = [
   "job_result", "job_error",              // scheduler.ts
@@ -100,10 +101,6 @@ export const EMITTED_KINDS = [
   // Every other job outcome already spoke; the one meaning "this will never
   // happen", the only one the user must act on, was silent.
   "job_missed",
-  // 🚫 relay.ts MISSED_KIND, swept from index.ts (relay-missed.ts) — an
-  // invoke envelope no device ever polled, now past the relay's retention
-  // window. use_device had already promised "The task was delivered".
-  "device_missed",
   // 🤖 APP-emitted (not worker emitEvent): lib/chat/tools/spawn.ts posts it
   // through the worker's POST /events when a wait:false batch completes —
   // the one roster entry whose grep target is this repo, not the worker.

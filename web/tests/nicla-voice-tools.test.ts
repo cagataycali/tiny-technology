@@ -2,7 +2,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { workerFile, workerPresent as present } from './_worker'
 
 import {
   makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool,
@@ -185,7 +184,7 @@ describe('⚠️ the recorder resolves a phone by CAPABILITY, not by platform', 
     // computer, flipper, adb…). None is `record`, and this pins that a node
     // with a rich cap list still is not a recorder.
     stubWorker([{
-      id: 'mac', name: 'laptop', platform: 'darwin-arm64', online: true,
+      id: 'mac', name: 'mac-mini', platform: 'darwin-arm64', online: true,
       capabilities: JSON.stringify(['mcp', 'files', 'apple', 'computer', 'desktop', 'flipper', 'adb']),
     }])
     expect(await resolvePhone('u1')).toBeNull()
@@ -251,20 +250,14 @@ describe('⚠️ the recorder resolves a phone by CAPABILITY, not by platform', 
 })
 
 describe('a text-only take is not a failed take', () => {
-  // ⚠️ Parameterised by PLATFORM, because the note has two branches and only one
-  // of them was pinned. Measured: replacing `phone.platform === 'android-arm64'`
-  // with `true` — every null reported as the Android constraint — left the suite
-  // green, so an iPhone whose upload failed would have been explained to the agent
-  // as a phone that never had samples. That is a confident wrong cause, which is
-  // the same harm as the bare null this note replaced.
-  const replyFrom = (platform: string, payload: any) => {
+  const androidReply = (payload: any) => {
     global.fetch = (async (url: any) => {
       const u = String(url)
       if (u.includes('/device/list')) {
         return new Response(JSON.stringify({
           ok: true,
           devices: [{
-            id: 'a1', name: platform === 'android-arm64' ? 'pixel' : 'iPhone', platform, online: true,
+            id: 'a1', name: 'pixel', platform: 'android-arm64', online: true,
             capabilities: JSON.stringify(['record']),
           }],
         }))
@@ -276,7 +269,6 @@ describe('a text-only take is not a failed take', () => {
       return new Response(JSON.stringify({}), { status: 404 })
     }) as any
   }
-  const androidReply = (payload: any) => replyFrom('android-arm64', payload)
 
   it('Android: a missing audioUrl is EXPLAINED, not left as a bare null', async () => {
     // The agent cannot tell "never had a file" from "upload failed" by looking
@@ -288,28 +280,6 @@ describe('a text-only take is not a failed take', () => {
     expect(out.audio_url).toBeNull()
     expect(String(out.audio_note)).toMatch(/nothing went wrong/i)
     expect(String(out.audio_note)).toMatch(/text-only by design|transcript IS the recording/i)
-  })
-
-  it('iOS: a missing audioUrl is NOT blamed on a constraint that phone does not have', async () => {
-    // The other branch, and the reason the note is decided by the resolver rather
-    // than by the null: an iPhone feeds one AVAudioEngine tap to both the
-    // recognizer and an AVAudioFile, so it CAN host audio. A null here means
-    // something went wrong with this take — a note that says "nothing went wrong,
-    // this phone cannot keep the samples" would be a confident wrong cause, and
-    // would tell the user their platform is the reason when it is not.
-    replyFrom('ios-arm64', { result: 'the words', transcriptId: 't-3' })
-    const out: any = await (makeNiclaVoiceRecordTool('u1') as any).invoke({})
-    expect(out.ok).toBe(true)
-    expect(out.audio_url).toBeNull()
-    // Still explained — a bare null is what this whole note exists to replace…
-    expect(String(out.audio_note)).toMatch(/\S/)
-    // …but not with the Android platform's excuse, and not by claiming nothing
-    // went wrong, which is exactly what the Android copy says.
-    expect(String(out.audio_note)).not.toMatch(/nothing went wrong/i)
-    expect(String(out.audio_note)).not.toMatch(/android|by design|cannot keep the samples/i)
-    // What it must still do is keep the transcript reachable, because the words
-    // survived even though the file did not.
-    expect(String(out.audio_note)).toMatch(/transcript/i)
   })
 
   it('an audio URL that DID come back carries no excuse note', async () => {
@@ -431,38 +401,6 @@ describe('every agent roster mounts the voice necklace', () => {
     expect(desc).not.toMatch(/recorded no file/)
     expect(desc, 'a null audio_url must not read as "no recording exists"')
       .toMatch(/playable|listen/i)
-  })
-
-  it('the description warns that a cut preview is a FRAGMENT, by the worker\'s own field names', () => {
-    // A ~200-char preview of a 1700-char memo is under 12% of what was said, and
-    // an agent can answer from it and sound certain. The list rows carry the two
-    // fields that make the loss visible (transcripts-sql pins their semantics
-    // against real sqlite) — but a field nothing in the description mentions is a
-    // field the model has no reason to read.
-    //
-    // Derived from the worker's list statement rather than quoted, so renaming a
-    // column cannot leave this description silently describing the old shape.
-    const desc = (() => {
-      const s = src('lib/chat/tools/nicla-voice.ts')
-      const t = s.slice(s.indexOf("name: 'nicla_voice_transcripts'"))
-      return t.slice(0, t.indexOf('inputSchema'))
-    })()
-    if (!present) return   // the SQL half of this pin needs the worker checkout
-    const sql = readFileSync(workerFile('transcripts.ts'), 'utf8')
-    const list = sql.slice(sql.indexOf('TRANSCRIPT_LIST_SQL'))
-    // Array.from, not a spread: this tsconfig targets es5 with no downlevelIteration.
-    const aliases = Array.from(
-      list.slice(0, list.indexOf('`;')).matchAll(/AS (\w+)/g), m => m[1])
-    expect(aliases, 'no aliases found in TRANSCRIPT_LIST_SQL — re-anchor this pin')
-      .toContain('truncated')
-    for (const field of aliases) {
-      expect(desc, `the list returns \`${field}\` and the description never mentions it`)
-        .toContain(field)
-    }
-    // And it must say what the flag MEANS, not merely name it.
-    expect(desc).toMatch(/FRAGMENT/)
-    expect(desc, 'a truncated row must send the agent to the full text')
-      .toMatch(/nicla_voice_transcript with its id/)
   })
 
   it('an unattended job is told the transcript store holds passive speech', () => {

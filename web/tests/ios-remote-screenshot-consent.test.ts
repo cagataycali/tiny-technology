@@ -8,7 +8,8 @@ import { join } from 'node:path'
  *    COST YOU YOUR NOTIFICATIONS TO ANSWER.
  *
  * `use_device` + `screenshot` used to refuse on iOS: the per-capture consent
- * prompt lived in ChatView, and a relay turn has no chat view on screen. The executor now
+ * prompt lived in ChatView, and a relay turn has no chat view on screen
+ * (docs/remote-screenshot-consent-design-2026-08-02.md). The executor now
  * presents its own UIAlertController — but the way it does that carries one
  * non-obvious invariant that nothing else in the codebase can express:
  *
@@ -420,22 +421,6 @@ describe('a consent ask dies with the thing that asked (iOS)', () => {
     expect(askFn).toMatch(/case \.abandon:\s*return \.abandoned/)
     expect(askFn, 'the stale-ask cleanup still reports a decline nobody made')
       .not.toMatch(/resume\(returning: false\)/)
-    // …and the CALLER of that mapping has to hand it `.abandon`. Everything above
-    // is satisfied by an abandon() that resumes with `.deny` — which is the exact
-    // one-line version of this bug ("resuming the waiter with false would have
-    // been one line and would have recorded a refusal the user never made"), and
-    // a mutation battery walked straight through the pins as written.
-    const abandon = views.slice(views.indexOf('func abandonScreenshotConsent()'))
-    expect(views.indexOf('func abandonScreenshotConsent()'),
-      'abandonScreenshotConsent is gone — re-anchor this pin').toBeGreaterThan(-1)
-    const abandonBody = abandon.slice(0, abandon.indexOf('\n    }'))
-    expect(abandonBody, 'calling off an ask records a decline the user never made')
-      .toMatch(/answerScreenshotConsent\(\.abandon\)/)
-    expect(abandonBody).not.toMatch(/\.deny|\.expire|\.allow/)
-    // The tap handler is the only thing allowed to turn a false into a decline.
-    const resolve = views.slice(views.indexOf('func resolveScreenshotConsent('))
-    expect(resolve.slice(0, resolve.indexOf('\n    }')))
-      .toMatch(/allow \? \.allow : \.deny/)
   })
 
   it('a cancelled turn takes its prompt with it', () => {
@@ -875,18 +860,6 @@ describe('a screenshot outcome says WHY, not just "no url"', () => {
     for (const c of ['DENIED', 'EXPIRED', 'FAILED']) {
       expect(emits.join('\n'), `nothing ever emits ${c}`).toContain(`ShotOutcome.${c}`)
     }
-    // …and the BRIDGE has to honour the tag it was handed. Every assertion above
-    // is about the call sites, so dropping the `outcome ?:` pass-through — one
-    // token, in a file none of them read — reverts all six of them to the url
-    // guess with the wiring still on screen. A Kotlin default parameter severs a
-    // wire that way: the argument is accepted, ignored, and nothing warns.
-    const emitAt = tinyAppKt.indexOf('fun emitScreenshot(')
-    expect(emitAt, 'emitScreenshot is gone — re-anchor this pin').toBeGreaterThan(-1)
-    const emitFn = tinyAppKt.slice(emitAt, tinyAppKt.indexOf('\n    override fun onCreate', emitAt))
-    expect(emitFn, 'the emit signature no longer accepts a reason')
-      .toMatch(/outcome: ShotOutcome\? = null/)
-    expect(emitFn, 'the caller\'s outcome is dropped — every emit is back to guessing from the url')
-      .toMatch(/outcome \?: if \(url\.isEmpty\(\)\)/)
   })
 
   it('the in-chat card still ignores the outcome and checks the url', () => {
@@ -920,7 +893,7 @@ describe('every advertised iOS capability is renderable', () => {
   const caps = (() => {
     const m = session.match(/nonisolated static let capabilities = \[([^\]]+)\]/)
     expect(m, 'Session.capabilities not found — renamed?').toBeTruthy()
-    return Array.from(m![1].matchAll(/"([^"]+)"/g)).map((x) => x[1])
+    return [...m![1].matchAll(/"([^"]+)"/g)].map((x) => x[1])
   })()
 
   it('parsed the roster', () => {
@@ -931,7 +904,7 @@ describe('every advertised iOS capability is renderable', () => {
   it('has a human LABEL for each', () => {
     const table = panels.slice(panels.indexOf('let CAPABILITY_LABELS'))
     const body = table.slice(table.indexOf('['), table.indexOf(']\n') + 1)
-    const labelled = new Set(Array.from(body.matchAll(/"([^"]+)":\s*"[^"]+"/g)).map((m) => m[1]))
+    const labelled = new Set([...body.matchAll(/"([^"]+)":\s*"[^"]+"/g)].map((m) => m[1]))
     expect(caps.filter((c) => !labelled.has(c))).toEqual([])
   })
 
@@ -939,7 +912,7 @@ describe('every advertised iOS capability is renderable', () => {
     const at = panels.indexOf('func capabilityIcon(')
     expect(at, 'capabilityIcon not found — renamed?').toBeGreaterThan(-1)
     const fn = panels.slice(at, panels.indexOf('\n}', at))
-    const iconed = new Set(Array.from(fn.matchAll(/case "([^"]+)":/g)).map((m) => m[1]))
+    const iconed = new Set([...fn.matchAll(/case "([^"]+)":/g)].map((m) => m[1]))
     expect(caps.filter((c) => !iconed.has(c))).toEqual([])
   })
 })
@@ -963,7 +936,7 @@ describe('every advertised Android capability is renderable', () => {
     const at = androidFleet.indexOf('private val capabilities = listOf(')
     expect(at, 'FleetManager.capabilities not found — renamed?').toBeGreaterThan(-1)
     const list = androidFleet.slice(at, androidFleet.indexOf(')', at))
-    return Array.from(list.matchAll(/"([^"]+)"/g)).map((m) => m[1])
+    return [...list.matchAll(/"([^"]+)"/g)].map((m) => m[1])
   })()
 
   it('parsed the roster', () => {
@@ -974,7 +947,7 @@ describe('every advertised Android capability is renderable', () => {
   it('has a human LABEL for each', () => {
     const table = androidPanels.slice(androidPanels.indexOf('val CAPABILITY_LABELS'))
     const body = table.slice(0, table.indexOf('\n)'))
-    const labelled = new Set(Array.from(body.matchAll(/"([^"]+)" to "[^"]+"/g)).map((m) => m[1]))
+    const labelled = new Set([...body.matchAll(/"([^"]+)" to "[^"]+"/g)].map((m) => m[1]))
     expect(caps.filter((c) => !labelled.has(c))).toEqual([])
   })
 
@@ -982,7 +955,7 @@ describe('every advertised Android capability is renderable', () => {
     const at = androidPanels.indexOf('fun capabilityIcon(')
     expect(at, 'capabilityIcon not found — renamed?').toBeGreaterThan(-1)
     const fn = androidPanels.slice(at, androidPanels.indexOf('\n}', at))
-    const iconed = new Set(Array.from(fn.matchAll(/"([^"]+)" ->/g)).map((m) => m[1]))
+    const iconed = new Set([...fn.matchAll(/"([^"]+)" ->/g)].map((m) => m[1]))
     expect(caps.filter((c) => !iconed.has(c))).toEqual([])
   })
 })

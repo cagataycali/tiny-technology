@@ -57,7 +57,7 @@ Mobile:
   `.env` files, no credentials of any kind — `.env.example` documents every
   variable with placeholders. `wrangler.toml` ships with `replace-with-your-*`
   ids on purpose.
-- **Don't remove the symlinks under `web/`** (`chain`, `worker`, `ios`,
+- **Don't remove the symlinks under `web/`** (`chain`, `worker`, `tiny-tech`, `ios`,
   `android`, `docs`, `mkdocs.yml`). The parity tests resolve repo files
   through them.
 

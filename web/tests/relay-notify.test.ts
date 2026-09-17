@@ -1,8 +1,8 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll } from 'vitest'
-import { workerFile, workerPresent as present, warnIfWorkerAbsent } from './_worker'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { workerFile, workerPresent as present, warnIfWorkerAbsent } from './_worker'
 
 /**
  * Relay-notify fan-out (push → native devices): the envelope the worker drops
@@ -80,7 +80,6 @@ describe.skipIf(!present)('relay-notify envelope', () => {
  * suites (TinyTests RelayNotifyTests / RelayNotifierTest) prove the behaviour;
  * these assertions prove the two behaviours are the SAME one.
  */
-// `ios/` and `android/` resolve through the web/ios and web/android symlinks.
 const repoFile = (p: string) => readFileSync(join(process.cwd(), p), 'utf8')
 
 /** Swift/Kotlin comments explain what NOT to do — a docstring warning against
@@ -143,10 +142,41 @@ describe('relay-notify consumers (iOS ↔ Android parity)', () => {
   it('an unknown tag still reaches the user on both clients (visible default)', () => {
     // Defaulting to silent is exactly how the iOS hole existed: a future push
     // kind nobody taught the client about must show up, not vanish.
-    expect(kotlin).toContain('else -> Route.Banner(CHANNEL_ACTIVITY')
-    const classify = swift.slice(swift.indexOf('func classifyNotify'))
-    const end = classify.indexOf('\n    }')
-    expect(classify.slice(0, end)).toMatch(/return \.banner\s*$/m)
+    //
+    // ⚠️ THIS ASSERTION USED TO READ `toContain('else -> Route.Banner(CHANNEL_ACTIVITY')`
+    // — it pinned the quiet channel BY LINE, directly under the comment above.
+    // The comment was right and the pin contradicted it: "arrives silently" was
+    // being read as "arrives", because the bug this test was written for was the
+    // iOS one where the envelope was consumed and nothing appeared at all. On
+    // Android the envelope did appear — as a soundless chip — and a push nobody
+    // hears is the same product outcome. Assert the DEFAULT ARM, whatever
+    // channel it names, and let the loudness test below judge which that is.
+    const classify = kotlin.slice(kotlin.indexOf('fun classify('))
+    const arm = classify.slice(classify.indexOf('else ->'))
+    expect(arm).toContain('Route.Banner')
+    const swiftClassify = swift.slice(swift.indexOf('func classifyNotify'))
+    const end = swiftClassify.indexOf('\n    }')
+    expect(swiftClassify.slice(0, end)).toMatch(/return \.banner\s*$/m)
+  })
+
+  it('Android defaults LOUD — a surface with a ladder must not lean quiet', () => {
+    // Android's two channels were once the ONLY place a push could be
+    // downgraded, which is why a quiet default here was invisible to every
+    // parity check: both phones agreed, because iOS had no ladder to disagree
+    // with. iOS has one now (Notify.isAmbient → interruptionLevel, pinned in
+    // push-loudness.test.ts) and it was wrong in the OPPOSITE direction —
+    // `.sound = .default` for every caller is not neutrality, it is the loud end
+    // pinned for every case. Compare each client to what the RAIL promises, not
+    // to each other; a sibling can be wrong the other way and still agree.
+    const classify = kotlin.slice(kotlin.indexOf('fun classify('), kotlin.indexOf('fun redeemQuery'))
+    const defaultArm = classify.slice(classify.indexOf('else ->'))
+    expect(defaultArm).toContain('AlertWorker.CHANNEL')
+    expect(defaultArm).not.toContain('CHANNEL_ACTIVITY')
+    // …and the quiet channel is reached only through the enumerated ambient set.
+    expect(classify).toContain('AMBIENT_TAG_PREFIXES.any')
+    const quietAt = classify.indexOf('CHANNEL_ACTIVITY')
+    expect(quietAt).toBeGreaterThan(-1)
+    expect(quietAt).toBeLessThan(classify.indexOf('else ->'))
   })
 
   it('iOS clamps title/body to the worker’s own limits', () => {

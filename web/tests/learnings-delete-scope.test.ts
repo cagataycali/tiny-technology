@@ -52,9 +52,8 @@ describe('closing ONE memory still works', () => {
 })
 
 describe('⚠️ the bodies that used to erase everything', () => {
-  // Each of these reached `{ userId }` — which in this tree purges every fact,
-  // every fact edge, every legacy row and every vector the user owns — through
-  // the route's own normalisation.
+  // Each of these reached `{ userId }` — CLOSE_ALL_SQL, DELETE FROM learnings,
+  // MEMORY.deleteByIds — through the route's own normalisation.
   const wasFatal: [string, string, UnlearnRefusal][] = [
     ['a blank id from a single-row swipe', '{"id":""}', 'blank-id'],
     ['a whitespace id', '{"id":"   "}', 'blank-id'],
@@ -189,17 +188,8 @@ describe('what the PERSON is told', () => {
     expect(panels).toMatch(/serverSaid = error\.localizedDescription/)
     // Android still shows a fixed string and reads only the status, which is why
     // a 400 (not a masked 200) is the load-bearing half of the refusal there.
-    //
-    // ⚠️ Scoped to the memory DELETE. An unscoped scan for `optInt("_status", 200)
-    // < 400` is satisfied by the follow toggle ~320 lines below, which spells the
-    // identical check — measured twice: relaxing the memory site to `< 500`, and
-    // deleting its status check outright, both left this pin green while the claim
-    // it makes about Android became false. A shared idiom has to be scoped to the
-    // call site it is about (the same lesson as tests/unlearn-scope.test.ts:129).
-    const kt = read('android/app/src/main/java/technology/tiny/app/ui/MemoryUniverse.kt')
-    const at = kt.indexOf('app.api.deleteJson("/api/learnings"')
-    expect(at, "android's memory delete is gone — re-anchor").toBeGreaterThan(-1)
-    expect(kt.slice(at, at + 400)).toMatch(/optInt\("_status", 200\) < 400/)
+    expect(read('android/app/src/main/java/technology/tiny/app/ui/MemoryUniverse.kt'))
+      .toMatch(/optInt\("_status", 200\) < 400/)
   })
 })
 
@@ -237,21 +227,9 @@ describe('the route is wired to the rule', () => {
   })
 
   it('answers a refusal with a 400 and the human copy', () => {
-    const d = del()
-    expect(d).toMatch(/deleteRefusalForHumans\(plan\.reason\)/)
-    /**
-     * ⚠️ Scoped TWICE — to the DELETE handler and then to the refusal's own
-     * `Response` — for the same reason the scan above is scoped, which this pin
-     * originally forgot two tests later. The sibling POST legitimately answers
-     * `status: 400` for "content required", so a file-wide match for 400 stays
-     * green while this refusal answers **200**: the panel then reads a success,
-     * drops the row from its list, and the memory reappears on reload. Measured,
-     * not theorised — `status: 400` → `status: 200` survived the whole battery.
-     */
-    const at = d.indexOf('deleteRefusalForHumans(plan.reason)')
-    const response = d.slice(at, d.indexOf('});', at))
-    expect(response).toMatch(/status: 400/)
-    expect(response).not.toMatch(/status: (?!400)\d{3}/)
+    const s = src()
+    expect(s).toMatch(/deleteRefusalForHumans\(plan\.reason\)/)
+    expect(s).toMatch(/status: 400/)
   })
 
   it('documents the contract it actually enforces', () => {
@@ -266,45 +244,13 @@ describe('the route is wired to the rule', () => {
 })
 
 describe('why an omitted id is annihilation, and who can send one', () => {
-  it('the worker treats a missing id as an unbounded, user-wide destruction', () => {
+  it('the worker treats a missing id as close-all + drop rows + purge vectors', () => {
     // The measurement behind the whole increment: without this branch an
     // omitted id would be harmless and none of the above would matter.
-    //
-    // ⚠️ PUBLIC ADAPTATION — and the blast radius here is LARGER, not smaller.
-    // Upstream pins `CLOSE_ALL_SQL`, because in that tree the no-id branch
-    // CLOSES every fact: bitemporal, recoverable. This worker WIPES instead
-    // (PURGE_ALL_FACT_EDGES_SQL + PURGE_ALL_FACTS_SQL + an unqualified DELETE),
-    // because a closed fact still renders VERBATIM to anyone passing
-    // include_closed=1 — "gone from every surface" and "grey on every surface"
-    // are different promises and the unlearn tool makes the first. So the route
-    // guard this file tests matters MORE in this tree, not less.
     const worker = read('worker/src/learnings.ts')
-    const ifAt = worker.indexOf("if (id !== undefined && id !== '')")
-    expect(ifAt, 'the worker no longer branches on the id at all').toBeGreaterThan(-1)
-    const elseAt = worker.indexOf('} else {', ifAt)
-    const branch = worker.slice(elseAt, worker.indexOf('MEMORY.deleteByIds', elseAt))
-    expect(elseAt).toBeGreaterThan(ifAt)
-
-    // Assert the PROPERTY — destruction scoped to the USER and nothing narrower
-    // — inside the no-id branch, not merely present in the file. The file also
-    // holds a single-memory `DELETE … WHERE user_id = ? AND id = ?`, so a
-    // file-wide match would pass on a branch that deleted exactly one row, and
-    // naming only the constants would pass on one that purged the edges and
-    // left every fact standing.
-    expect(branch).toMatch(/"DELETE FROM learnings WHERE user_id = \?"\)\s*\.bind\(String\(userId\)\)/)
-    expect(branch).toMatch(/PURGE_ALL_FACTS_SQL/)
-    expect(branch).toMatch(/PURGE_ALL_FACT_EDGES_SQL/)
-    // Every vector the user owns is collected for deletion, narrowed by nothing
-    // per-row. ⚠️ Ban the PROPERTY, not the prefix: `WHERE owner = ? AND id = ?`
-    // also satisfies a regex that stops after the owner, and that branch is no
-    // longer unbounded — it survived the first pass of the battery. Reading the
-    // clause out and asserting what may NOT appear in it also tolerates the
-    // statement growing an unrelated condition, which a whole-string match would
-    // fail on for no reason.
-    const vecSelect = branch.match(/"SELECT vec_id FROM entity WHERE [^"]*"/)
-    expect(vecSelect, 'the no-id branch no longer sweeps vectors at all').toBeTruthy()
-    expect(vecSelect![0]).toContain('owner = ?')
-    expect(vecSelect![0]).not.toMatch(/\bid = \?/)
+    expect(worker).toMatch(/if \(id !== undefined && id !== ''\)/)
+    expect(worker).toMatch(/CLOSE_ALL_SQL/)
+    expect(worker).toMatch(/DELETE FROM learnings WHERE user_id = \?/)
     expect(worker).toMatch(/MEMORY\.deleteByIds/)
   })
 

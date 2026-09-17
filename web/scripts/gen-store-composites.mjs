@@ -314,9 +314,143 @@ export const WRIST_SHOTS = {
 }
 
 /**
+ * The raw geometry every hardcoded SOURCE-PIXEL crop in this repo was MEASURED against.
+ *
+ * ## Why this has to exist
+ *
+ * `statusBarPx: 116`, `SHEET`, the three carousel rects (`MONETIZE`, `IN_CALL`, `FLEET`), the
+ * `igCrop`s and gen-multi-device's `crop: {y,h}` are all pixel counts read off a specific capture.
+ * Every one of them is correct at exactly one raw size and silently wrong at any other — and for
+ * the two privacy crops the failure is a LEAK, not a layout error:
+ *
+ *   - 116px removes the Pixel's status bar, whose personal notification icons occupy rows 70–104
+ *     of a 1080×2410 capture. Probed in c68: composite the SAME screen from a 1440×3213 raw with
+ *     the same 116 and the delivered `play-01-hero.png` is a perfect 1080×2160 with the user's
+ *     Telegram and Instagram notifications legible at the top of the phone.
+ *   - `MONETIZE` is the wallet page's bottom card precisely BECAUSE the top of that page shows a
+ *     real balance and a real address (see its docblock — "do not widen it upward"). A taller raw
+ *     slides that rect up the page on its own.
+ *
+ * Nothing measured a raw's dimensions before c68: `pngSize` was read at every source and used only
+ * to scale. So a re-capture on a different device, or under a `wm size` override of the kind c67
+ * caught clamping, would be cropped by yesterday's numbers and pass every gate — right slot
+ * dimensions (c66), right md5 on both copies (c42), no blocked source (c40).
+ *
+ * ## Why declared per FAMILY and not per raw
+ *
+ * A per-file roster of 42 entries would be 42 hand-copied numbers guarding against hand-copied
+ * numbers. The families below are the four capture devices this loop actually drives, and the two
+ * wrist entries are DERIVED from `WRIST_SHOTS` — the same table the upload gate checks the
+ * delivered wrist pngs against (c66), so a wrist slot resize cannot leave a stale copy here.
+ *
+ * ⚠️ Order matters: the iPad match must precede the generic `ios/raw/` one, or every iPad raw is
+ * checked against the iPhone's 1320×2868 and the whole set is refused.
+ */
+export const RAW_GEOM = [
+  ...Object.values(WRIST_SHOTS).map((w) => ({
+    match: (s) => s === w.raw,
+    dims: w.dims,
+    label: `${w.label} (from WRIST_SHOTS)`,
+  })),
+  { match: (s) => /^ios\/raw\/.*ipad/.test(s), dims: [2064, 2752], label: 'iPad 13" simulator' },
+  { match: (s) => s.startsWith('ios/raw/'), dims: [1320, 2868], label: 'iPhone 6.9" simulator' },
+  /**
+   * ⚠️ `statusBarPx` is declared on the FAMILY, not on the shots, because that is what it is: a
+   * property of the capture device, measured in that device's pixels — the same thing `dims` says.
+   * Seven shots used to carry their own copy of the number with nothing tying it to a capture size.
+   *
+   * ⚠️ Only the phone family has one. The Wear AVD's watch face has no status bar to remove, and
+   * the iOS/iPadOS simulators override theirs to a clean 9:41 — so an absent `statusBarPx` means
+   * "this device has nothing to crop", which is why the content test iterates the families that
+   * DECLARE one rather than every android raw (the two 768² wrist raws live under `android/raw/`
+   * and have no bright status-bar row at all).
+   */
+  {
+    match: (s) => s.startsWith('android/raw/'),
+    dims: [1080, 2410],
+    label: 'Pixel 10',
+    statusBarPx: 116,
+  },
+]
+
+/** The declared geometry for a raw path, or null if no family claims it. */
+export const rawGeom = (src) => RAW_GEOM.find((g) => g.match(src)) ?? null
+
+/**
+ * Refuse to apply a source-pixel crop to a raw that is not the size the crop was measured on.
+ *
+ * ⚠️ A no-crop render is NOT checked, deliberately. Without a crop the source is scale-to-fit and
+ * any size composites correctly, so demanding a declared geometry there would refuse a legitimate
+ * new capture for no safety reason — the c38 rule (a gate that stops the safe work is a gate people
+ * delete). Geometry only becomes load-bearing when a number counted in source pixels is applied.
+ *
+ * ⚠️ Fails CLOSED on an unknown family and on a missing `src`: "I have no declared geometry for
+ * this raw" is not "the crop is fine". Both messages name the fix rather than the symptom.
+ */
+export function assertCropGeometry(src, srcW, srcH, { cropTop, crop } = {}, where) {
+  if (!cropTop && !crop) return
+  if (!src) {
+    throw new Error(
+      `${where}: a source-pixel crop was applied with no source path to check it against.\n` +
+        '  Pass `srcPath` so assertCropGeometry can verify the raw is the size the crop was measured on.'
+    )
+  }
+  const fam = rawGeom(src)
+  if (!fam) {
+    throw new Error(
+      `${where}: cropping ${src} in source pixels, but no RAW_GEOM family declares its geometry.\n` +
+        '  Add a family in gen-store-composites.mjs stating the size these crops were measured at.'
+    )
+  }
+  const [w, h] = fam.dims
+  if (srcW !== w || srcH !== h) {
+    throw new Error(
+      `${where}: ${src} is ${srcW}×${srcH}, but its crops were measured on a ${w}×${h} ` +
+        `${fam.label}.\n  A crop counted in source pixels is only right at one size — the Android ` +
+        'status bar (116px) and the wallet `MONETIZE` rect are PRIVACY crops, so a mis-sized raw ' +
+        'ships the notification icons / the real balance.\n  RE-MEASURE the crops against the new ' +
+        'capture and declare its geometry; do not scale the old numbers.'
+    )
+  }
+}
+
+/**
+ * How much to crop off the top of a capture: the status bar, which on the Pixel carries the user's
+ * personal notification icons (demo mode does not hide them on this build). 0 where the device has
+ * no bar to remove — the wrists — or where the simulator already overrode it to a clean 9:41.
+ *
+ * ⚠️ LOOKED UP from the source rather than declared per shot, which is c68's actual finding: seven
+ * SHOTS entries each carried their own `statusBarPx: 116`, and `aCrop = shot.ios ? 0 : shot.statusBarPx`
+ * derived platform from which KEY was set. Both are restatements of one fact — how tall the status
+ * bar is on the device that took the picture — so both are asked of the raw's family now.
+ *
+ * ⚠️ Verified by CONTENT, not by provenance: the store-asset suite decodes every raw whose family
+ * declares a bar and asserts no glyph row survives above the crop line, with margin. Measured rows
+ * on a 1080×2410 Pixel capture: glyphs at 70–104, so 116 clears them by 12px.
+ *
+ * ⚠️ Fails CLOSED on an unknown family — 0 would silently ship whatever is up there. A raw with no
+ * declared geometry cannot have a declared bar either, and `assertCropGeometry` refuses it anyway;
+ * this throws for the caller that asks the question before the crop is applied.
+ */
+export function statusBarPxFor(src) {
+  const fam = rawGeom(src)
+  if (!fam) {
+    throw new Error(
+      `no RAW_GEOM family declares ${src}, so its status-bar height is unknown.\n` +
+        '  Add a family stating the capture size and (if the device has a bar) its height in px.'
+    )
+  }
+  return fam.statusBarPx ?? 0
+}
+
+/**
  * The shot list. `caption` is the store caption (keep it under ~40 chars — it
- * renders at one or two lines); `statusBarPx` is how much to crop off the top
- * of the source (Android only: the personal notification icons live there).
+ * renders at one or two lines).
+ *
+ * ⚠️ There is no `statusBarPx` here any more (c68). Every entry used to carry `statusBarPx: 116`,
+ * which is a property of the CAPTURE DEVICE and not of the shot — see `RAW_GEOM` / `statusBarPxFor`.
+ * Seven copies of one measurement, tied to no capture size, was the defect: the same screen taken on
+ * a denser phone got cropped by yesterday's number and shipped the notification icons.
  *
  * Order mirrors the sets in store-assets/copy/*.md — the number prefix in the
  * output filename IS the upload order, since both consoles sort by filename.
@@ -327,7 +461,6 @@ const SHOTS = [
     caption: 'Create your own AI\nby chatting',
     ios: 'ios/raw/c8-chat-hero-authed.png',
     android: 'android/raw/c2-home-clean.png',
-    statusBarPx: 116,
     ig: true,
   },
   // ⚠️ PRIVACY DEFECT until c28 — the worst one found in this loop. Both the old
@@ -353,7 +486,6 @@ const SHOTS = [
     caption: 'Watch its memory grow',
     ios: 'ios/raw/c28-memory-graph.png',
     android: 'android/raw/c2-memory-graph.png',
-    statusBarPx: 116,
     ig: true,
     // Same reason as `voice`: the 4:5 card's default top-slice framed the empty
     // upper half of the canvas and cut the lowest node off at the card's edge.
@@ -367,7 +499,6 @@ const SHOTS = [
     caption: 'Meet AIs other\npeople built',
     ios: 'ios/raw/c9-universe.png',
     android: 'android/raw/c3-universe.png',
-    statusBarPx: 116,
   },
   // ⚠️ This shot had a REAL DEFECT until c27: with no `ios` source, `appleSrc`
   // silently fell back to the Android capture, so slot 4 of the **Apple 6.9" set**
@@ -382,7 +513,6 @@ const SHOTS = [
     caption: 'Call it like a person',
     ios: 'ios/raw/c27-voice-call.png',
     android: 'android/raw/c5-voice-call.png',
-    statusBarPx: 116,
     ig: true,
     // The IG card frames the BOTTOM of this screen, not the top. The in-call strip
     // ("In call with tiny — recorded; type or talk" + meter + End) is what "Call it
@@ -409,7 +539,6 @@ const SHOTS = [
     caption: 'Your phone becomes\na node',
     ios: 'ios/raw/c31-map-tracking.png',
     android: 'android/raw/c4-devices.png',
-    statusBarPx: 116,
     ig: true,
     // This shot has TWO subjects and they sit at opposite ends: the lit `tracking`
     // pill (y 384–542) and the HUD block (to y ~2820). A 4:5 crop at full width is
@@ -437,14 +566,12 @@ const SHOTS = [
     caption: 'It actually does things',
     ios: 'ios/raw/c27-tools.png',
     android: 'android/raw/c4-chat-streaming.png',
-    statusBarPx: 116,
   },
   {
     id: 'memory',
     caption: 'Teach it once.\nIt remembers.',
     ios: 'ios/raw/c10-memory.png',
     android: 'android/raw/c2-memory.png',
-    statusBarPx: 116,
   },
 ]
 
@@ -614,8 +741,16 @@ export const estWidth = (s, size, bold = true) => s.length * size * (bold ? 0.56
  * FORM SHEETS occupying only ~40% of a 2064×2752 screen — framing the full screen
  * there sells 60% empty black. `cropTop` is the degenerate top-only case and is
  * kept because the Android shots use nothing else.
+ *
+ * ⚠️ `srcPath` is REQUIRED whenever `cropTop`/`crop` is passed (c68) — it is the raw's repo-relative
+ * path, and the ONLY thing that makes a source-pixel crop checkable. This function is where the
+ * check belongs rather than in each caller: all four crop-using render sites across three
+ * generators funnel through here, so one gate covers them and a fifth inherits it.
  */
-export function compositeSvg(p, id, { W, H, src, srcW, srcH, cropTop, crop, caption, mode, captionSize, padScale, bandScale }) {
+export function compositeSvg(p, id, { W, H, src, srcPath, srcW, srcH, cropTop, crop, caption, mode, captionSize, padScale, bandScale }) {
+  // BEFORE any geometry is computed from the crop — a mis-sized raw must produce no SVG at all,
+  // not a correct-looking one that a later size check then passes.
+  assertCropGeometry(srcPath, srcW, srcH, { cropTop, crop }, `compositeSvg ${id}`)
   const pad = Math.round(W * 0.06 * (padScale ?? 1))
   const lines = caption.split('\n')
   // ⚠️ SHRINK-TO-FIT, and it is not optional. rsvg RENDERS text, it never measures
@@ -720,6 +855,48 @@ export const renderPng = (svgText, outPng, width) => {
   }
 }
 
+/**
+ * The canvas size each store slot requires, exported so the SLOT and the CHECK read one number.
+ *
+ * ⚠️ These were four inline literals in the render calls below, which is fine for producing a file
+ * and useless for verifying one: the consoles route and validate by PIXELS, not by filename (Apple
+ * infers the device family from the dimensions — that is why `apple-` and `ipad-` shots share one
+ * flat `en-US/` directory), so "the right size" is a property nothing downstream could state.
+ *
+ * ⚠️⚠️ The Play phone entry has ZERO margin and that is deliberate, not sloppy: Play caps a phone
+ * screenshot at **2:1** and 2160/1080 is exactly 2:1. The Pixel's native 1080×2410 is 2.231:1 and
+ * is REJECTED at upload while looking perfect locally — a whole set lost to a number no local step
+ * measured. So a height that drifts UP here is not a cosmetic difference.
+ */
+export const SLOT_DIMS = {
+  apple: { w: 1320, h: 2868, label: 'Apple 6.9" iPhone' },
+  ipad: { w: 2064, h: 2752, label: 'Apple 13" iPad' },
+  play: { w: 1080, h: 2160, label: 'Play phone (exactly 2:1 — Play\'s MAXIMUM ratio)' },
+  featureGraphic: { w: 1024, h: 500, label: 'Play feature graphic' },
+  playIcon: { w: 512, h: 512, label: 'Play hi-res icon' },
+}
+
+/**
+ * Which slot a store asset belongs to, by filename.
+ *
+ * ⚠️ Accepts BOTH names an asset has. The two Play graphics are RENAMED on their way into the
+ * upload tree (`play-icon-512.png` → `icon.png`) because `supply` reads them by those exact names,
+ * so a slot lookup that only knew the staging name would return null for the copy that actually
+ * gets uploaded — and a null slot means "unchecked", which is the hole this table exists to close.
+ * Order matters: `play-feature-graphic-…` and `play-icon-…` must be matched before the generic
+ * `play-` prefix, or both land in the phone-screenshot slot and get checked against 1080×2160.
+ */
+export const slotOf = (name) => {
+  if (name === 'play-feature-graphic-1024x500.png' || name === 'featureGraphic.png') {
+    return 'featureGraphic'
+  }
+  if (name === 'play-icon-512.png' || name === 'icon.png') return 'playIcon'
+  if (name.startsWith('apple-')) return 'apple'
+  if (name.startsWith('ipad-')) return 'ipad'
+  if (name.startsWith('play-')) return 'play'
+  return null
+}
+
 /** PNG IHDR read — no image lib needed, and it fails loudly on a non-PNG. */
 export function pngSize(path) {
   const buf = readFileSync(path)
@@ -764,21 +941,25 @@ const main = () => {
     const applePath = join(RAW, appleSrc)
     if (!appleBlock && !existsSync(applePath)) throw new Error(`missing raw: ${appleSrc}`)
     const aSize = pngSize(applePath)
-    // Only crop a status bar off ANDROID sources; the iOS sim shots already
-    // have a clean overridden status bar (9:41, full battery, no notifications).
-    const aCrop = shot.ios ? 0 : shot.statusBarPx
+    // How tall this source's status bar is, asked of the SOURCE (c68). This used to read
+    // `shot.ios ? 0 : shot.statusBarPx` — deriving "which platform is this?" from which key the shot
+    // happened to set, which is the same fact stated twice: the raw's own path already says. And the
+    // `? 0` was doing double duty as "iOS bars are pre-cleaned", so a future family whose bar DOES
+    // need cropping would have inherited the iOS exemption by being named `ios/raw/…`.
+    const aCrop = statusBarPxFor(appleSrc)
     if (!appleBlock) renderPng(
       compositeSvg(p, `a${n}`, {
-        W: 1320,
-        H: 2868,
+        W: SLOT_DIMS.apple.w,
+        H: SLOT_DIMS.apple.h,
         src: b64(applePath),
+        srcPath: appleSrc,
         srcW: aSize.w,
         srcH: aSize.h,
         cropTop: aCrop,
         caption: shot.caption,
       }),
       join(OUT, `apple-${idx}-${shot.id}.png`),
-      1320
+      SLOT_DIMS.apple.w
     )
 
     const playBlock = shot.android
@@ -796,12 +977,13 @@ const main = () => {
       // screen is unchanged; only the surrounding canvas is shorter.
       renderPng(
         compositeSvg(p, `p${n}`, {
-          W: 1080,
-          H: 2160,
+          W: SLOT_DIMS.play.w,
+          H: SLOT_DIMS.play.h,
           src: b64(pPath),
+          srcPath: shot.android,
           srcW: pSize.w,
           srcH: pSize.h,
-          cropTop: shot.statusBarPx,
+          cropTop: statusBarPxFor(shot.android),
           caption: shot.caption,
         }),
         join(OUT, `play-${idx}-${shot.id}.png`),
@@ -821,13 +1003,14 @@ const main = () => {
           W: 1080,
           H: 1350,
           src: b64(igPath),
+          srcPath: igSrc,
           srcW: iSize.w,
           srcH: iSize.h,
           // ⚠️ `igCrop` exists because the default inset shows the TOP of the screen,
           // which is the wrong half for any shot whose subject sits at the BOTTOM.
           // Pass it when the caption is about something down there (see `voice`).
           crop: shot.igCrop,
-          cropTop: shot.ios ? 0 : shot.statusBarPx,
+          cropTop: statusBarPxFor(igSrc),
           caption: shot.caption,
           mode: 'inset',
           captionSize: 72,
@@ -872,12 +1055,15 @@ const main = () => {
     const size = pngSize(path)
     renderPng(
       compositeSvg(p, `t${m}`, {
-        W: 2064,
-        H: 2752,
+        W: SLOT_DIMS.ipad.w,
+        H: SLOT_DIMS.ipad.h,
         src: b64(path),
+        srcPath: shot.ipad,
         srcW: size.w,
         srcH: size.h,
-        cropTop: 0, // simulator status bar is already clean
+        // 0 for the iPad family, but ASKED rather than asserted — the simulator's clean 9:41 bar is
+        // a fact about the device, and this is where that fact is recorded.
+        cropTop: statusBarPxFor(shot.ipad),
         crop: shot.crop,
         caption: shot.caption,
         captionSize: 72,

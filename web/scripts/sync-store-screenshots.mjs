@@ -35,7 +35,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 
 import { dirname, join, resolve } from 'node:path'
 // ⚠️ Imported, not transcribed. See the BLOCKED docblock below — a hand-copied version of these
 // two lists is what let a known-leaking Play shot sit in the upload tree.
-import { blockedOutputs, WRIST_SHOTS } from './gen-store-composites.mjs'
+import { blockedOutputs, SLOT_DIMS, slotOf, WRIST_SHOTS } from './gen-store-composites.mjs'
 import { blockedSlides } from './gen-social-carousels.mjs'
 
 const ROOT = resolve(import.meta.dirname, '..')
@@ -248,6 +248,78 @@ for (const [srcName, destRel] of MAP) {
   }
 }
 
+/**
+ * Every owned asset must be the SIZE its slot routes on — not just consistent with staging.
+ *
+ * ⚠️ c66: this check existed, for exactly the TWO wrist shots (below). The other 18 owned assets
+ * got md5 drift only, and md5 drift cannot see a wrong size: two byte-identical copies of a
+ * 640×480 file in Apple's 6.9" iPhone slot are perfectly in sync. Probed before fixing — a
+ * sandbox root with `apple-01-hero.png` replaced by a real 640×480 PNG in BOTH places reported
+ * `checked: 20 up to date, 0 drifted`.
+ *
+ * 🔑 **The consoles route and validate by PIXELS, not by filename** — this script's own docblock
+ * says so at the top, to explain why `apple-` and `ipad-` shots share one flat `en-US/` directory.
+ * A rule stated to justify a layout is a rule nothing was enforcing: the filename is for humans,
+ * and the humans were the only ones checking it.
+ *
+ * ⚠️⚠️ And the Play phone slot has ZERO margin. Play caps a phone screenshot at 2:1; the
+ * composites are 1080×2160 (exactly 2:1) while the Pixel's native capture is 1080×2410 = 2.231:1,
+ * which is REJECTED at upload while looking perfect locally. That failure mode — a whole set lost
+ * to a number no local step measured — is the reason this pass exists rather than trusting the
+ * generator to have used the right canvas.
+ *
+ * Expectations come from `SLOT_DIMS` in the generator that RENDERS these canvases, so a slot resized
+ * there cannot disagree with the check here. A hand-copied roster is the defect class this guards.
+ */
+let geom = 0
+let geomOk = 0
+const pngDims = (abs) => {
+  // IHDR, not `sips`: it needs no subprocess, and it fails loudly on a file that is not a PNG
+  // (which a store slot must never hold anyway). Same reader the generator measures raws with.
+  const buf = readFileSync(abs)
+  if (buf.length < 24 || buf.readUInt32BE(0) !== 0x89504e47) return null
+  return [buf.readUInt32BE(16), buf.readUInt32BE(20)]
+}
+// ONE place where a geometry complaint becomes an exit code. Three branches below report, and
+// three separate `geom++` lines would be three chances to print a problem that does not fail —
+// which is this whole pass's own defect class (a rule stated, nothing enforcing it) reappearing
+// one level down. Printing and counting are the same act, so they are one function.
+const geomProblem = (msg) => {
+  console.error(msg)
+  geom++
+}
+for (const [srcName, destRel] of MAP) {
+  // A blocked asset's SIZE is not the interesting fact about it, and printing "✓ correct size" for
+  // a known-unsafe file next to its own DO-NOT-UPLOAD is the c43 mistake. The safety pass owns it.
+  if (BLOCKED_NAMES.has(srcName)) continue
+  const slot = slotOf(srcName)
+  if (!slot) {
+    // An owned asset whose name matches no slot cannot be size-checked, and silence would read as
+    // a pass. Same shape as an unscanned directory: unmeasurable must be reported, not skipped.
+    geomProblem(`  ! UNSIZED  ${srcName} — no SLOT_DIMS entry matches this name, so its` +
+      ' dimensions are unchecked. Add a slot in gen-store-composites.mjs.')
+    continue
+  }
+  const want = SLOT_DIMS[slot]
+  for (const abs of [join(FINAL, srcName), join(ROOT, destRel)]) {
+    if (!existsSync(abs)) continue // MISSING SOURCE / ABSENT is the drift pass's complaint
+    const got = pngDims(abs)
+    if (!got) {
+      geomProblem(`  ✗ NOT A PNG  ${abs.replace(`${ROOT}/`, '')} — a store slot must hold a PNG`)
+      continue
+    }
+    if (got[0] !== want.w || got[1] !== want.h) {
+      geomProblem(
+        `  ✗ GEOMETRY  ${abs.replace(`${ROOT}/`, '')} is ${got.join('×')}, expected` +
+          ` ${want.w}×${want.h} (${want.label}). The stores route and validate by DIMENSIONS, not` +
+          ' by filename — a wrong-sized shot is rejected at upload, or lands in another slot.',
+      )
+      continue
+    }
+    geomOk++
+  }
+}
+
 // Anything in a tree that ISN'T owned is an orphan: a file no generator owns, which is precisely
 // the shape of the bug this script exists to prevent.
 //
@@ -400,8 +472,15 @@ if (existsSync(join(ROOT, PLAY_WEAR))) {
       : `(wrist sets: ${wristOk} verified against their raws + expected dimensions)`,
   )
 }
+// Stated on every run, and stated as a COUNT of what was measured: "up to date" was already
+// printing while an asset sat in the wrong slot size, so silence here would repeat that.
+console.log(
+  geom
+    ? `(slot geometry: ${geom} problem(s) above, ${geomOk} copies correct)`
+    : `(slot geometry: ${geomOk} copies match their slot's required pixels)`,
+)
 
-if (check && (drifted || missing || blocked || unsafeVideos || wrist)) {
+if (check && (drifted || missing || blocked || unsafeVideos || wrist || geom)) {
   if (drifted || missing) {
     console.error(
       '\nFAIL: an upload from this tree would ship assets that do not match store-assets/final.',
@@ -432,6 +511,15 @@ if (check && (drifted || missing || blocked || unsafeVideos || wrist)) {
       `FAIL: ${wrist} problem(s) with the wrist sets. Apple requires a screenshot set per device` +
         " family and Play won't show the Wear tab without one, so a missing wrist shot is a blocked" +
         ' submission, not a cosmetic gap.',
+    )
+  }
+  if (geom) {
+    console.error(
+      `FAIL: ${geom} asset copy/copies are not the size their store slot requires. The consoles` +
+        ' route and validate by DIMENSIONS, not by filename, so this is not cosmetic: Apple infers' +
+        " the device family from the pixels, and Play REJECTS a phone shot over 2:1 — the Pixel's" +
+        ' native 1080×2410 is 2.231:1 and looks perfect locally right up to the upload. Regenerate' +
+        ' with gen-store-composites.mjs rather than resizing a deliverable by hand.',
     )
   }
   if (blocked) {

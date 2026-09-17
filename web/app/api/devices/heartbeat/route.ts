@@ -24,7 +24,7 @@ const json = (body: any, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
 export async function POST(req: Request) {
-  const { deviceId, token, capabilities, lanUrl } = await req.json().catch(() => ({} as any))
+  const { deviceId, token, capabilities, lanUrl, wantUnread } = await req.json().catch(() => ({} as any))
   if (!deviceId || !token) return json({ ok: false, error: 'deviceId and token required' }, 400)
 
   // 10s bound — a daemon heartbeats continuously, so a connect-but-never-
@@ -46,6 +46,9 @@ export async function POST(req: Request) {
       // COALESCE keeps the stored address — a proxy that sent '' on every beat
       // would erase it 2880 times a day.
       ...(lanUrl != null && String(lanUrl).trim() !== '' ? { lanUrl: String(lanUrl) } : {}),
+      // Forwarded for the same reason lanUrl is (see header): a field this hop
+      // does not pass does not exist. Opt-in DM badge for glass devices.
+      ...(wantUnread ? { wantUnread: '1' } : {}),
     }),
     signal: AbortSignal.timeout(10_000),
   }).catch(() => null)
@@ -53,5 +56,8 @@ export async function POST(req: Request) {
   if (!res) return json({ ok: false, error: 'registry unreachable' }, 424)
   const data = await res.json().catch(() => ({}))
   if (!res.ok || data.error) return json({ ok: false, error: data.error || 'heartbeat failed' }, res.status === 401 ? 401 : 424)
-  return json({ ok: true })
+  // `unread` rides back only when the worker computed it (wantUnread set).
+  // Rebuilt-reply rule: any worker field the device needs must be lifted
+  // explicitly HERE — this return is why extra fields don't pass by default.
+  return json({ ok: true, ...(typeof data.unread === 'number' ? { unread: data.unread } : {}) })
 }

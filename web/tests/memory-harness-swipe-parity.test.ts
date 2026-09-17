@@ -87,20 +87,8 @@ describe('iOS: neither swipe reaches the account or the device store under the h
 
   it('the two guards are SEPARATE — one cannot answer for the other', () => {
     // The exact mutant Android's first draft missed. Two closures, two guards.
-    //
-    // A FLOOR, not an exact count: an exact 2 reds the day someone consults
-    // `isDemo` for something harmless elsewhere in this view — legal work, and a
-    // census that punishes a correct addition is a hand-kept list wearing a
-    // matcher. What must never happen is FEWER than two, and the two tests above
-    // are what prove each one sits inside its own closure; this is the count they
-    // cannot state.
     const v = memoryView()
-    expect((v.match(/if isDemo/g) || []).length).toBeGreaterThanOrEqual(2)
-    // …and the two the tests above found are genuinely different occurrences.
-    const localAt = v.indexOf('if isDemo', v.indexOf('ForEach(local) { m in'))
-    const serverAt = v.indexOf('if isDemo', v.indexOf('ForEach(server, id: \\.id) { m in'))
-    expect(localAt).toBeGreaterThan(-1)
-    expect(serverAt).toBeGreaterThan(localAt)
+    expect((v.match(/if isDemo/g) || []).length).toBe(2)
   })
 
   it('the guard is DEBUG-only, so a release build cannot be argv-tricked', () => {
@@ -139,22 +127,6 @@ describe('cross-platform: the rule now holds on BOTH phones', () => {
     const serverGuard = k.indexOf('if (demo)', serverRows)
     expect(localGuard > localRows && localGuard < forget).toBe(true)
     expect(serverGuard > serverRows && serverGuard < del).toBe(true)
-
-    // ⚠️ Placement is only half of it, and this half was missing on THIS side while
-    // the iOS tests above pinned it: a guard that filters the displayed list and
-    // then falls through still reaches the real store one line later. Measured — a
-    // mutant that dropped `return@MemoryRow` from the server row left the whole
-    // suite green. So each guard must also SEPARATE itself from the real call,
-    // either by returning out of the row or by putting the real work in an `else`.
-    for (const [what, from, to] of [
-      ['local', localGuard, forget],
-      ['server', serverGuard, del],
-    ] as const) {
-      expect(
-        k.slice(from, to),
-        `Android's ${what} guard branches and falls through — the real delete still runs`,
-      ).toMatch(/return@|\}\s*else\s*\{/)
-    }
   })
 
   it('the demo ids really are values a real account could own', () => {

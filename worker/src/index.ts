@@ -22,7 +22,6 @@ import { LearningsListCall, LearningsAddCall, LearningsDeleteCall, GraphNeighbor
 import { EventsEmitCall, EventsListCall } from "./events";
 import { sweepToolUpdates } from "./tool-updates";
 import { sweepReconcileAlarm } from "./reconcile-alarm";
-import { sweepMissedTasks } from "./relay-missed";
 import { ArchiveCreateCall, ArchiveGetCall, ArchiveListCall, ArchiveDeleteCall } from "./archives";
 import { JobsCreateCall, JobsListCall, JobsDeleteCall, runDueJobs } from "./scheduler";
 import { PushKeyCall, PushSubscribeCall, PushUnsubscribeCall, PushSendCall, sendPushToUser } from "./push";
@@ -285,16 +284,6 @@ export default {
         .run()
         .catch(() => {}),
     );
-    // 💻 THE TASK THAT NEVER ARRIVED. `use_device` hands the agent a claim
-    // ticket after 45s — "The task was delivered; fetch the outcome later" — but
-    // `delivered` only flips when the DEVICE polls. An envelope no device ever
-    // picked up was silently DELETEd an hour later by the relay's opportunistic
-    // sweep, and the promised ticket then answered "No result yet — the task may
-    // still be running". Both sentences describe work in progress; the work
-    // never started and every trace of it was gone. This says so, once, and
-    // reaps what it reported in the same breath (there is no `reported` column —
-    // the delete IS the idempotency). Never throws.
-    ctx.waitUntil(sweepMissedTasks(env, Math.floor(Date.now() / 1000)));
     // 💸 THE RECONCILER. /pay/spend-reverse refuses to refund any reservation
     // whose signed authorization left us (c47) — correct, because we cannot see
     // whether the payee submitted it. That refusal is what keeps a landing

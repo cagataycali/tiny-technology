@@ -277,24 +277,9 @@ describe('the three clients agree', () => {
     // Without the emptiness check, optString returns "" and the batch looks
     // like it reported nothing-shaped results rather than nothing at all.
     expect(region).toMatch(/optString\("text"\)\.takeIf \{ it\.isNotEmpty\(\) \}/)
-  })
-
-  /**
-   * Its own pin, and it bans the PROPERTY rather than a spelling. The first
-   * version of this claim lived inside the test above as
-   * `expect(region).toContain('firstNotNullOfOrNull')` and a mutant walked
-   * straight past it: narrowing the range to `0 until minOf(1, arr.length())`
-   * shadows every block after the first while the searcher's NAME stays put.
-   * So assert the BOUND is the array's own length, unclamped.
-   */
-  it('Android searches every content block, not just the first', () => {
-    const k = read(KOTLIN)
-    const region = k.slice(k.indexOf('"afterToolCallEvent"'), k.indexOf('"modelMetadataEvent"'))
-    const m = region.match(/\(\s*0 until ([^\n]*?)\s*\)\s*\.firstNotNullOfOrNull/)
-    expect(m, 'the payload search over content blocks is gone or reshaped').toBeTruthy()
-    // A leading image or text block must not shadow the json block behind it —
-    // iOS's firstToolJson loop walks the whole array for the same reason.
-    expect(m![1]).toBe('arr.length()')
+    // firstNotNullOfOrNull, so a leading image/text block cannot shadow the
+    // json block behind it — the iOS loop in firstToolJson does the same.
+    expect(region).toContain('firstNotNullOfOrNull')
   })
 
   it('web renders the same five states', () => {

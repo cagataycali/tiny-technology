@@ -8,11 +8,9 @@
  *   body: JSON.stringify({ userId, ...(id !== undefined && id !== '' ? { id } : {}) })
  *
  * That test does not refuse a blank id, it OMITS it, and omission is the wire
- * form of "erase everything": the worker's `else` branch purges every fact and
- * every fact edge the user owns (`PURGE_ALL_FACTS_SQL`,
- * `PURGE_ALL_FACT_EDGES_SQL`), runs an unqualified
- * `DELETE FROM learnings WHERE user_id = ?`, and hands every one of their
- * vectors to `MEMORY.deleteByIds` (`worker/src/learnings.ts`). So:
+ * form of "erase everything": the worker's `else` branch runs `CLOSE_ALL_SQL`,
+ * `DELETE FROM learnings WHERE user_id = ?` and `MEMORY.deleteByIds` over every
+ * vector the user owns (`worker/src/learnings.ts`). So:
  *
  *   { id: '42' } → { userId, id: '42' }   close one, recoverable as history
  *   { id: ''   } → { userId }             ⚠️ ERASE EVERYTHING, not recoverable

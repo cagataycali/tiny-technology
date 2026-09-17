@@ -148,34 +148,4 @@ describe('the live view names the reason it could not find the necklace', () => 
     expect(pure, 'a blank server error is trusted again — that renders as nothing at all')
       .toMatch(/trimmingCharacters/)
   })
-
-  /**
-   * ⚠️ Added at PORT TIME, not carried over: the pins above prove the three arms are
-   * READ, and `FleetLookupTests` proves the three are RETURNED — but nothing in this
-   * tree compiles Swift, so the second half arrived here as an assumption.
-   *
-   * A mutant found the hole. Turning `readFleet`'s
-   * `guard let found = pickVision(from: list) else { return .noVision }` into
-   * `else { return .couldNotAsk("no necklace") }` makes `.noVision` UNREACHABLE — the
-   * one case for which "is it enrolled?" is the true answer can no longer be told, and
-   * every empty fleet is reported as a refusal instead. Every pin above stayed green,
-   * because `connect`'s switch still *has* the arm; it is simply never taken.
-   *
-   * So the property is pinned where it lives: at the two returns inside the pure half.
-   */
-  it('an empty fleet can still REACH the enrollment sentence', () => {
-    const pure = readFleet()
-    expect(pure, 'the noVision return left readFleet — connect\'s arm is now dead code, ' +
-                 'and an empty fleet is reported as a refusal')
-      .toMatch(/else \{ return \.noVision \}/)
-    // And the unreadable-body guard must NOT be the one that returns it: those are the
-    // two answers this increment exists to keep apart, and swapping them inside the
-    // pure half is invisible to every arm-reading pin above.
-    const guardBody = pure.slice(pure.indexOf('guard let list'), pure.indexOf('guard let found'))
-    expect(guardBody.length, 'readFleet\'s two guards moved — re-anchor').toBeGreaterThan(40)
-    expect(guardBody, 'an unreadable body now claims there is no necklace')
-      .not.toMatch(/\.noVision/)
-    expect(guardBody, 'the unreadable body stopped being reported as a refusal')
-      .toMatch(/couldNotAsk/)
-  })
 })

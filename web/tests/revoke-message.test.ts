@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   REVOKE_FAILED_LEAD,
+  REVOKE_UNCONFIRMED_LEAD,
+  revokeDecided,
   revokeMessage,
   revokeStatusLine,
 } from '../lib/devices/revoke-message'
@@ -30,10 +32,19 @@ import {
  * This suite owns the web rule (real unit tests) and the cross-surface agreement:
  * the same lead clause, the same status words, and neither client dropping a row
  * whose token might still be live.
+ *
+ * ⚠️ …and then the fix overshot. "Its token still works" is a CLAIM, and all three
+ * surfaces made it for a dropped connection and for a worker that broke mid-write —
+ * the two failures where the revoke may well have HAPPENED and only the answer was
+ * lost. That is the same error as the sentence it replaced, pointing the same wrong
+ * way: it tells the reader the question is settled. `revokeDecided` is the line, and
+ * it is the one `lib/chat/relay-send.ts` draws server-side in the same words — a 4xx
+ * is a decision, a 5xx or a dead connection is the absence of one.
  */
 
 const ROOT = process.cwd()
 const PAGE = join(ROOT, 'app/devices/page.tsx')
+const ROUTE = join(ROOT, 'app/api/devices/route.ts')
 const SWIFT = join(ROOT, 'ios/Tiny/Sources/Panels.swift')
 const API = join(ROOT, 'ios/Tiny/Sources/Api.swift')
 const WORKER = join(ROOT, 'worker/src/devices.ts')
@@ -100,18 +111,65 @@ describe('a failed revoke says what it left behind', () => {
     expect(revokeMessage(401, { ok: true })).not.toBeNull()
   })
 
-  it('every failure leads with the token, not with the request', () => {
+  it('a DECIDED failure leads with the token still working', () => {
+    // A 4xx refused before anything was written — see `revokeDecided`. This is the
+    // fact someone revoking a laptop they just lost needs, before any diagnosis.
     for (const [status, body] of [
       [401, { ok: false, error: 'login required' }],
       [400, { ok: false, error: 'deviceId required' }],
       [424, { ok: false, error: 'revoke failed' }],
-      [503, { ok: false, error: 'aborted', retryable: true }],
-      [0, null],
     ] as const) {
       const msg = revokeMessage(status, body)!
       expect(msg.startsWith(REVOKE_FAILED_LEAD), `status ${status} buried the outcome`).toBe(true)
       expect(msg.toLowerCase()).toContain('still works')
     }
+  })
+
+  it('⭐ only a 4xx may claim the token survived', () => {
+    // 🔴 THE INCREMENT. Every one of these used to open with "Not revoked — its
+    // token still works.", which is a claim about a credential made with nothing
+    // behind it: on all three the UPDATE may have run and only the answer been lost.
+    for (const [status, body] of [
+      [0, null],                                              // the fetch threw
+      [503, { ok: false, error: 'aborted', retryable: true }], // route's transient arm
+      [500, { ok: false, error: 'worker 500', retryable: true }],
+      [502, null],                                            // an HTML error page
+      [200, null],                                            // …served with a 200
+      [200, { ok: false, error: 'revoke failed' }],
+    ] as const) {
+      const msg = revokeMessage(status, body)!
+      expect(msg.startsWith(REVOKE_UNCONFIRMED_LEAD), `status ${status} still asserts`).toBe(true)
+      // The specific words that were false. Not merely "a different lead": a
+      // paraphrase that still promised a live token would pass a prefix check
+      // against a reworded constant.
+      expect(msg.toLowerCase(), `status ${status} promises a live token`)
+        .not.toContain('still works')
+      expect(msg.toLowerCase(), `status ${status} claims the revoke did not happen`)
+        .not.toContain('not revoked')
+    }
+    // …and the boundary is exactly 400..499, tested rather than assumed.
+    expect(revokeDecided(399)).toBe(false)
+    expect(revokeDecided(400)).toBe(true)
+    expect(revokeDecided(499)).toBe(true)
+    expect(revokeDecided(500)).toBe(false)
+  })
+
+  it('the unconfirmed lead offers the only action that is actually safe', () => {
+    // It is allowed to say "revoking again is safe" because of the SQL pinned at
+    // the bottom of this file. If that premise goes, so must this sentence.
+    expect(REVOKE_UNCONFIRMED_LEAD.toLowerCase()).toContain('revoking again is safe')
+    // Neither lead diagnoses the request — the appended reason does that — and
+    // neither may carry a retry instruction of its own, so the two leads compose
+    // with the same status words. (The reason for a 5xx already ends "try again",
+    // which now agrees with the lead instead of contradicting it.)
+    for (const lead of [REVOKE_FAILED_LEAD, REVOKE_UNCONFIRMED_LEAD]) {
+      expect(lead.endsWith('.'), `${lead} has no terminator`).toBe(true)
+      expect(lead.toLowerCase()).not.toContain('try again')
+      expect(lead.toLowerCase()).not.toContain('http')
+    }
+    // Two leads that read alike are the point; two that ARE alike is a copy-paste.
+    expect(REVOKE_UNCONFIRMED_LEAD).not.toBe(REVOKE_FAILED_LEAD)
+    expect(revokeMessage(0, null)).not.toContain('  ')
   })
 
   it('a raw transport exception never reaches the screen', () => {
@@ -123,6 +181,38 @@ describe('a failed revoke says what it left behind', () => {
     expect(msg).toContain('Server hiccup (HTTP 503)')
     // A fetch that threw client-side has no status at all.
     expect(revokeMessage(0, null)).toContain('No response')
+  })
+
+  it('the route stopped answering a lost write with a decision', () => {
+    // 🔴 The other half of the increment, and the reason the rule above can trust
+    // a status at all. `DELETE` sent `!ok` to 424 — so a worker 5xx, and an HTML
+    // error page `relay` parses to `{}`, arrived wearing the code the clients read
+    // as "refused, nothing written". Only a worker 4xx may keep 424; GET had drawn
+    // this line already and DELETE never did.
+    const route = code(readFileSync(ROUTE, 'utf8'))
+    const fn = route.slice(route.indexOf('export async function DELETE'))
+    expect(fn.length, 'DELETE moved — re-anchor').toBeGreaterThan(300)
+    // The status has to be READ before it can be branched on — `relay` returns it
+    // and this handler used to drop it.
+    expect(fn, 'DELETE stopped reading the worker’s status')
+      .toMatch(/const \{ data, ok, status, transient \} = await relay\(/)
+    const decided = fn.indexOf('status >= 400 && status <= 499')
+    const degraded = fn.indexOf('if (!ok || data.error)')
+    expect(decided, 'the worker-4xx arm is gone — every failure is a decision again')
+      .toBeGreaterThan(-1)
+    expect(degraded, 'the catch-all arm is gone').toBeGreaterThan(-1)
+    // ORDER is the whole defence: the 4xx arm must come first, or `!ok` swallows it
+    // again and a decision is reported as degraded — the mirror of the old bug.
+    expect(degraded, 'the catch-all runs first, so no 4xx ever reaches its own arm')
+      .toBeGreaterThan(decided)
+    // And each arm's code, so a swap of the two numbers fails here.
+    expect(fn.slice(decided, degraded), 'the worker-4xx arm no longer answers 424')
+      .toMatch(/'revoke failed' \}, 424\)/)
+    expect(fn.slice(degraded), 'a degraded worker is not marked retryable')
+      .toMatch(/retryable: true \}, 503\)/)
+    // 503 is in `statusOwnsTheMessage`, so the clients word it themselves — which
+    // is what keeps `worker 500` off a person's screen.
+    expect(revokeStatusLine(503, 'worker 500')).not.toContain('worker 500')
   })
 
   it('the server keeps its words where it is describing THIS request', () => {
@@ -154,6 +244,33 @@ describe('a failed revoke says what it left behind', () => {
     // outcome on whichever surface is in their hand.
     const swift = code(readFileSync(SWIFT, 'utf8'))
     expect(swift).toContain(`static let lead = "${REVOKE_FAILED_LEAD}"`)
+  })
+
+  it('⭐ all three surfaces hedge with the same sentence, and by the same rule', () => {
+    // A lead added on one surface only would leave the other two claiming a live
+    // token on a lost connection — which is the bug, still shipping, on two clients.
+    // Swift's continuation is indented, so match the literal rather than the line.
+    const swift = code(readFileSync(SWIFT, 'utf8'))
+    const kt = code(readFileSync(KT, 'utf8'))
+    expect(swift, 'iOS has no unconfirmed lead')
+      .toContain(`static let unconfirmedLead =\n        "${REVOKE_UNCONFIRMED_LEAD}"`)
+    expect(kt, 'Android has no unconfirmed lead')
+      .toContain(`const val unconfirmedLead =\n        "${REVOKE_UNCONFIRMED_LEAD}"`)
+    // The RULE too, not just the string: three copies of a sentence chosen by three
+    // different conditions is the same drift wearing matching words. Each surface
+    // spells 400..499 in its own language, and each must be asked by `message`.
+    expect(swift).toMatch(/static func decided\(_ status: Int\) -> Bool \{ \(400\.\.\.499\)\.contains\(status\) \}/)
+    expect(kt).toMatch(/fun decided\(status: Int\): Boolean = status in 400\.\.499/)
+    expect(swift, 'iOS composes a fixed lead again')
+      .toMatch(/\(decided\(code\) \? lead : unconfirmedLead\)/)
+    expect(kt, 'Android composes a fixed lead again')
+      .toMatch(/if \(decided\(status\)\) lead else unconfirmedLead/)
+    // ⚠️ And the DEFECT as a pattern, on both: a lead concatenated unconditionally.
+    // `decided` can exist, be pinned above, and still be called by nobody.
+    for (const [name, src] of [['iOS', swift], ['Android', kt]] as const) {
+      expect(src, `${name} concatenates the decided lead unconditionally again`)
+        .not.toMatch(/return lead \+ " " \+/)
+    }
   })
 
   it('web mirrors the app table for the statuses this route answers', () => {
@@ -320,5 +437,33 @@ describe('a failed revoke says what it left behind', () => {
       .not.toMatch(/DELETE\s+FROM\s+devices/i)
     // And the count is still there to be read when that day comes.
     expect(worker).toMatch(/revoked: Number\(res\?\.meta\?\.changes \|\| 0\)/)
+  })
+
+  it('⭐ the worker proves the retry is safe, and the list is the answer', () => {
+    // `REVOKE_UNCONFIRMED_LEAD` promises two things about another repo's SQL, so
+    // they are checked rather than believed — the licence, exactly as
+    // `lib/chat/relay-send.ts` checks the relay's refusal order.
+    const worker = readFileSync(WORKER, 'utf8')
+    // 1. "revoking again is safe": an unguarded, idempotent UPDATE scoped to the
+    //    owner. A `revoked = 0` predicate would make the second call change no rows
+    //    (`revoked: 0`), and a `revoked = revoked + 1` — or any write with a side
+    //    effect — would make repeating it something other than free.
+    // Anchored on the CONSTANT, not on `UPDATE devices SET`: the first such write
+    // in that file is the heartbeat's, and matching it made this pin assert the
+    // wrong statement entirely.
+    const sql = worker.match(/DEVICE_REVOKE_SQL = `\s*UPDATE devices SET ([^`;]*?)WHERE ([^`;]*?)`/)
+    expect(sql, 'DEVICE_REVOKE_SQL is not an UPDATE any more — re-read the promise')
+      .not.toBeNull()
+    expect(sql![1].trim(), 'the revoke writes something other than the flag').toBe('revoked = 1')
+    expect(sql![2].replace(/\s+/g, ' ').trim(), 'the revoke is no longer a plain owner-scoped match')
+      .toBe('id = ?1 AND user_id = ?2')
+    // 2. "the list IS the answer" (this module's docstring, and the reason every
+    //    surface reloads before it speaks) — only true while the list hides revoked
+    //    rows. If it ever shows them, the row surviving proves nothing and all three
+    //    sheets are showing the reader the wrong evidence.
+    const list = worker.match(/DEVICE_LIST_SQL = `([\s\S]*?)`/)
+    expect(list, 'DEVICE_LIST_SQL was renamed — the hedged lead cites it').not.toBeNull()
+    expect(list![1], 'the devices list stopped filtering revoked rows')
+      .toMatch(/WHERE user_id = \?1 AND revoked = 0/)
   })
 })

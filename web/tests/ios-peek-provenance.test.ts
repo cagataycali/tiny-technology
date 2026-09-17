@@ -220,11 +220,11 @@ describe('the same peek provenance holds on the other phone', () => {
     // either phone — or a renamed one — fails here instead of drifting.
     const rule = code(body(panels, 'enum PeekShape: Equatable {'))
     const ios = new Set(
-      Array.from(rule.matchAll(/^\s{4}case (\w+)/gm)).map((m) => m[1].toLowerCase()),
+      [...rule.matchAll(/^\s{4}case (\w+)/gm)].map((m) => m[1].toLowerCase()),
     )
     expect(ios).toEqual(new Set(['working', 'idle', 'quiet', 'alarm']))
     const android = new Set(
-      Array.from(ktRule.matchAll(/^\s{4}(?:object|data class) (\w+) ?[:(]/gm)).map((m) =>
+      [...ktRule.matchAll(/^\s{4}(?:object|data class) (\w+) ?[:(]/gm)].map((m) =>
         m[1].toLowerCase(),
       ),
     )

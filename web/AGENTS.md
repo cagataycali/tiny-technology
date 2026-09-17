@@ -1,6 +1,6 @@
 # AGENTS.md — Tiny AI (tinyai-id) Architecture
 
-> **Tiny AI** — "Create your own AI by chatting." A **free** platform where anyone can create, modify, and share AI agents ("tinys") through natural conversation. Live at **tiny.technology**. Auth = GitHub OAuth + WebAuthn passkeys. No payments.
+> **Tiny AI** — "Create your own AI by chatting." A **free-to-use** platform where anyone can create, modify, and share AI agents ("tinys") through natural conversation. Live at **tiny.technology**. Auth = GitHub OAuth + WebAuthn passkeys. Core platform is free (50 req/day, BYOK bypasses); optional agent-economy payments run on USDC via x402 (Base) — no card processor, no Stripe, no Resend.
 
 ---
 
@@ -38,7 +38,7 @@
 └──────────────────────────┬──────────────────────────────────────┘
                            │  HTTPS (X-Internal-Key for /user/*)
 ┌──────────────────────────▼──────────────────────────────────────┐
-│     CLOUDFLARE WORKER (chatgpt-plugin-tinyai/) — "the backend"   │
+│     CLOUDFLARE WORKER (worker/) — "the backend"   │
 │     plugin.tiny.technology                                       │
 │                                                                  │
 │  Router: @cloudflare/itty-router-openapi (self-docs at /)        │
@@ -68,8 +68,8 @@
 │        from index on privacy flip), MEMORY "memory"              │
 │                                                                  │
 │  Secrets (wrangler secret put): OPENAI_API_KEY, INTERNAL_API_KEY,│
-│    RESEND_API_KEY, CLOUDFLARE_API_TOKEN                          │
-│  External: OpenAI (embeddings), Resend (email fwd via email())   │
+│    CLOUDFLARE_API_TOKEN                                          │
+│  External: OpenAI (embeddings)                                   │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -209,15 +209,15 @@ Visit /support → SSR /get → <Chat> hydrates
 | `app/api/share`, `app/api/delete` | Share + delete proxies (session-authorized) |
 | `app/sitemap.ts` | Dynamic sitemap from /community |
 | `tools/http.ts` | Universal HTTP tool |
-| `chatgpt-plugin-tinyai/` | Cloudflare Worker backend (own package, wrangler) |
-| `chatgpt-plugin-tinyai/src/{upsert,delete,get,retrieve,list,community,share,users,legal}.ts` | One class per endpoint |
-| `chatgpt-plugin-tinyai/migrations/0003_tiny_v2.sql` | tiny-v2 schema (users/credentials/tinys) |
+| `worker/` | Cloudflare Worker backend (own package, wrangler) |
+| `worker/src/{upsert,delete,get,retrieve,list,community,share,users,legal}.ts` | One class per endpoint |
+| `worker/migrations/0003_tiny_v2.sql` | tiny-v2 schema (users/credentials/tinys) |
 
 ---
 
 ## ⚠️ Gotchas for Agents Working Here
 
-1. **Two deployables**: repo root (Vercel/Next, edge runtime) vs `chatgpt-plugin-tinyai/` (Cloudflare/wrangler, deploy BOTH default + `--env production` — same code, two worker names). From the worker dir, `npm run deploy` does both envs; `npm run typecheck` = `tsc --noEmit`. (wrangler is v4 — `wrangler deploy`, not the removed `publish`.)
+1. **Two deployables**: repo root (Vercel/Next, edge runtime) vs `worker/` (Cloudflare/wrangler, deploy BOTH default + `--env production` — same code, two worker names). From the worker dir, `npm run deploy` does both envs; `npm run typecheck` = `tsc --noEmit`. (wrangler is v4 — `wrangler deploy`, not the removed `publish`.)
 2. **tiny-v2 is authoritative**; KV `tiny` namespace is just the chat-runtime read path. Old D1 (`DB_OLD`) and legacy KV records are reference-only.
 3. **Legacy keys are dead** for authz. Don't add key checks back.
 4. **Edge runtime**: no Node-only APIs in `app/api/*`. `next.config.js` stubs `@aws-sdk/*`, `node:fs`, `node:path`, `bufferutil`, `utf-8-validate`.

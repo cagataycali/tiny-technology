@@ -1,5 +1,5 @@
 /**
- * Shared loader for tests that import worker (worker/)
+ * Shared loader for tests that import worker (chatgpt-plugin-tinyai)
  * source. The worker is a private submodule with no .gitmodules, so it's
  * absent in CI — these tests run locally, skip in CI. The skip is made
  * LOUD (one console.warn) so the coverage gap is never invisible: CI's

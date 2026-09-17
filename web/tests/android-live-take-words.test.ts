@@ -79,9 +79,16 @@ describe('a live take shows the words it is hearing', () => {
     // collecting the flow, for text no eye can follow at that rate. The take loop
     // already ticks at 200ms for `stopEarly`, so it costs nothing.
     const rec = stripped(REC)
-    const loop = body(rec, 'while (android.os.SystemClock.elapsedRealtime() < until)')
+    // ⚠️ Anchored on `delay(STOP_TICK_MS)`'s loop, not on the loop's CONDITION: the
+    // condition is now `shouldExtend(…)` (c57 — `seconds` became a floor for the wake
+    // path), and a pin naming the old `while (… < until)` went red on correct work.
+    // What this test is about is WHICH tick republishes, so the tick is the anchor.
+    const loop = body(rec, 'while (shouldExtend(')
     expect(loop, 'the words are no longer republished on the take loop tick')
-      .toMatch(/_partial\.value = snapshot\(\)/)
+      .toMatch(/_partial\.value = text/)
+    expect(loop, 're-anchor: this is not the 200ms take loop').toMatch(/delay\(STOP_TICK_MS\)/)
+    expect(loop, 'the published text is no longer the whole take\'s snapshot')
+      .toMatch(/val text = snapshot\(\)/)
     // ⚠️ `snapshot()`, NOT `partial`: `listen()` ROLLS a fresh SpeechRecognizer every
     // time Android ends a session on its own, and after a roll the local `partial`
     // holds only the newest utterance — so publishing it would make the card appear
@@ -100,7 +107,10 @@ describe('a live take shows the words it is hearing', () => {
     // reason: this text is rendered as "what the mic is hearing RIGHT NOW", so a
     // leftover sentence is the previous take's words presented as live ones.
     const rec = stripped(REC)
-    const claim = body(rec, 'suspend fun record(app: TinyApp, seconds: Int, label: String)')
+    // The name plus its first parameter, not the whole signature: `record` grew an
+    // `extendWhileSpeaking` parameter in c57 and a verbatim-signature anchor fails on
+    // correct work. Still specific enough that it cannot land on another function.
+    const claim = body(rec, 'suspend fun record(\n        app: TinyApp,')
     const at = claim.indexOf('_isRecording.value = true')
     expect(at, 're-anchor: the claim point moved').toBeGreaterThan(-1)
     expect(claim.slice(at, at + 400), 'the words are not cleared where the mic is claimed')

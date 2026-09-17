@@ -144,15 +144,60 @@ ${body}
 `
 }
 
-const PRICING_CARD = {
+/**
+ * The platform fee, in micro-USDC (1e6 = $1) — the worker's `PLATFORM_FEE_MICRO`.
+ *
+ * ⚠️ This is a DECLARED copy of a number that lives in `worker/src/payments.ts`, and
+ * it is a copy for one reason only: that file is TypeScript in a private submodule, so a node script
+ * cannot import it and a contributor without the checkout must still be able to regenerate the
+ * brand. `tests/store-money-claims.test.ts` pins this to the worker's own constant whenever the
+ * submodule is present — the same shape as `SLOT_DIMS` (one declared number, one gate) rather than
+ * the six-hand-typed-figures shape it replaces.
+ *
+ * ⚠️ Do NOT hand-write the amounts on the card. c69: the fee could be changed to $0.005 in the
+ * worker and every store-copy test still passed, because the whole corpus only ever compared prose
+ * against other prose. The card's arithmetic is derived below so a fee change re-renders it correct.
+ */
+export const PLATFORM_FEE_MICRO = 1000
+
+/**
+ * Micro-USDC as the store copy writes it: at least 2 decimals, and every further decimal the amount
+ * actually needs. `$0.50` and `$5.00` keep their trailing zero (a price reads as a price), while
+ * `$0.499` and `$4.999` keep the third — which is the entire POINT of the card, since a fee that
+ * rounds away at 2dp is a fee that looks like nothing.
+ */
+export const usd = (micro) => {
+  // Strip trailing zeros only BEYOND the second decimal — `(\.\d\d\d*?)0+$` keeps the two a price
+  // needs while letting the third survive. A bare `0+$` strips `$5.00` to `$5.` and `$0.10` to
+  // `$0.1`, which is why this is one regex and not two.
+  const fixed = (micro / 1e6).toFixed(6).replace(/(\.\d\d\d*?)0+$/, '$1')
+  return `$${fixed}`
+}
+
+/**
+ * The example prices, in micro. Two orders of magnitude on purpose: the card's claim is that the fee
+ * is FLAT, and one example cannot show flatness — a reader has to see the same $0.001 come off both.
+ */
+const PRICING_EXAMPLES = [500_000, 5_000_000]
+
+/**
+ * ⚠️ EXPORTED so the gate can read the amounts this card will actually render.
+ *
+ * c69's first draft of that gate asserted `PLATFORM_FEE_MICRO` appeared somewhere in this object and
+ * a mutant walked straight through it: replacing `usd(price - fee)` with `usd(price)` left the
+ * footer's `usd(PLATFORM_FEE_MICRO)` behind, so the "it subtracts" check passed over a card that
+ * subtracted nothing. 🔑 **A mention of the fee is not a use of it** — the test now reads these
+ * lines and re-does the arithmetic.
+ */
+export const PRICING_CARD = {
   kicker: 'THE WHOLE FEE',
-  lines: [
-    { t: 'Price it at $0.50', size: 76 },
-    { t: 'you keep $0.499', size: 92, accent: true },
-    { t: 'Price it at $5.00', size: 76 },
-    { t: 'you keep $4.999', size: 92, accent: true },
-  ],
-  footer: 'a flat $0.001 per paid call — not a percentage',
+  // Computed, never typed: `you keep` is the owner's credit from the same split the ledger writes
+  // (`splitInvoke`: price − fee, with the fee capped at the price so it can never go negative).
+  lines: PRICING_EXAMPLES.flatMap((price) => [
+    { t: `Price it at ${usd(price)}`, size: 76 },
+    { t: `you keep ${usd(price - Math.min(PLATFORM_FEE_MICRO, price))}`, size: 92, accent: true },
+  ]),
+  footer: `a flat ${usd(PLATFORM_FEE_MICRO)} per paid call — not a percentage`,
 }
 
 const QUOTE_CARD = {

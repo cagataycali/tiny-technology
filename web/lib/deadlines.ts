@@ -65,6 +65,11 @@ export const ROUTE_DEADLINE_MS: Record<string, number> = {
   '/api/x402/pay': 195_000,
   // maxDuration = 120 (runs a scheduled job's whole agent turn).
   '/api/job-run': 135_000,
+  // maxDuration = 90: a device's question runs a full owner-scoped agent turn
+  // (worker /device/ask waits 60s on job-run; the proxy waits 75s above that).
+  // Client deadline sits above the whole chain so the SERVER decides the
+  // outcome — the device firmware should use ≥90s on its own socket too.
+  '/api/devices/ask': 105_000,
   // maxDuration = 60 (signs + broadcasts a payout on-chain).
   '/api/wallet/withdraw': 75_000,
   // maxDuration = 60 (executes a user tool, which may call out).
@@ -114,6 +119,12 @@ export const ROUTE_DEADLINE_MS: Record<string, number> = {
 export const ROUTE_PREFIX_DEADLINE_MS: Record<string, number> = {
   // maxDuration = 300, and internally up to 240s for the paid model turn.
   '/api/x402/chat/': 330_000,
+  // 20s internal: it probes /voice/recording/:id, which STITCHES a cold call's
+  // PCM segments before it can answer 206 or refuse. Asked only after a play
+  // already failed, and the whole point is to return the worker's own reason —
+  // so a client abort here would replace the sentence with silence, which is
+  // precisely the defect it exists to fix.
+  '/api/voice/recording-status/': 35_000,
 }
 
 /** The deadline to use for a client fetch to `path` (query string tolerated). */

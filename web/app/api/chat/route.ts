@@ -23,7 +23,7 @@ import { runToolApi, makeForgedTools, buildDynamicTools, makeUseTelegramTool, ma
 import { batchTicket, runBatchInBackground } from '@/lib/chat/tools/spawn'
 import { makeNiclaTakePhotoTool, makeNiclaTakeVideoTool, makeNiclaListenTool, makeNiclaStatusTool } from '@/lib/chat/tools/nicla'
 import { makeNiclaVoiceStatusTool, makeNiclaVoiceWakesTool, makeNiclaVoiceRecordTool, makeNiclaVoiceTranscriptsTool, makeNiclaVoiceTranscriptTool } from '@/lib/chat/tools/nicla-voice'
-import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool } from '@/lib/chat/tools/flipper'
+import { makeFlipperStatusTool, makeFlipperListenTool, makeFlipperFilesTool, makeFlipperFindTool } from '@/lib/chat/tools/flipper'
 
 export const runtime = 'edge'
 export const maxDuration = 300
@@ -200,15 +200,10 @@ export async function POST(req: Request) {
     // ⚠️ Fetches the ring's CLAMP (50, worker events.ts) and lets
     // `selectEvents` choose the 15 that get rendered. It used to fetch exactly
     // the 15 it rendered, which made "newest 15" and "what the agent is told"
-    // the same thing — and measured on a live account, 13 of those 15 were
+    // the same thing — and measured on this account, 13 of those 15 were
     // `job_result` while the one voice transcript sat 22 rows below the cut.
     // Selecting from a wider window is what lets a flooded ring still mention
     // the other subsystems; see selectEvents for why the ordering is unchanged.
-    //
-    // ⚠️ This width is load-bearing, not a tuning knob: `selectEvents` returns
-    // its input untouched when it is already down to the block's size, so
-    // narrowing this back to 15 disables the whole selection silently. Pinned by
-    // "the fetch asks for more rows than the block renders" in prompt.test.ts.
     session
       ? fetch(`https://plugin.tiny.technology/events?userId=${encodeURIComponent(session.sub)}&limit=50`, {
           headers: { 'X-Internal-Key': process.env.INTERNAL_API_KEY || '' },
@@ -1401,6 +1396,8 @@ You are being consulted by another tiny AI (${tinyData.name}). Answer as yoursel
   const flipperStatusTool = makeFlipperStatusTool(session?.sub)
   const flipperListenTool = makeFlipperListenTool(session?.sub)
   const flipperFilesTool = makeFlipperFilesTool(session?.sub)
+  // 🔔 find-my-Flipper: a beep on the board itself, on whichever route is up.
+  const flipperFindTool = makeFlipperFindTool(session?.sub)
 
   // learn/recall/unlearn definitions live in lib/chat/tools/memory.ts
   const learnTool = makeLearnTool(session)
@@ -1843,7 +1840,7 @@ ${semanticOnly.length ? `Relevant to this message (semantic recall):\n${semantic
     niclaVoiceStatusTool, niclaVoiceWakesTool,
     // 🎤 The recorder rides the phone's relay mailbox; transcripts are D1 reads.
     niclaVoiceRecordTool, niclaVoiceTranscriptsTool, niclaVoiceTranscriptTool,
-    flipperStatusTool, flipperListenTool, flipperFilesTool,
+    flipperStatusTool, flipperListenTool, flipperFilesTool, flipperFindTool,
     // 🗺️ Agent map controls — web only: the browser hosts the live map
     // bridge (📍 map-mode / the /map page); native map screens are modal
     // and have no bridge yet.

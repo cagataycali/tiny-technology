@@ -198,6 +198,79 @@ describe('this device draws the hardware it is actually running on', () => {
     expect(platform, 'the iPhone case stopped being a no-op').toMatch(/case \.phone: return nil/)
   })
 
+  /**
+   * 🔑 THE RULE EXISTED AND TWO SURFACES NEVER ASKED IT — including the app's
+   * first sentence.
+   *
+   * Everything above pins the Devices sheet, where this was found and fixed.
+   * Meanwhile `Views.swift` carried `deviceNoun`, a SECOND answer to the same
+   * question ("what is the machine I'm running on called") written earlier and
+   * worse: a `#if targetEnvironment(macCatalyst)` returning "Mac", `#else`
+   * returning "phone". A Mac got the right word, an iPhone got the right word,
+   * and the one idiom in between fell through to the phone's.
+   *
+   * Where that string is printed matters. It is the LOGIN tagline — "Your AI.
+   * This phone becomes a node of your tiny identity." — so a signed-out iPad,
+   * which includes every fresh install, opened on a sentence about a different
+   * device. The onboarding tour's page 2 was worse still: "Your phone becomes a
+   * node… this iPhone joins your fleet… the phone answers", hardcoded, three
+   * times in two sentences, on page 2 of 5 that a new install opens on.
+   *
+   * ⚠️ Two implementations of one question is what kept one of them wrong. The
+   * Devices panel was found, reasoned about at length, and fixed; this line was
+   * never looked at, because nothing connected them. So these pin DELEGATION —
+   * not that the strings happen to be right today.
+   */
+  it('⚠️ the login tagline asks the same rule, not a second copy of it', () => {
+    const views = readFileSync(join(ROOT, 'ios/Tiny/Sources/Views.swift'), 'utf8')
+    const noun = code(decl(views, 'private var deviceNoun: String {'))
+    expect(noun, 'deviceNoun computes its own answer again — an iPad falls through ' +
+      'the Catalyst check and gets called a phone on the login screen')
+      .toMatch(/LocalHardware\.selfNoun\(LocalHardware\.current\)/)
+    // The shape it was: a compile-time branch that cannot see an idiom at all.
+    expect(noun, 'the Catalyst-only branch is back, which is what made iPad wrong')
+      .not.toMatch(/targetEnvironment\(macCatalyst\)/)
+    expect(noun, 'a hardcoded noun is back in deviceNoun').not.toMatch(/"phone"/)
+    // And it is still what the tagline prints — a correct helper nothing calls
+    // is the failure mode this whole file exists to catch.
+    expect(views, 'the login tagline stopped reading deviceNoun')
+      .toMatch(/Your AI\. This \\\(deviceNoun\) becomes/)
+  })
+
+  it('⚠️ the onboarding tour names this device, on the page a fresh install sees', () => {
+    const onb = readFileSync(join(ROOT, 'ios/Tiny/Sources/Onboarding.swift'), 'utf8')
+    const fleet = code(decl(onb, 'private var fleet: some View {'))
+    expect(fleet.length, 'the fleet page did not parse — this pin reads nothing')
+      .toBeGreaterThan(200)
+    expect(fleet, 'the tour page computes no noun and is back to hardcoded copy')
+      .toMatch(/LocalHardware\.selfNoun\(LocalHardware\.current\)/)
+    // All three occurrences. The middle one said "this iPhone" — a NAME, so it
+    // survived any search for the word "phone" and was the most wrong of the
+    // three on an iPad.
+    expect(fleet, 'the tour still hardcodes iPhone').not.toMatch(/iPhone/)
+    expect(fleet, 'the tour still hardcodes "phone"').not.toMatch(/\bphone\b/)
+    const uses = fleet.match(/\\\(noun\)/g) ?? []
+    expect(uses.length, 'the page names the device fewer than 3 times — one of the ' +
+      'three hardcoded nouns came back').toBeGreaterThanOrEqual(3)
+  })
+
+  it('the pre-rendered narration cannot adapt, and is not claimed to', () => {
+    // Honest limit, pinned so nobody "fixes" the copy and assumes the voiceover
+    // followed. The tour's audio is mp3s generated per language by
+    // gen-onboarding-voice.mjs and fetched at runtime, so page 2 is SPOKEN as
+    // "this phone" on an iPad no matter what the screen says. Adapting it needs
+    // 14 languages × a new take, i.e. a script run and an ElevenLabs key — not a
+    // code change. The screen being right is still strictly better than both
+    // being wrong; this test just refuses to let the gap be forgotten.
+    const gen = readFileSync(join(ROOT, 'scripts/gen-onboarding-voice.mjs'), 'utf8')
+    expect(gen, 'the English p1 narration line moved — re-check the iPad wording gap')
+      .toMatch(/this phone joins your fleet/)
+    const onb = readFileSync(join(ROOT, 'ios/Tiny/Sources/Onboarding.swift'), 'utf8')
+    expect(onb, 'OnboardingNarrator stopped streaming pre-rendered audio — if it ' +
+      'synthesises locally now, the noun CAN adapt and this page should pass it')
+      .toMatch(/onboarding-voice\/\\\(Self\.lang\)\/p\\\(page\)\.mp3/)
+  })
+
   it('⚠️ web and Android still say "iOS" for the same iPad — flagged, not fixed', () => {
     // Not an oversight and not fixable there: only the device itself knows what
     // it is, and the wire is what is lossy. A tablet's row on another surface

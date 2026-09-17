@@ -51,6 +51,44 @@ describe('turn log', () => {
     expect(turn.a.length).toBe(800)
   })
 
+  it('🔴 clamps on a code-point boundary — never half an emoji', () => {
+    // A `slice(0, 500)` counts UTF-16 units, so this cut landed between the two
+    // halves of the 👍 and stored a LONE HIGH SURROGATE. Unpaired, it cannot be
+    // encoded to UTF-8, and every reader repairs it differently: the browser
+    // writes U+FFFD, the JVM writes '?' — so the same turn reached the model as
+    // different bytes depending on which surface logged it, and this store's one
+    // promise is that it doesn't.
+    appendTurn('t', 'a'.repeat(499) + '👍 more', 'a'.repeat(799) + '👍 more')
+    const [turn] = getTurnLog('t')
+    for (const [field, text] of [['q', turn.q], ['a', turn.a]] as const) {
+      // The property, stated as the thing that goes wrong: re-encoding is lossless.
+      expect(Buffer.from(text, 'utf8').toString('utf8'), field).toBe(text)
+      // And no half-pair survives anywhere in it.
+      for (const ch of text) expect(ch.codePointAt(0)! < 0xd800 || ch.codePointAt(0)! > 0xdfff).toBe(true)
+      // The 👍 is the last code point that fits, so it is kept WHOLE — where a
+      // unit-slice kept its leading half and dropped the trailing one.
+      expect(text.endsWith('👍'), `${field} must keep the emoji whole`).toBe(true)
+      expect(Array.from(text).length, `${field} counts code points`).toBe(field === 'q' ? 500 : 800)
+    }
+  })
+
+  it('🔴 an emoji-only memory is clamped by code points, not units', () => {
+    // 1200 thumbs = 2400 UTF-16 units. A unit-slice would keep 500 emoji and
+    // then half of one more.
+    addMemory('t', '👍'.repeat(1200))
+    const [m] = getMemories('t')
+    expect(Array.from(m.content).length).toBe(1000)
+    expect(m.content).toBe('👍'.repeat(1000))
+  })
+
+  it('leaves text that fits completely untouched', () => {
+    // Including the exact-cap case: clipping must not be an off-by-one that
+    // drops a character from a memory already short enough.
+    const exact = 'e'.repeat(1000)
+    addMemory('t', exact)
+    expect(getMemories('t')[0].content).toBe(exact)
+  })
+
   it('is scoped per tiny', () => {
     appendTurn('alpha', 'q', 'a')
     expect(getTurnLog('beta')).toHaveLength(0)

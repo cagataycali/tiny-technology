@@ -30,6 +30,9 @@ beforeAll(async () => {
     CREATE TABLE messages (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       from_user TEXT, to_user TEXT, via_tiny TEXT, body TEXT,
+      -- migration 0031: NOT NULL DEFAULT '[]' exactly as the real column, so
+      -- rows inserted here behave like pre-attachment rows do in production.
+      attachments TEXT NOT NULL DEFAULT '[]',
       read INTEGER DEFAULT 0, created INTEGER DEFAULT (unixepoch())
     );
     INSERT INTO users VALUES
@@ -84,5 +87,28 @@ describe.skipIf(!present)('worker INBOX_SQL (real statement, real sqlite)', () =
 
   it('no threads → empty result, not an error', () => {
     expect(inbox('nobody')).toEqual([])
+  })
+
+  it('📷 last_attachments tracks the SAME newest message as last_body', () => {
+    // The two correlated subqueries are separate, so nothing but identical ORDER
+    // BY keeps them on one row. If they ever disagree the inbox shows one
+    // message's caption beside another message's photo count.
+    const shot = JSON.stringify([{ kind: 'image', url: 'https://x/media/k.jpg', contentType: 'image/jpeg' }])
+    db.prepare(
+      `INSERT INTO messages (from_user,to_user,body,attachments,read,created)
+       VALUES ('u2','u1','',?,0,400)`,
+    ).run(shot)
+    const row = inbox('u1').find((r: any) => r.peer === 'u2')
+    expect(row.last_body).toBe('')
+    expect(JSON.parse(row.last_attachments)).toHaveLength(1)
+    expect(row.last_at).toBe(400)
+  })
+
+  it('pre-0031 rows read as an empty list, never NULL', () => {
+    // The column default is what stops every client from needing a second
+    // "no attachments" case (NULL vs []).
+    db.exec("INSERT INTO messages (from_user,to_user,body,read,created) VALUES ('u2','u1','plain text',0,500)")
+    const row = inbox('u1').find((r: any) => r.peer === 'u2')
+    expect(row.last_attachments).toBe('[]')
   })
 })

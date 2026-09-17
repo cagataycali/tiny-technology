@@ -12,6 +12,7 @@
  * the token is the gate).
  */
 import { getSession } from '@/lib/auth'
+import { relaySend, type RelaySendKind } from '@/lib/chat/relay-send'
 
 export const runtime = 'edge'
 
@@ -32,6 +33,38 @@ const internalHeaders = () => ({
 // {error} → 424 (relay unavailable), which callers already handle.
 const T = () => ({ signal: AbortSignal.timeout(10_000) })
 
+/**
+ * One HTTP status per relay verdict, so a client can act without reading prose.
+ *
+ * 424 stays the "the relay itself let us down" code the clients already handle;
+ * the three decisions the user can act on get codes that say whose problem it is.
+ * 401 is deliberately NOT used for `server_key`: it was tiny's own credential
+ * that was refused upstream, and a 401 tells a perfectly signed-in user to log
+ * in again.
+ *
+ * ⚠️ **NOTHING HERE MAY BE A 5xx**, however right that looks on paper. A proxy
+ * whose upstream rejected its key is textbook 502 — but iOS's
+ * `Api.statusOwnsTheMessage` (Api.swift) says the app knows better than the
+ * server for 401/0/5xx, so `Api.post` DISCARDS the body and shows "Server
+ * hiccup (HTTP 502) — usually passes, try again". For `no_envelope` that is the
+ * exact opposite of the sentence's advice — the envelope may already be queued,
+ * and "try again" is how the device runs the command twice. For `server_key` it
+ * promises a wait will fix a config fault. Both then read like the failure this
+ * increment exists to stop guessing about. So `server_key` and `no_envelope`
+ * ride 424, where the app prefers the server's own words. "every status the
+ * route answers lets the sentence through on iOS" (tests/relay-send.test.ts)
+ * reads that rule out of Api.swift rather than trusting this comment.
+ */
+const RELAY_SEND_STATUS: Record<Exclude<RelaySendKind, 'queued'>, number> = {
+  no_such_device: 404,
+  too_big: 413,
+  bad_request: 400,
+  server_key: 424,
+  relay_fault: 424,
+  unreachable: 424,
+  no_envelope: 424,
+}
+
 async function workerPost(path: string, body: any) {
   return fetch(`${WORKER_URL}${path}`, {
     method: 'POST',
@@ -49,14 +82,27 @@ export async function POST(req: Request) {
   const { toDevice, payload } = await req.json().catch(() => ({} as any))
   if (!toDevice) return json({ ok: false, error: 'toDevice required' }, 400)
 
-  const data = await workerPost('/device/relay/send', {
-    userId: session.sub,
-    toDevice: String(toDevice),
+  // ⚠️ Two defects lived in the four lines this replaced.
+  //
+  // `if (data.error) … data.error === 'device not found' ? 404 : 424` picked the
+  // status by STRING-MATCHING the worker's prose, so every other refusal — an
+  // 8KB payload, tiny's own internal key being rejected — arrived as 424 Failed
+  // Dependency, which is not what any of them are.
+  //
+  // Worse: with no `error` and no `id` it fell through to `{ ok: true, id:
+  // undefined }`. `id` vanishes in JSON.stringify, so iOS's device panels
+  // (TinyLive.clipResult/frameResult) took the guard branch, found no error, and
+  // showed "Couldn't reach the relay." — a claim about the network for a relay
+  // that answered. **A success is an envelope id; there is nothing else it can be.**
+  const sent = await relaySend({
+    worker: WORKER_URL, headers: internalHeaders(),
+    userId: session.sub, toDevice: String(toDevice),
     // itty body rule: JSON as string
     payload: typeof payload === 'string' ? payload : JSON.stringify(payload ?? null),
+    ...T(),
   })
-  if (data.error) return json({ ok: false, error: data.error }, data.error === 'device not found' ? 404 : 424)
-  return json({ ok: true, id: data.id })
+  if (!sent.queued) return json({ ok: false, error: sent.error, delivered: sent.delivered, retryable: sent.retryable }, RELAY_SEND_STATUS[sent.kind])
+  return json({ ok: true, id: sent.id })
 }
 
 /** Session → poll for the reply to an envelope I sent */

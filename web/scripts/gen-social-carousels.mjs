@@ -290,6 +290,7 @@ const main = () => {
             W,
             H,
             src: b64(path),
+            srcPath: s.src,
             srcW: size.w,
             srcH: size.h,
             cropTop: 0,

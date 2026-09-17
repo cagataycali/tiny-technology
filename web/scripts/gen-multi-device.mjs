@@ -47,6 +47,8 @@ import {
   renderPng,
   pngSize,
   FONT,
+  assertCropGeometry,
+  statusBarPxFor,
   assertPublishable,
 } from './gen-store-composites.mjs'
 
@@ -57,7 +59,8 @@ const OUT = join(ROOT, 'store-assets', 'final')
 /**
  * The lineup, left to right. `weight` is this device's height as a fraction of the
  * tallest one — chosen for LEGIBILITY, not physical scale (see the docblock).
- * `cropTop` is source px removed from the top before framing.
+ * `crop` {y,h} frames an arbitrary vertical slice; the status-bar crop is NOT declared here (c68)
+ * but looked up per-source, since it is a property of the capture device.
  *
  * Order is largest-to-smallest so the eye lands on the iPad's sidebar first (the
  * screen no other surface has) and then reads down the family.
@@ -70,8 +73,10 @@ const DEVICES = [
   // reads as a broken mock rather than a spacious layout.
   { id: 'ipad', label: 'iPad', src: 'ios/raw/c12-ipad-hero.png', weight: 1, crop: { y: 0, h: 1706 } },
   { id: 'iphone', label: 'iPhone', src: 'ios/raw/c8-chat-hero-authed.png', weight: 0.78 },
-  // ⚠️ status bar off: personal notification icons (see docblock).
-  { id: 'pixel', label: 'Android', src: 'android/raw/c2-home-clean.png', weight: 0.78, cropTop: 116 },
+  // ⚠️ status bar off: personal notification icons (see docblock). No `cropTop` here (c68). The status bar's height is a property of the capture DEVICE, so it
+  // is looked up from the raw's own path by `statusBarPxFor` in `measure` below — the same lookup
+  // the store composites use, against the same declared 1080×2410 Pixel geometry.
+  { id: 'pixel', label: 'Android', src: 'android/raw/c2-home-clean.png', weight: 0.78 },
   // ⚠️ The watchOS capture's bottom 56px is the top sliver of the "Ask tiny" button,
   // which the watch's own scroll cuts in half. At store-screenshot size that reads
   // as a button continuing below the fold; shrunk into a lineup it reads as a
@@ -170,10 +175,17 @@ function lineupSvg(p, { W, H, capLines, capFrac, bandFrac, rows }) {
     assertPublishable(d.src, `multi-device:${d.id}`)
     const path = join(RAW, d.src)
     const { w: srcW, h: srcH } = pngSize(path)
-    // `cropTop` trims the status bar; `crop` {y,h} frames an arbitrary vertical
-    // slice (the iPad's top 62%). cropTop is the degenerate case of the same
+    // ⚠️ c68: this lineup does NOT go through `compositeSvg`, so it does not inherit that gate — the
+    // check has to be called here too. The Pixel panel's status-bar crop is the same privacy crop
+    // the store set applies, measured on the same 1080×2410 capture, and this card is POSTED (it is
+    // the launch thread's closing image) — so a mis-sized raw would leak the user's notification
+    // icons to a public timeline.
+    const cropTop = statusBarPxFor(d.src)
+    assertCropGeometry(d.src, srcW, srcH, { cropTop, crop: d.crop }, `multi-device:${d.id}`)
+    // The status-bar crop trims the top; `crop` {y,h} frames an arbitrary vertical
+    // slice (the iPad's top 62%). The bar is the degenerate case of the same
     // thing, so both collapse to one region here.
-    const regY = d.crop?.y ?? d.cropTop ?? 0
+    const regY = d.crop?.y ?? cropTop
     const regH = d.crop?.h ?? srcH - regY
     return { ...d, path, srcW, srcH, regY, regH, aspect: srcW / regH }
   }

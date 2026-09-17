@@ -3,6 +3,7 @@
  * rules are pure + unit-tested — they've bitten twice: a stale poll vanished
  * a just-sent message, and a repeated poll drained the unread badge).
  */
+import type { DmAttachment } from "./dm-attachments";
 
 export type DmMessage = {
   id: number;
@@ -10,6 +11,10 @@ export type DmMessage = {
   body: string;
   viaTiny?: string;
   created: number;
+  /** 📷 photos / clips / voice notes (migration 0031). Optional because every
+   *  row written before it reads back as `[]`, and because the optimistic
+   *  append for a text-only send has none. */
+  attachments?: DmAttachment[];
 };
 
 export type DmThread = {
