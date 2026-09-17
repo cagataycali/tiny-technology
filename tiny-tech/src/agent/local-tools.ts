@@ -405,16 +405,42 @@ export interface RegistryLike {
  * renames itself onto a builtin is skipped, not swapped in.
  */
 export async function reloadLocalTools(
-  registry: RegistryLike,
+  registry: RegistryLike | RegistryLike[],
   opts: { previous?: string[]; reserved?: string[]; dir?: string } = {},
 ): Promise<{ result: LocalToolsResult; names: string[]; removed: string[] }> {
   const result = await loadLocalTools({ dir: opts.dir, reserved: opts.reserved })
   const names = result.loaded.map((t) => t.name)
   const kept = new Set(names)
   const removed = (opts.previous || []).filter((n) => !kept.has(n))
-  for (const n of removed) registry.remove(n)
-  if (result.tools.length) registry.addOrReplace(result.tools)
+  // One disk read, applied to EVERY live registry handed in: the turn that asked
+  // (a fork's agent) AND the session agent both see the change, or a tool created
+  // mid-turn is invisible to the very turn that created it.
+  const registries = Array.isArray(registry) ? registry : [registry]
+  for (const reg of registries) {
+    for (const n of removed) reg.remove(n)
+    if (result.tools.length) reg.addOrReplace(result.tools)
+  }
   return { result, names, removed }
+}
+
+/**
+ * Every registry a tool mutation must reach, resolved PER CALL — the executing
+ * agent's registry first (ToolContext.agent: a forked turn, a relay turn, a
+ * loop iteration — whoever is actually running this toolUse), then the session
+ * accessor's, deduped. Resolving at call time is the fix for the fork split:
+ * tool instances are shared across forks, so a registry captured at build time
+ * is the SESSION's, while the turn executing the call has its own.
+ */
+export function resolveRegistries(
+  toolContext: unknown,
+  sessionRegistry: () => RegistryLike | null,
+): RegistryLike[] {
+  const executing = ((toolContext as any)?.agent as any)?.toolRegistry ?? null
+  const session = sessionRegistry()
+  const out: RegistryLike[] = []
+  if (executing) out.push(executing)
+  if (session && session !== executing) out.push(session)
+  return out
 }
 
 export const TOOLS_DESCRIPTION = `🔧 The tools on THIS machine that the user wrote themselves (~/.tiny/tools, or TINY_TOOLS_DIR). Actions:
@@ -434,7 +460,7 @@ export function makeToolsTool(ctx: {
   registry: () => RegistryLike | null
   reserved: () => string[]
   previous: () => string[]
-  onLoaded: (names: string[]) => void
+  onLoaded: (names: string[], tools?: any[]) => void
   dir?: () => string
 }) {
   return tool({
@@ -445,26 +471,27 @@ export function makeToolsTool(ctx: {
       properties: { action: { type: 'string', enum: ['list', 'reload'], description: 'list or reload' } },
       required: ['action'],
     },
-    callback: async (input: any) => {
+    callback: async (input: any, toolContext?: unknown) => {
       const action = String(input?.action || 'list')
       const dir = ctx.dir ? ctx.dir() : localToolsDir()
+      // Per-call resolution: the registry of the agent EXECUTING this toolUse
+      // (fork/loop/relay turn), plus the session's — never a build-time capture.
+      const regs = resolveRegistries(toolContext, ctx.registry)
       if (action === 'list') {
         const names = ctx.previous()
-        const reg = ctx.registry()
-        const live = reg ? new Set(reg.list().map((t) => t.name)) : new Set<string>()
+        const live = regs.length ? new Set(regs[0].list().map((t) => t.name)) : new Set<string>()
         const lines = names.map((n) => `   ${live.has(n) ? '✅' : '⚠️ '} ${n}`)
         return `🔧 local tools — ${dir}\n${lines.length ? lines.join('\n') : '   (none loaded)'}`
       }
       if (action !== 'reload') return `unknown action: ${action} (list|reload)`
-      const reg = ctx.registry()
-      if (!reg) return 'no live tool registry (local tools need a local model — this session proxies to the server)'
+      if (!regs.length) return 'no live tool registry (local tools need a local model — this session proxies to the server)'
       try {
-        const { result, names, removed } = await reloadLocalTools(reg, {
+        const { result, names, removed } = await reloadLocalTools(regs, {
           previous: ctx.previous(),
           reserved: ctx.reserved(),
           dir,
         })
-        ctx.onLoaded(names)
+        ctx.onLoaded(names, result.tools)
         const removedLine = removed.length ? `\n   🗑  removed: ${removed.join(', ')}` : ''
         return `${summarize(result)}${removedLine}`
       } catch (e: any) {

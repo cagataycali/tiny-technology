@@ -3,18 +3,19 @@
  * whatsapp / telegram surface, tiny-shaped.
  *
  * Zero Python: each tool wraps the native capability directly —
- *   use_apple     osascript + sqlite (Messages/Notes/Reminders/Calendar/Mail)   [macOS]
+ *   use_apple     osascript + sqlite (Messages/Reminders/Calendar/Mail)         [macOS]
+ *   use_mcp       every MCP server this machine is already configured for,
+ *                 read from the files Claude Desktop/Code and Cursor wrote      → mcp.ts
  *   use_adb       adb binary (screenshots, taps, apps, shell)                   [adb in PATH]
  *   use_spotify   Web API [SPOTIFY_* env] + AppleScript app control [macOS]     → spotify.ts
  *   use_whatsapp  wacli binary (steipete/wacli — WhatsApp Web protocol)         → whatsapp.ts
  *   use_google    every Google API from its discovery doc (Gmail/Drive/Cal/…)   → google.ts
  *   use_telegram  Bot HTTP API                                                  [TELEGRAM_BOT_TOKEN]
- *   use_computer  CoreGraphics via JXA + screencapture (mouse/keys/screen),
- *                 plus read_screen/find_text — Vision OCR on the ANE           → computer.ts + vision.ts
- *   use_browse    a real Chrome over CDP (JS-rendered pages, logins, clicks)    → browse.ts
+ *   use_github    repos/issues/PRs/CI/code over REST + a GraphQL escape hatch,
+ *                 token from env, gh, hosts.yml or the keychain               → github.ts
+ *   use_computer  CoreGraphics via JXA + screencapture (mouse/keys/screen)      → computer.ts
  *   use_flipper   Flipper Zero CLI over USB serial (stty + fs)                  → flipper.ts
- *   use_desktop   OS notifications + clipboard + open (reach the human here),
- *                 plus speak/listen — local voice, on-device Speech           → desktop.ts + speech.ts
+ *   use_image     a file's pixels into the conversation (sips/magick shrink)  → image.ts
  *
  * Tools self-register only when their backend exists — the agent's toolset
  * mirrors what this device can actually do.
@@ -24,17 +25,20 @@ import { z } from 'zod'
 import { execFileSync, execSync } from 'node:child_process'
 import * as os from 'node:os'
 import { makeComputerTool, hasComputerControl } from './computer.js'
-import { hasVisionOcr } from './vision.js'
 import { hasWindowControl } from './windows.js'
 import { makeFlipperTool, hasFlipper } from './flipper.js'
 import { makeSpotifyTool, hasSpotify } from './spotify.js'
 import { makeWhatsappTool, hasWhatsapp } from './whatsapp.js'
 import { makeGoogleTool, hasGoogle } from './google.js'
-import { makeDesktopTool, hasDesktopSenses } from './desktop.js'
-import { hasLocalSpeech } from './speech.js'
-import { makeBrowseTool, hasBrowser } from './browse.js'
 import { applyStoredEnv } from '../integrations.js'
 import { makeIntegrationsTool } from './integrations-tool.js'
+import { makeNpmTool, hasNpm } from './npm.js'
+import { makeOpenapiTool, hasOpenapi } from './openapi.js'
+import { makeMemoryTool, hasMemory } from './memory.js'
+import { makeMcpTool, hasMcp } from './mcp.js'
+import { makeGithubTool, hasGithub } from './github.js'
+import { makePypiTool, hasPython } from './pypi.js'
+import { makeImageTool } from './image.js'
 
 const isMac = os.platform() === 'darwin'
 
@@ -247,41 +251,16 @@ function makeTelegramTool(token: string) {
 export function labelOnlyCapabilities(f: {
   /** use_computer registered — the screen is readable and clickable. */
   computer: boolean
-  /** use_desktop registered — at least one sense resolved. */
-  desktop: boolean
   /** Apple Events exist, so windows can be arranged. */
   windowControl: boolean
-  /** macOS Vision exists, so pixels can become text locally. */
-  visionOcr: boolean
-  /** A local synthesiser or speech model exists. */
-  localSpeech: boolean
 }): string[] {
   const out: string[] = []
-  // Actions ON use_computer — they share its top-left coordinate space, so an
-  // OCR centre and a window rect are directly comparable. Gated separately
-  // because Apple Events and screencapture are different grants, and "can
-  // ARRANGE its screen, not just look at it" is what a remote agent needs
-  // before planning a task that spans two apps.
+  // Actions ON use_computer — they share its top-left coordinate space, so a
+  // window rect and a click are directly comparable. Gated separately because
+  // Apple Events and screencapture are different grants, and "can ARRANGE its
+  // screen, not just look at it" is what a remote agent needs before planning a
+  // task that spans two apps.
   if (f.computer && f.windowControl) out.push('windows')
-  // Actions ON use_desktop: speak/listen belong with notify, the channels that
-  // don't go through the screen. `desktop` alone doesn't say "this machine can be
-  // TALKED TO and can answer out loud" — a synthesiser and an on-device speech
-  // model are gated on different things than a clipboard.
-  if (f.desktop && f.localSpeech) out.push('voice')
-  // The only one spanning TWO tools. Vision reads text in two places:
-  // read_screen/find_text on use_computer (coordinates you can click) and
-  // read_image on use_desktop (a file's own coordinates, which you cannot). They
-  // ride different tools because they answer different questions, but "this
-  // machine can read pixels into text locally, for free" is ONE fact — so it is
-  // announced when EITHER route exists.
-  if (f.visionOcr && (f.computer || f.desktop)) out.push('ocr')
-  // Deliberately SEPARATE from `ocr`: a remote agent that sees `ocr` but not
-  // `see` knows to ask this node what a file SAYS and not what it LOOKS LIKE,
-  // and one that sees `see` knows a picture on this disk can reach a model at
-  // all — which is the whole point of routing the work here. Needs no binary
-  // (see.ts measureHeader), so the only question left is whether the tool
-  // carrying see_image registered.
-  if (f.desktop) out.push('see')
   return out
 }
 
@@ -300,45 +279,22 @@ export function makeDeviceTools(): { tools: any[]; labels: string[] } {
   // Spotify gates on either backend: Web API credentials OR the local app.
   if (hasSpotify()) { tools.push(makeSpotifyTool()); labels.push('spotify') }
   const canComputer = hasComputerControl()
-  let canDesktop = false
   if (canComputer) {
     tools.push(makeComputerTool())
     labels.push('computer')
     // `windows` rides on this tool — decided below, in labelOnlyCapabilities.
   }
-  // A real browser — gated on a Chromium-based binary EXISTING, not on being
-  // able to launch one: launching costs ~300MB and a second, so the probe is a
-  // path check and the failure (a browser that won't start) is reported by the
-  // tool. Cross-platform, unlike use_computer: CDP is the same on all three.
-  if (hasBrowser()) { tools.push(makeBrowseTool()); labels.push('browse') }
-  // Notifications + clipboard: how a HEADLESS daemon reaches the person at this
-  // machine, and how it shares data with apps without driving a UI. Registered
-  // when at least one sense resolves — see hasDesktopSenses.
-  if (hasDesktopSenses()) {
-    tools.push(makeDesktopTool())
-    labels.push('desktop')
-    // `voice` and `see` ride on this tool — decided below, same reason.
-    canDesktop = true
-  }
-  // LABELS WITH NO TOOL OF THEIR OWN — `windows`, `voice`, `ocr`, `see`. They
-  // are actions ON the tools above, but each is a fact a REMOTE agent needs
-  // before it plans, and the tool's own name doesn't carry it: "this machine can
-  // ARRANGE its screen", "can be TALKED TO", "can read pixels into text for
-  // free", "can put a picture in front of a model".
+  // LABEL WITH NO TOOL OF ITS OWN — `windows`. It is an action ON use_computer,
+  // but it is a fact a REMOTE agent needs before it plans: "this machine can
+  // ARRANGE its screen", which the tool's own name doesn't carry.
   //
-  // ⚠️ Decided in labelOnlyCapabilities, not here, because EVERY mis-gating this
-  //    file has had was in these four lines and none of it was testable — `ocr`
-  //    sat inside the screencapture gate and denied itself on a Mac that could
-  //    OCR a file; `see` required sips and denied itself on a machine that could
-  //    show a png. Pure function, real test, whole matrix. Do not re-inline
-  //    these: on a developer's Mac every probe answers yes, so a wrong gate here
-  //    looks exactly like a right one.
+  // ⚠️ Decided in labelOnlyCapabilities, not here, because every mis-gating this
+  //    file has had was in these lines and none of it was testable. Pure
+  //    function, real test. Do not re-inline: on a developer's Mac every probe
+  //    answers yes, so a wrong gate here looks exactly like a right one.
   labels.push(...labelOnlyCapabilities({
     computer: canComputer,
-    desktop: canDesktop,
     windowControl: hasWindowControl(),
-    visionOcr: hasVisionOcr(),
-    localSpeech: hasLocalSpeech(),
   }))
   // Hardware gate: a Flipper is either on a serial port right now or it isn't.
   if (hasFlipper()) { tools.push(makeFlipperTool()); labels.push('flipper') }
@@ -347,6 +303,53 @@ export function makeDeviceTools(): { tools: any[]; labels: string[] } {
   // OAuth token, service account, or API key — any one is enough.
   if (hasGoogle()) { tools.push(makeGoogleTool()); labels.push('google') }
   if (process.env.TELEGRAM_BOT_TOKEN) { tools.push(makeTelegramTool(process.env.TELEGRAM_BOT_TOKEN)); labels.push('telegram') }
+
+  // 📦 The package universes — any npm/pypi package as a native tool, on
+  // demand. Gated the same way everything else is: on the binary existing.
+  // npm is guaranteed wherever tiny-tech was npx-installed, but an embedder
+  // might not have it on PATH; python3 genuinely varies.
+  if (hasNpm()) { tools.push(makeNpmTool()); labels.push('npm') }
+  if (hasPython()) { tools.push(makePypiTool()); labels.push('pypi') }
+
+  // 🔗 The same idea aimed at the rest of the internet: any HTTP API that ships
+  // an OpenAPI spec, called by operation name with real validation. Nothing to
+  // install and no binary to gate on — it's fetch and a parser — so it's on
+  // unless TINY_OPENAPI=0.
+  if (hasOpenapi()) { tools.push(makeOpenapiTool()); labels.push('openapi') }
+
+  // 🧠 Memory that survives being logged out. tiny_learn/tiny_recall are better
+  // — semantic, cross-device, linked — and need an account and a network; this
+  // is a file on this machine, so the daemon on a box that never signed in
+  // still remembers what it was told. Nothing to probe for: it's a file.
+  if (hasMemory()) { tools.push(makeMemoryTool()); labels.push('memory') }
+
+
+  // 🧩 The other direction of MCP. src/server.ts makes THIS machine an MCP
+  // server; this makes it a client of every server the user already configured
+  // for Claude Desktop, Claude Code or Cursor — 10 of them on the author's Mac,
+  // read from the files those clients already wrote (devduck reads one env var
+  // and so finds none of them). Gated on a server being configured somewhere: a
+  // tool whose every answer is "nothing is configured" is prompt with no
+  // capability behind it. Connections are lazy, so the gate costs six failed
+  // stats and one 0.2 ms parse, not ten child processes.
+  if (hasMcp()) { tools.push(makeMcpTool()); labels.push('mcp') }
+
+  // 🐙 GitHub. devduck's version is one raw GraphQL endpoint behind a
+  // GITHUB_TOKEN env var; this one also finds the token gh CLI or the keychain
+  // already has, which is how a developer machine is actually authenticated.
+  // The gate spawns nothing — an env read, one stat for gh's hosts.yml and a
+  // PATH walk for `gh` — because the alternative is 29 ms of `gh auth token`
+  // on every tiny start, whether or not anyone asks about a repo.
+  if (hasGithub()) { tools.push(makeGithubTool()); labels.push('github') }
+
+  // 👀 Sight for FILES. use_computer shows the model the screen; this shows it
+  // a photo, a render, a downloaded image. Always on: reading png/jpeg/gif/webp
+  // needs only fs, and the header parser sizes them without a binary. Only
+  // converting heic/tiff or shrinking a 12MP photo needs sips or ImageMagick,
+  // and the tool says so on that path instead of gating the whole capability
+  // on it (the mistake the old `see` label made).
+  tools.push(makeImageTool()); labels.push('image')
+
 
   // Always on: the machine with NOTHING connected is exactly the machine
   // that needs a way to connect — see integrations-tool.ts.

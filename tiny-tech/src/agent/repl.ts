@@ -6,20 +6,32 @@
  *
  * Conventions ported from devduck:
  *   !cmd        run a shell command directly (no agent turn)
+ *   /clear      forget the conversation + wipe the screen (also: `clear`)
  *   exit/quit/q leave
  *   double ^C   leave
  */
 import * as readline from 'node:readline'
 import { TinyApi } from '../api.js'
+import { apiHost } from '../config.js'
 import { appendHistory, loadInputHistory } from './history.js'
 import { loadCredentials, credentialsValid } from '../auth.js'
 import { TinyAgent } from './agent.js'
 import { AmbientMode } from './ambient.js'
 
-/** Shared: mesh is ON by default — opt out with --no-mesh or TINY_MESH=false */
-export async function maybeStartMesh(modelLabel?: string): Promise<any | undefined> {
+/**
+ * Shared: mesh is ON by default — opt out with --no-mesh or TINY_MESH=false.
+ *
+ * Auto-discovery, devduck-parity:
+ *   • joins the multicast-scouted peer mesh (224.0.0.224:7446), no config
+ *   • advertises rich presence (real tool names, model, cwd, identity summary)
+ *   • prints peers joining/leaving live, so you SEE the fleet appear
+ *   • answers peers' commands with a fresh agent, streaming as it types
+ *   • mirrors everything into /tmp/tiny/mesh_registry.json for other processes
+ */
+export async function maybeStartMesh(modelLabel?: string, opts: { announce?: boolean } = {}): Promise<any | undefined> {
   const optOut = process.argv.includes('--no-mesh') || process.env.TINY_MESH === 'false'
   if (optOut) return undefined
+  const announce = opts.announce !== false
   try {
     const { MeshNode } = await import('../mesh/zenoh.js')
 
@@ -32,24 +44,44 @@ export async function maybeStartMesh(modelLabel?: string): Promise<any | undefin
       await probe.init()
       tools = probe.toolNames
       label = modelLabel || `tiny-tech (${probe.modelLabel})`
-      promptSummary = `tiny — tiny.technology personal AI · devices: ${probe.deviceLabels.join(',') || 'none'} · ${tools.length} tools`
+      promptSummary = `tiny — ${apiHost()} personal AI · devices: ${probe.deviceLabels.join(',') || 'none'} · ${tools.length} tools`
     } catch { /* presence enrichment is best-effort */ }
 
-    const mesh = new MeshNode({
+    // Declared, then assigned: agentFactory closes over `mesh`, and a `const`
+    // referenced inside its own initializer would infer `any`.
+    let mesh: InstanceType<typeof MeshNode>
+    mesh = new MeshNode({
       modelLabel: label,
       tools,
       systemPromptSummary: promptSummary,
-      agentFactory: async () => {
-        const a = new TinyAgent({ api: new TinyApi(), printer: false })
+      onPeerJoin: (p) => {
+        if (!announce) return
+        const t = p.toolCount ? `, ${p.toolCount} tools` : ''
+        process.stderr.write(`\n🔗 peer joined: ${p.instanceId} (${p.hostname}) — ${p.model || 'unknown'}${t}${p.cwd ? `, ${p.cwd}` : ''}\n`)
+      },
+      onPeerLeave: (p) => {
+        if (announce) process.stderr.write(`\n⚡ peer left: ${p.instanceId} (${p.hostname})\n`)
+      },
+      agentFactory: async (ctx) => {
+        // `mesh` closes over the node we are constructing — by the time a
+        // command arrives it is assigned, so the remote agent can answer
+        // identity questions from mesh.instanceId (it used to have no mesh
+        // tool at all and resorted to reading the shared registry file, where
+        // it read ANOTHER process's self-flag and answered as the wrong node).
+        // meshHop caps delegation depth: at MESH_MAX_HOPS this agent gets no
+        // mesh_send/mesh_broadcast, so answering a broadcast cannot fan out again.
+        const a = new TinyAgent({ api: new TinyApi(), printer: false, mesh, meshHop: ctx?.hop ?? 1 })
         await a.init()
+        // streamTurn is picked up by the mesh node → the requester sees this
+        // machine's answer token by token, plus its tool calls.
         return a
       },
     })
     await mesh.start()
-    process.stderr.write(`🕸  mesh: joined as ${mesh.instanceId}\n`)
+    if (announce) process.stderr.write(`🕸  mesh: joined as ${mesh.instanceId}\n`)
     return mesh
   } catch (e: any) {
-    process.stderr.write(`🕸  mesh unavailable: ${e?.message || e}\n`)
+    if (announce) process.stderr.write(`🕸  mesh unavailable: ${e?.message || e}\n`)
     return undefined
   }
 }
@@ -90,7 +122,7 @@ export async function runRepl(): Promise<void> {
   const who = credentialsValid(creds) ? `@${creds!.user.login}` : 'not logged in'
   process.stderr.write(`\n🌱 tiny — ${who} · model: ${agent.modelLabel}\n`)
   if (!agent.isLocal) {
-    process.stderr.write('   (no local model key — proxying via tiny.technology; set TINY_MODEL_* or OPENAI_API_KEY/ANTHROPIC_API_KEY/AWS creds for local tools)\n')
+    process.stderr.write(`   (no local model key — proxying via ${apiHost()}; set TINY_MODEL_* or OPENAI_API_KEY/ANTHROPIC_API_KEY/AWS creds for local tools)\n`)
   }
   // A tool file that failed to load is the user's to fix, and this banner is
   // the only place they'll see it before the agent quietly doesn't have it.
@@ -98,7 +130,7 @@ export async function runRepl(): Promise<void> {
     const { summarize } = await import('./local-tools.js')
     process.stderr.write(summarize(agent.localTools) + '\n')
   }
-  process.stderr.write("   'exit' to quit · '!cmd' for raw shell · 'ambient'/'auto' background thinking\n\n")
+  process.stderr.write("   'exit' to quit · '!cmd' for raw shell · '/clear' to start over · 'ambient'/'auto' background thinking\n\n")
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stderr, prompt: '🌱 ', history: loadInputHistory().reverse(), historySize: 500 })
 
@@ -127,6 +159,22 @@ export async function runRepl(): Promise<void> {
       if (ambient.autonomous) { ambient.stop(); process.stderr.write('🌙 autonomous stopped\n') }
       else ambient.start(true)
       rl.prompt(); continue
+    }
+
+    // /clear — same contract as the TUI: forget the conversation AND wipe the
+    // screen, so the scrollback can't contradict what the agent now knows. Bare
+    // `clear` is accepted too, because that's what a shell user types (and the
+    // shell's own `clear` would wipe the screen while leaving the agent
+    // remembering everything, which is the confusing half-state).
+    if (['/clear', '/reset', 'clear'].includes(q.toLowerCase())) {
+      const dropped = agent.clearHistory()
+      process.stdout.write('\x1b[2J\x1b[3J\x1b[H')
+      process.stderr.write(dropped > 0
+        ? `🧼 cleared — forgot ${dropped} message${dropped === 1 ? '' : 's'}\n`
+        : agent.isLocal ? '🧼 cleared — history was already empty\n'
+        : '🧼 history lives server-side — nothing local to forget\n')
+      rl.prompt()
+      continue
     }
 
     if (q.startsWith('!')) {

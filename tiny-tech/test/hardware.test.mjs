@@ -13,7 +13,11 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-const { parseStorageList, parseKeyValues, findFlipperPorts } = await import('../dist/agent/flipper.js')
+const {
+  parseStorageList, parseKeyValues, findFlipperPorts,
+  clampSecs, isSensitiveSweep, appBusyHelp, GPIO_PINS, IR_PROTOCOLS,
+  makeFlipperTool,
+} = await import('../dist/agent/flipper.js')
 const { imageToScreen, __setLastShotForTest } = await import('../dist/agent/computer.js')
 
 // ── flipper: storage list parsing ───────────────────────────────────────────
@@ -115,6 +119,111 @@ test('findFlipperPorts returns nothing when no flipper is attached', () => {
 
 test('findFlipperPorts survives an unreadable directory', () => {
   assert.deepEqual(findFlipperPorts('/nonexistent-dev-dir-xyz'), [])
+})
+
+// ── flipper: listen-window clamp ────────────────────────────────────────────
+//
+// The receive actions hold the serial lock (and the radio) for their whole
+// window, so an unbounded `duration` would block every other tool on the node.
+
+test('clampSecs bounds the listen window and falls back to the default', () => {
+  assert.equal(clampSecs(undefined, 5, 30), 5)
+  assert.equal(clampSecs(3, 5, 30), 3)
+  assert.equal(clampSecs(999, 5, 30), 30, 'must not hold the radio for 999s')
+  assert.equal(clampSecs(0, 5, 30), 1, 'a zero-second listen never sees anything')
+  assert.equal(clampSecs(-4, 5, 30), 1)
+  assert.equal(clampSecs(NaN, 5, 30), 5)
+  assert.equal(clampSecs(2.6, 5, 30), 3, 'rounded, not truncated')
+})
+
+// ── flipper: the credential-folder guard ────────────────────────────────────
+//
+// This user's /ext/nfc holds passports, national IDs and bank cards. Reading one
+// by name is a normal request; walking the folder into a chat transcript copies
+// all of it to the model provider and the conversation store.
+
+test('isSensitiveSweep blocks credential DIRECTORIES, not files inside them', () => {
+  for (const d of ['/ext/nfc', '/ext/nfc/', '/EXT/NFC', '/ext/lfrfid', '/ext/ibutton', '/ext/u2f', '/ext/subghz']) {
+    assert.equal(isSensitiveSweep(d), true, `${d} should be guarded`)
+  }
+  // A specific card the user asked for is still readable — the guard is about
+  // blind enumeration, not about making saved tags unreachable.
+  for (const f of ['/ext/nfc/Tr_passport.nfc', '/ext/subghz/gate.sub', '/ext/infrared', '/ext', '']) {
+    assert.equal(isSensitiveSweep(f), false, `${f} should not be guarded`)
+  }
+})
+
+// ── flipper: the busy-app dead end ──────────────────────────────────────────
+//
+// Measured on unlshd-075: `loader open NFC` starts an app, this firmware's
+// loader has NO close, and `input send back {short,long,press,release}` (even a
+// 12-event burst) does not dismiss it. Every app-claiming command then answers
+// "Other application is running" until `power reboot`.
+
+test('appBusyHelp names the stuck-app state and the only remedy', () => {
+  const help = appBusyHelp('rfid_read')
+  assert.match(help, /rfid_read/, 'says which command was refused')
+  assert.match(help, /Back/, 'tells the human the physical way out')
+  assert.match(help, /power reboot/, 'gives the unattended remedy')
+  assert.match(help, /no `loader close`/, 'explains why a software close is not offered')
+})
+
+// ── flipper: actions that must NOT reach the hardware ───────────────────────
+
+test('nfc scanning is refused with an explanation, not a fake empty result', async () => {
+  const t = makeFlipperTool()
+  for (const action of ['nfc_detect', 'nfc_read']) {
+    const out = await t._callback({ action })
+    // The old nfc_detect ran `nfc detect` and returned the firmware's usage
+    // blob verbatim, so "no tag present" and "this firmware cannot scan" were
+    // the same answer. It must never look like a completed scan.
+    assert.match(out, /not available/i, `${action} must say it cannot scan`)
+    assert.match(out, /\/ext\/nfc/, 'points at where saved tags actually live')
+    assert.doesNotMatch(out, /Cmd list/, 'must not echo the raw usage blob')
+  }
+})
+
+test('app_start refuses instead of stranding the CLI', async () => {
+  const t = makeFlipperTool()
+  const out = await t._callback({ action: 'app_start', command: 'NFC' })
+  assert.match(out, /disabled on purpose/i)
+  assert.match(out, /power reboot/, 'says how to recover an already-stuck device')
+})
+
+test('ir_tx will not pretend a file path is transmittable', async () => {
+  const t = makeFlipperTool()
+  // `ir tx "/ext/infrared/Remote.ir"` answers "Wrong arguments." on this
+  // firmware — it never transmits. The old tool reported that as a success line.
+  const out = await t._callback({ action: 'ir_tx', path: '/ext/infrared/Remote.ir' })
+  assert.match(out, /protocol/i, 'states what ir_tx actually needs')
+  assert.match(out, /NOT accepted/, 'is explicit that a path does not work')
+  assert.match(out, /ir_universal/, 'points at the action that does replay saved remotes')
+})
+
+test('an unknown IR protocol is rejected locally, before transmitting', async () => {
+  const t = makeFlipperTool()
+  const out = await t._callback({ action: 'ir_tx', protocol: 'NOPE', address: '00', command: '15' })
+  assert.match(out, /unknown IR protocol/i)
+  assert.ok(IR_PROTOCOLS.includes('NEC') && IR_PROTOCOLS.includes('Samsung32'))
+})
+
+test('gpio actions reject pins the firmware does not have', async () => {
+  const t = makeFlipperTool()
+  for (const action of ['gpio_read', 'gpio_set']) {
+    const out = await t._callback({ action, path: 'PZ9', data: '1' })
+    assert.match(out, /need a pin/, `${action} must not send a bogus pin`)
+  }
+  // Verbatim from the firmware's own error text.
+  assert.deepEqual([...GPIO_PINS], ['PA7', 'PA6', 'PA4', 'PB3', 'PB2', 'PC3', 'PC1', 'PC0'])
+})
+
+test('the tool describes the receive actions and the transmit constraint', () => {
+  const d = makeFlipperTool().toolSpec.description
+  for (const a of ['ir_rx', 'subghz_rx', 'rfid_read', 'ikey_read', 'onewire_search', 'gpio_read', 'i2c_scan', 'js', 'input_dump', 'input_send', 'subghz_chat']) {
+    assert.match(d, new RegExp(a), `description must advertise ${a}`)
+  }
+  assert.match(d, /only transmit what the user owns/i, 'transmission is physical action on the world')
+  assert.match(d, /never enumerate/i, 'saved credentials are not for bulk reading')
 })
 
 // ── computer: screenshot → screen coordinates ───────────────────────────────

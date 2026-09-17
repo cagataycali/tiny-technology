@@ -13,6 +13,7 @@ import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, chmodSy
 import { homedir, hostname, platform, arch } from 'node:os'
 import { join } from 'node:path'
 import type { TinyApi } from './api.js'
+import { apiUrlFor } from './config.js'
 
 export interface DeviceIdentity {
   version: 1
@@ -70,7 +71,7 @@ export const CLI_CAPABILITIES = ['mcp', 'files']
 
 /**
  * Server-side clamps, copied from the worker's sanitizeCapabilities
- * (chatgpt-plugin-tinyai/src/devices.ts): 32 entries, 32 chars each. Declaring
+ * (worker/src/devices.ts): 32 entries, 32 chars each. Declaring
  * past them isn't an error — it's silent truncation of the tail, so a machine
  * with many integrations would lose exactly the capabilities that distinguish
  * it. Clamp here, where we can pick WHAT to drop.
@@ -172,7 +173,7 @@ export async function enrollDevice(api: TinyApi, opts?: { name?: string; kind?: 
 /** One heartbeat. Returns false on 401 (revoked/unknown) — caller decides. */
 export async function heartbeat(d: DeviceIdentity, capabilities?: string[]): Promise<boolean> {
   try {
-    const base = process.env.TINY_API_URL || d.apiUrl
+    const base = apiUrlFor(d.apiUrl)
     const res = await fetch(`${base}/api/devices/heartbeat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -216,4 +217,39 @@ export function startHeartbeatLoop(d: DeviceIdentity, onRevoked?: () => void): (
   timer.unref()
   void tick() // immediate first beat — presence dot goes green now, not in 30s
   return () => { stopped = true; clearInterval(timer) }
+}
+
+/**
+ * 💻 Announce a finished background task to the platform (use_device async —
+ * the web repo's docs/use-device-async-design-2026-08-02.md, daemon half).
+ *
+ * A relay invoke this agent offloads to use_loop replies "Task started…"
+ * in-window, so the platform's late-reply push never fires — before this,
+ * the finished result only showed a DESKTOP notification, which is nowhere
+ * when the ask came from the user's phone or the web. The app proxy forwards
+ * to the worker, which deposits the result under a task_* ticket (redeemable
+ * via use_device action:'result'), rings a device_task_result event, and
+ * sends the one self-redeeming push.
+ *
+ * Best-effort by contract: an unreachable platform must never fail a finished
+ * task — the record on disk and the desktop notification still stand.
+ */
+export async function announceTaskResult(taskId: string, summary: string, result: string): Promise<void> {
+  const d = loadDevice()
+  if (!d) return
+  const base = apiUrlFor(d.apiUrl)
+  try {
+    await fetch(`${base}/api/devices/task-result`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId: d.deviceId,
+        token: d.token,
+        taskId,
+        summary: summary.slice(0, 140),
+        result: result.slice(0, 7000),
+      }),
+      signal: AbortSignal.timeout(10_000),
+    })
+  } catch { /* best-effort — see contract above */ }
 }

@@ -10,12 +10,37 @@
  * keeps the request under the edge body limit; callers get a clear error
  * telling them to resize.
  */
-import { readFileSync, statSync } from 'node:fs'
+import { closeSync, openSync, readSync, readFileSync, statSync } from 'node:fs'
 import { basename, extname, resolve } from 'node:path'
 
 const MAX_FILE_BYTES = 3_000_000 // base64 inflates 4/3× toward the ~4.5MB edge cap
 const MAX_TOTAL_BYTES = 3_500_000
 const MAX_TEXT_CHARS = 50_000
+/**
+ * How much of a text file is worth reading to keep MAX_TEXT_CHARS of it.
+ *
+ * 4 bytes per character is the worst case UTF-8 can do, so this prefix cannot
+ * under-fill the character budget no matter what the encoding throws at it, and
+ * it bounds the read at 200 KB whether the file is 200 KB or 200 GB. The old code
+ * read the WHOLE file and then sliced — attaching a 2 GB production.log (exactly
+ * the file you would attach to an agent) buffered 2 GB to keep 50 000 characters,
+ * and past Node's ~2 GB ceiling threw ERR_FS_FILE_TOO_LARGE instead of the
+ * actionable message the caps exist to produce.
+ */
+const TEXT_PREFIX_BYTES = MAX_TEXT_CHARS * 4
+
+/** The first `n` bytes, without buffering a byte more. */
+function readPrefix(path: string, n: number): { buf: Buffer; complete: boolean } {
+  const fd = openSync(path, 'r')
+  try {
+    const buf = Buffer.alloc(n)
+    const read = readSync(fd, buf, 0, n, 0)
+    // A short read means we reached EOF inside the window, so this IS the file.
+    return { buf: buf.subarray(0, read), complete: read < n }
+  } finally {
+    closeSync(fd)
+  }
+}
 
 const IMAGE_EXT: Record<string, string> = {
   jpg: 'jpeg', jpeg: 'jpeg', png: 'png', gif: 'gif', webp: 'webp',
@@ -35,9 +60,18 @@ function sanitizeDocName(name: string): string {
 /** Read one local file into a content block. Throws with actionable messages. */
 export function fileToContentBlock(path: string): any {
   const full = resolve(path)
-  const size = statSync(full).size // throws ENOENT with the path in it
+  const st = statSync(full) // throws ENOENT with the path in it
+  const size = st.size
   const ext = extname(full).slice(1).toLowerCase()
   const name = basename(full)
+
+  // statSync succeeds on a directory and reports a size, and extname('logs') is
+  // '' — so a directory used to take the extensionless-text path and die inside
+  // readFileSync with a bare EISDIR. Every other rejection in this file is a
+  // sentence saying what to do instead; `attach ./logs` deserves one too.
+  if (st.isDirectory()) {
+    throw new Error(`${name} is a directory — attach a file inside it, not the folder`)
+  }
 
   if (IMAGE_EXT[ext] || DOC_EXT[ext]) {
     if (size > MAX_FILE_BYTES) {
@@ -53,14 +87,22 @@ export function fileToContentBlock(path: string): any {
   }
 
   if (TEXT_EXT.test(ext) || ext === '') {
-    const raw = readFileSync(full)
+    // Bounded prefix, not the whole file. The sniff below only ever looked at
+    // 8 KB, but `raw` used to be every byte — so a 5 GB extensionless blob was
+    // read completely in order to examine 8 KB of it and then reject it.
+    const { buf, complete } = readPrefix(full, TEXT_PREFIX_BYTES)
     // Extensionless files might be binaries (e.g. /bin/ls) — sniff for null
     // bytes before treating as text; UTF-8 text never contains 0x00
-    if (raw.subarray(0, 8192).includes(0)) {
+    if (buf.subarray(0, 8192).includes(0)) {
       throw new Error(`${name} looks like a binary file — attach images/PDFs/docs by extension, or convert to text first`)
     }
-    const text = raw.toString('utf8')
-    const trimmed = text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) + '\n...[truncated]' : text
+    const text = buf.toString('utf8')
+    // Clipped if the character budget ran out, OR if the file continued past the
+    // prefix we read — otherwise a 2 GB log would silently claim to be complete.
+    const over = text.length > MAX_TEXT_CHARS
+    const trimmed = over || !complete
+      ? text.slice(0, MAX_TEXT_CHARS) + '\n...[truncated]'
+      : text
     return { text: `\n\n--- Attached file: ${name} ---\n${trimmed}\n--- end ---` }
   }
 

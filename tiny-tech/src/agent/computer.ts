@@ -25,7 +25,6 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import { join } from 'node:path'
-import { recognizeText, linesToText, matchLines, hasVisionOcr, type TextLine } from './vision.js'
 import {
   listWindows,
   mutateWindow,
@@ -352,48 +351,6 @@ export function imageToScreen(x: number, y: number): { x: number; y: number } {
   }
 }
 
-// ── OCR ─────────────────────────────────────────────────────────────────────
-
-/**
- * Capture, then read the text in what was captured — and register the shot so
- * the coordinates OCR reports are directly clickable.
- *
- * This is the join that makes on-device OCR worth having: `capture()` resamples
- * to logical points and records the residual `scale`/origin in `lastShot`, and
- * Vision's boxes are normalized, so scaling them by the DELIVERED image size
- * lands them in exactly the coordinate space `imageToScreen()` already converts
- * from. A caller can pass an OCR centre straight into `click` — no arithmetic on
- * either side, and region screenshots work for free.
- */
-export function readScreenText(
-  region?: number[],
-  opts?: { fast?: boolean },
-): { shot: ShotResult; lines: TextLine[] } {
-  const shot = capture(region)
-  lastShot = { originX: shot.originX, originY: shot.originY, scale: shot.scale }
-  const lines = recognizeText(shot.path, shot.width, shot.height, { fast: opts?.fast })
-  return { shot, lines }
-}
-
-/** Cap on lines rendered into a tool result — a dense screen OCRs to hundreds. */
-export const OCR_LINE_LIMIT = 120
-
-/**
- * Render matched lines with their clickable centres.
- *
- * Truncation is REPORTED, not silent: a model told "3 matches" that only sees 3
- * of 40 will click the wrong one confidently. Same reason the count comes first.
- */
-export function formatTextLines(lines: TextLine[], limit = OCR_LINE_LIMIT): string {
-  if (!lines.length) return 'no text found'
-  const shown = lines.slice(0, limit)
-  const body = shown
-    .map((l) => `- "${l.text}" @ ${l.centerX},${l.centerY} (${l.width}×${l.height}, conf ${l.confidence.toFixed(2)})`)
-    .join('\n')
-  const more = lines.length > shown.length ? `\n… ${lines.length - shown.length} more not shown` : ''
-  return `${lines.length} line${lines.length === 1 ? '' : 's'}:\n${body}${more}`
-}
-
 // ── the tool ────────────────────────────────────────────────────────────────
 
 export function makeComputerTool() {
@@ -405,8 +362,6 @@ convert screenshot coordinates into screen coordinates themselves, including for
 screenshots. Never scale or offset coordinates yourself. Origin is top-left.
 
 - screenshot (region=[left,top,width,height] optional) — returns the image itself as context
-- read_screen (region optional) — on-device OCR: every line of text with a CLICKABLE centre
-- find_text (text, regex=false, region optional) — where a label is; click its centre directly
 - screen_size / mouse_position
 - click (x, y, button=left|right|middle, clicks=1) / double_click (x, y) / right_click (x, y)
 - move_mouse (x, y) / drag (x, y → to_x, to_y)
@@ -428,10 +383,6 @@ Moves are READ BACK, so the result says where the window actually ended up — a
 to refuse or adjust a size, and a dialog may not move at all.
 
 Filling a form: screenshot → click the field → type → key tab → … → screenshot to verify.
-Prefer find_text over eyeballing a screenshot when you're after a labelled control ("Sign In",
-"Save") — it runs locally on the Neural Engine, costs no tokens, and returns the exact centre
-to click, so it doesn't miss by a few pixels the way reading an image does. read_screen is the
-cheap way to answer "what does it say" without spending an image.
 Prefer keyboard navigation (tab/enter) over clicking when the layout allows it: it survives
 layout shifts that coordinates don't. Take a fresh screenshot after anything that changes
 the screen — never click from a stale one.`,
@@ -489,39 +440,6 @@ the screen — never click from a stale one.`,
             ]
           }
 
-          case 'read_screen':
-          case 'ocr': {
-            if (!hasVisionOcr()) return 'on-device OCR needs macOS (Vision framework)'
-            const { shot, lines } = readScreenText(a.region, { fast: a.fast })
-            const scope = a.region ? `region ${a.region.join(',')}` : 'full screen'
-            // The coordinates are already screen-clickable (readScreenText
-            // registers the shot), so say so — otherwise a model that knows
-            // about the Retina scaling will helpfully "correct" them.
-            return (
-              `👁️ ${scope}, ${shot.width}×${shot.height} — read on-device (no image spent)\n` +
-              `Coordinates below are ready to pass to click/move_mouse as-is.\n\n` +
-              formatTextLines(lines)
-            )
-          }
-
-          case 'find_text': {
-            if (!hasVisionOcr()) return 'on-device OCR needs macOS (Vision framework)'
-            const needle = a.text || a.key
-            if (!needle) return 'need text to find, e.g. {action:"find_text", text:"Sign In"}'
-            const { lines } = readScreenText(a.region, { fast: a.fast })
-            const hits = matchLines(lines, needle, { regex: a.regex })
-            if (!hits.length) {
-              // A miss must not read as "the text isn't on screen" when it might
-              // be "OCR read it differently" — hand back the size of the haystack
-              // so the model can fall back to read_screen instead of retrying.
-              return `🔍 no match for ${JSON.stringify(needle)} among ${lines.length} recognized line${lines.length === 1 ? '' : 's'} — try action:'read_screen' to see what the text actually says`
-            }
-            const best = hits[0]
-            return (
-              `🔍 best match "${best.text}" — click ${best.centerX},${best.centerY}\n` +
-              formatTextLines(hits)
-            )
-          }
 
           case 'screen_size': {
             const s = screenSize()

@@ -141,7 +141,7 @@ test('the roster names every kind and nothing extra', () => {
  * which is why that line returns the kind unchanged instead of guessing.
  */
 test('the roster still agrees with the worker source', () => {
-  const worker = join(process.cwd(), '..', 'chatgpt-plugin-tinyai', 'src')
+  const worker = join(process.cwd(), '..', 'worker', 'src')
   if (!existsSync(worker)) return // standalone clone — nothing to compare against
 
   const found = new Set()
@@ -159,11 +159,13 @@ test('the roster still agrees with the worker source', () => {
     }
     // The one indirection that exists: `relay.ts` builds `{kind: LATE_REPLY_KIND}`
     // and emits `late.kind`, so no literal is ever adjacent to the call. Scoped to
-    // *_KIND CONSTANTS in files that emit — a bare `kind: 'x'` literal belongs to
-    // whichever subsystem owns it (learnings.ts's `kind:` fields are REPUTATION
-    // kinds), and treating those as event kinds is how a scan starts lying.
+    // *_EVENT_KIND CONSTANTS in files that emit — NOT bare *_KIND, because
+    // devices.ts has ENDPOINT_KIND (a device-row kind, not an event) and now
+    // emits device events. A bare `kind: 'x'` literal belongs to whichever
+    // subsystem owns it (learnings.ts's `kind:` fields are REPUTATION kinds),
+    // and treating those as event kinds is how a scan starts lying.
     if (src.includes('emitEvent(')) {
-      for (const m of src.matchAll(/\bkind:\s*([A-Z][A-Z_0-9]*_KIND)\b/g)) {
+      for (const m of src.matchAll(/\bkind:\s*([A-Z][A-Z_0-9]*_EVENT_KIND)\b/g)) {
         const decl = src.match(new RegExp(`${m[1]}\\s*=\\s*['"]([a-z_0-9-]+)['"]`))
         if (decl) found.add(decl[1])
       }
@@ -171,6 +173,10 @@ test('the roster still agrees with the worker source', () => {
 
     const money = src.match(/MONEY_EVENT_KINDS\s*=\s*\[([^\]]+)\]/)
     if (money) for (const m of money[1].matchAll(/['"]([a-z_0-9-]+)['"]/g)) found.add(m[1])
+
+    // LATE_REPLY_KIND in relay.ts is the one exception to *_EVENT_KIND naming
+    const lateReply = src.match(/LATE_REPLY_KIND\s*=\s*['"]([a-z_0-9-]+)['"]/)
+    if (lateReply) found.add(lateReply[1])
   }
 
   // The scan itself has to be load-bearing: if it silently matched nothing, the

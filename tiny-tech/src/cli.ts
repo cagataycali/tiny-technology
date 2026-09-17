@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
- * npx tiny-tech — tiny.technology MCP server + auth CLI.
+ * npx tiny-tech — your tiny on every surface: MCP server, local agent, device daemon.
  *
  *   tiny-tech            start the MCP server on stdio (default)
+ *   tiny-tech init <url> point this machine at another backend (default: tiny.technology)
  *   tiny-tech login      browser auth → ~/.tiny/credentials.json
  *   tiny-tech connect    optional step 2: Google / Spotify / Telegram / WhatsApp
  *   tiny-tech logout     delete stored credentials
@@ -12,31 +13,80 @@
  * stdout is reserved for MCP stdio framing; all human output → stderr.
  */
 import { existsSync, statSync } from 'node:fs'
-import { login, clearCredentials, loadCredentials, credentialsValid, DEFAULT_API_URL } from './auth.js'
+import { login, clearCredentials, loadCredentials, credentialsValid } from './auth.js'
+import { apiUrl as resolveApi, apiHost, init as initBackend, resolveApiUrl, setApiFlag, takeApiFlag, configPath, readConfig, workerUrl, writeConfig } from './config.js'
 import { TinyApi } from './api.js'
 import { startServer } from './server.js'
 import { enrollDevice, loadDevice, clearDevice } from './device.js'
 import { applyStoredEnv } from './integrations.js'
+import { applyModelEnv } from './onboard.js'
 
 // Stored app connections become env vars before anything reads them, so a
 // connection made in one terminal works in the next. A real export wins.
 applyStoredEnv()
+// Same rule for the onboarded model provider: ~/.tiny/model-config.json's
+// active provider becomes TINY_MODEL_* unless the shell already exported one.
+applyModelEnv()
 
-const apiUrl = process.env.TINY_API_URL || DEFAULT_API_URL
 // First non-flag arg decides the command; flags like --mesh are options.
 // No command: interactive terminal → TUI (the human default); piped stdio
 // (MCP clients like Claude Desktop spawn us that way) → MCP server.
 const argvRest = process.argv.slice(2)
+// `--api <url>` is the first rung of the backend resolution (config.ts) and is
+// consumed here so it never masquerades as a command or a one-shot prompt.
+try { setApiFlag(takeApiFlag(argvRest)) } catch (e: any) { process.stderr.write(`--api: ${e.message}\n`); process.exit(2) }
+const apiUrl = resolveApi()
 const cmd = argvRest.includes('--help') || argvRest.includes('-h')
   ? 'help'
   : argvRest.find((a) => !a.startsWith('-'))
     || (process.stdin.isTTY ? 'tui' : 'serve')
-const KNOWN = new Set(['login', 'logout', 'whoami', 'connect', 'serve', 'repl', 'tui', 'mesh', 'daemon', 'tray', 'devices', 'help', '--help', '-h'])
+const KNOWN = new Set(['init', 'login', 'logout', 'whoami', 'connect', 'onboard', 'sync', 'serve', 'mcp', 'repl', 'tui', 'mesh', 'daemon', 'tray', 'devices', 'help', '--help', '-h'])
+
+/**
+ * A background loop that should run EXACTLY ONCE.
+ *
+ * use_tasks was the run-once rail and it's gone; loops carry this work now. But
+ * a loop iterates until it sees [LOOP_DONE], so a menu-bar "look at this
+ * screenshot" would keep going for hours — 200 iterations of re-describing the
+ * same PNG, holding one of only two slots. The tray's asks are one-shot by
+ * nature (nobody is watching a menu bar for progress), so say so in the prompt,
+ * which is the only per-loop control there is.
+ */
+function oneShot(prompt: string): string {
+  return `${prompt}\n\nThis is a ONE-SHOT background job: finish it in this single iteration and end your reply with [LOOP_DONE]. Do not plan follow-up iterations.`
+}
 
 async function main() {
   switch (cmd) {
+    case 'init': {
+      // `tiny-tech init [url] [--worker <url>]` — the one setting. Probes
+      // /api/health so a typo fails here, not three commands later inside a 401.
+      // `init status` prints what is resolved today and where it came from.
+      const rest = argvRest.filter((a) => a !== 'init')
+      if (rest[0] === 'status' || rest.includes('--status')) {
+        const r = resolveApiUrl()
+        const cfg = readConfig()
+        process.stderr.write(`api     ${r.api}  (from ${r.source})\nworker  ${workerUrl() || '(unknown — set TINY_WORKER_URL or re-run init)'}\nconfig  ${cfg ? configPath() : `${configPath()} (absent)`}\n`)
+        return
+      }
+      const wi = rest.findIndex((a) => a === '--worker' || a.startsWith('--worker='))
+      let worker: string | undefined
+      if (wi >= 0) {
+        worker = rest[wi].includes('=') ? rest[wi].split('=').slice(1).join('=') : rest[wi + 1]
+        rest.splice(wi, rest[wi].includes('=') ? 1 : 2)
+      }
+      const url = rest.find((a) => !a.startsWith('-'))
+      await initBackend(url, { worker })
+      return
+    }
+
     case 'login': {
       await login(apiUrl)
+      // An explicit `--api` on login is a decision to switch backends: remember it
+      // so the next plain `tiny-tech` talks to the same place the token is valid.
+      if (resolveApiUrl().source === 'flag') {
+        try { await initBackend(apiUrl) } catch { writeConfig({ api: apiUrl }) }
+      }
       // Enroll this machine as a device node (tiny-node PR2) — presence,
       // revocable from the web /devices page. Failure is non-fatal: login
       // is still valid without a device identity.
@@ -53,6 +103,22 @@ async function main() {
         const hint = await connectHint()
         if (hint) process.stderr.write(`${hint}\n`)
       } catch { /* a hint is never worth failing a successful login over */ }
+      // Step 3: the model. Cloud config (another device onboarded already) is
+      // pulled silently; a fresh account gets pointed at the wizard.
+      try {
+        const { loadModelConfig, pullFromCloud, applyModelEnv: applyModel } = await import('./onboard.js')
+        const store = loadModelConfig()
+        const freshApi = new TinyApi() // re-read creds written by login()
+        if (!Object.keys(store.providers).length) {
+          const r = await pullFromCloud(freshApi, store)
+          if (r.pulled > 0) {
+            applyModel()
+            process.stderr.write(`✓ pulled ${r.pulled} model provider(s) from your tiny account\n`)
+          } else {
+            process.stderr.write(`→ next: \`npx tiny-tech onboard\` — pick your model provider(s) + voice (syncs across devices)\n`)
+          }
+        }
+      } catch { /* onboarding hint is never worth failing a login over */ }
       return
     }
 
@@ -78,7 +144,7 @@ async function main() {
       if (tinys.length) {
         process.stderr.write(`tinys:\n${tinys.map((t: any) => `  - ${t.name}${t.private ? ' (private)' : ''}`).join('\n')}\n`)
       } else {
-        process.stderr.write('no tinys yet — create one with the tiny_create tool or at tiny.technology\n')
+        process.stderr.write(`no tinys yet — create one with the tiny_create tool or at ${apiHost()}\n`)
       }
       const days = Math.round((creds.expires - Date.now() / 1000) / 86400)
       if (days < Number.MAX_SAFE_INTEGER / 86400) process.stderr.write(`token expires in ~${days} days\n`)
@@ -115,6 +181,41 @@ async function main() {
       return
     }
 
+    case 'onboard': {
+      // Provider selection + voice + cloud sync — the step between login and
+      // first chat. `onboard status` shows the store; --push/--pull for sync.
+      // A real TTY gets the Ink experience (animated landing, arrow keys);
+      // pipes/CI keep the readline wizard — its line-queue is what makes
+      // heredoc-driven tests possible.
+      const sub = argvRest.filter((a) => !a.startsWith('-'))[1]
+      const mode = argvRest.includes('--push') ? 'push'
+        : argvRest.includes('--pull') ? 'pull'
+        : sub === 'status' ? 'status'
+        : 'wizard'
+      if (mode === 'wizard' && process.stdin.isTTY && process.stdout.isTTY && !argvRest.includes('--plain')) {
+        const { runOnboardTui } = await import('./tui/onboard-app.js')
+        await runOnboardTui(new TinyApi())
+        return
+      }
+      const { runOnboard } = await import('./onboard.js')
+      await runOnboard(new TinyApi(), { mode })
+      return
+    }
+
+    case 'sync': {
+      // Two-way config sync with the cloud tiny: pull first (their newer rows
+      // land), then push (ours land there) — both LWW per provider.
+      const { runOnboard } = await import('./onboard.js')
+      await runOnboard(new TinyApi(), { mode: 'pull' })
+      await runOnboard(new TinyApi(), { mode: 'push' })
+      return
+    }
+
+    // `mcp` is what people type when they mean "the MCP server" — it is the
+    // package's first personality and the word in every client config. Before
+    // this alias the guess fell through KNOWN to the one-shot agent path: a
+    // mesh node came up and the model was asked, literally, "mcp".
+    case 'mcp':
     case 'serve': {
       const creds = loadCredentials()
       if (!credentialsValid(creds)) {
@@ -137,6 +238,7 @@ async function main() {
       await runTui()
       return
     }
+
 
     case 'daemon': {
       const sub = argvRest.filter((a) => !a.startsWith('-'))[1] || 'status'
@@ -161,20 +263,127 @@ async function main() {
     }
 
     case 'mesh': {
+      const meshSub = argvRest.filter((a) => !a.startsWith('-'))[1] || 'node'
+      const meshArgs = argvRest.filter((a) => !a.startsWith('-')).slice(2)
+
+      // ── Short-lived mesh actions (devduck's `zenoh list peers` / send /
+      // broadcast, as CLI verbs). `peers`/`status` answer from the local file
+      // registry FIRST — instant, and correct even while the daemon owns the
+      // multicast session — then scout briefly if nothing is registered.
+      if (meshSub === 'peers' || meshSub === 'status' || meshSub === 'send' || meshSub === 'broadcast') {
+        const { registry } = await import('./mesh/registry.js')
+        // ★ = this process. Read from the pid stamp: `is_self` used to live in
+        // metadata, which every process on the box may rewrite, so the star
+        // could land on someone else's node.
+        const fmt = (id: string, m: any, seen: number, pid?: number) => {
+          const age = Math.round((Date.now() - seen) / 1000)
+          const bits = [m.model, m.platform, m.tool_count ? `${m.tool_count} tools` : '', m.cwd]
+            .filter(Boolean).join(' · ')
+          return `  ${pid === process.pid ? '★' : '•'} ${id} (${m.hostname || '?'})\n      ${bits}\n      seen ${age}s ago`
+        }
+
+        if (meshSub === 'peers' || meshSub === 'status') {
+          let live = registry.live()
+          if (!live.length) {
+            // Nothing registered locally — join and scout for a moment.
+            const { MeshNode } = await import('./mesh/zenoh.js')
+            const scout = new MeshNode({ modelLabel: 'tiny-tech (scout)' })
+            await scout.start()
+            process.stderr.write('🔍 scouting the mesh (multicast 224.0.0.224:7446)…\n')
+            await new Promise((r) => setTimeout(r, 6000))
+            const peers = scout.listAllPeers()
+            process.stderr.write(peers.length
+              ? `👥 ${peers.length} peer(s):\n${peers.map((pp) => fmt(pp.instanceId, {
+                  hostname: pp.hostname, model: pp.model, platform: pp.platform,
+                  tool_count: pp.toolCount, cwd: pp.cwd,
+                }, pp.lastSeen)).join('\n')}\n`
+              : 'No peers found. Start tiny or devduck elsewhere on this LAN, or set ZENOH_CONNECT.\n')
+            await scout.stop()
+            process.exit(0)
+          }
+          process.stderr.write(`👥 mesh (${live.length} node(s), via ${registry ? 'local registry' : ''}):\n`)
+          for (const e of live) process.stderr.write(fmt(e.id, e.metadata || {}, e.last_seen, e.pid) + '\n')
+          return
+        }
+
+        // send / broadcast — join, dispatch, stream the answer, leave.
+        const isSend = meshSub === 'send'
+        const peerId = isSend ? meshArgs[0] : ''
+        const message = (isSend ? meshArgs.slice(1) : meshArgs).join(' ')
+        if (!message || (isSend && !peerId)) {
+          process.stderr.write(isSend
+            ? 'usage: tiny-tech mesh send <peer-id> "<message>"\n'
+            : 'usage: tiny-tech mesh broadcast "<message>"\n')
+          process.exitCode = 1
+          return
+        }
+        const { MeshNode } = await import('./mesh/zenoh.js')
+        const client = new MeshNode({ modelLabel: 'tiny-tech (cli)' })
+        await client.start()
+        // Let presence land so broadcast knows how many answers to wait for
+        await new Promise((r) => setTimeout(r, 1500))
+        let current = ''
+        const onChunk = (responder: string, chunk: string) => {
+          if (responder !== current) { current = responder; process.stdout.write(`\n── ${responder} ──\n`) }
+          process.stdout.write(chunk)
+        }
+        const results = isSend
+          ? await client.send(peerId, message, 120_000, onChunk)
+          : await client.broadcast(message, 120_000, onChunk)
+        if (!results.length) process.stderr.write('\n(no response — timeout or no peers)\n')
+        else process.stdout.write('\n')
+        await client.stop()
+        process.exit(0)
+      }
+
       // Headless mesh node: joins the zenoh mesh and answers commands from
       // peers (devduck or tiny-tech) with a fresh local agent per command.
       const { MeshNode } = await import('./mesh/zenoh.js')
       const { TinyAgent } = await import('./agent/agent.js')
       const { TinyApi: Api } = await import('./api.js')
-      const mesh = new MeshNode({
+      let mesh: InstanceType<typeof MeshNode>
+      mesh = new MeshNode({
         modelLabel: 'tiny-tech',
-        agentFactory: async () => {
-          const a = new TinyAgent({ api: new Api(), printer: false })
+        onPeerJoin: (p) => process.stderr.write(`🔗 peer joined: ${p.instanceId} (${p.hostname}) — ${p.model || '?'}${p.toolCount ? `, ${p.toolCount} tools` : ''}\n`),
+        onPeerLeave: (p) => process.stderr.write(`⚡ peer left: ${p.instanceId} (${p.hostname})\n`),
+        // The answering agent gets the mesh too, so a peer asking "who are you"
+        // is answered from mesh.instanceId instead of the agent guessing from
+        // whatever the shared registry file happened to say.
+        agentFactory: async (ctx) => {
+          // ctx.hop: how many mesh legs this request already travelled. At the
+          // cap the agent is built without mesh_send/mesh_broadcast, so a peer
+          // cannot answer a broadcast by broadcasting (see MESH_MAX_HOPS).
+          const a = new TinyAgent({ api: new Api(), printer: false, mesh, meshHop: ctx?.hop ?? 1 })
           await a.init()
+          // First real agent on this node = first time we know the actual tool
+          // surface. The daemon starts its mesh before any agent exists, so
+          // without this it advertises `tool_count: 0` for its whole life and
+          // capability-based routing skips a fully loaded node.
+          mesh.setPresence({
+            tools: a.toolNames,
+            modelLabel: `tiny-tech (${a.modelLabel})`,
+            systemPromptSummary: `tiny — ${apiHost()} personal AI · devices: ${a.deviceLabels.join(',') || 'none'} · ${a.toolNames.length} tools`,
+          })
           return a
         },
       })
       await mesh.start()
+      // Announce the REAL tool surface without waiting for a first command:
+      // one init on a process that lives for days, off the critical path. Until
+      // this lands presence says `tool_count: 0`, and a peer routing work by
+      // capability would skip this node entirely.
+      void (async () => {
+        try {
+          const probe = new TinyAgent({ api: new Api(), printer: false, mesh })
+          await probe.init()
+          mesh.setPresence({
+            tools: probe.toolNames,
+            modelLabel: `tiny-tech (${probe.modelLabel})`,
+            systemPromptSummary: `tiny — ${apiHost()} personal AI · devices: ${probe.deviceLabels.join(',') || 'none'} · ${probe.toolNames.length} tools`,
+          })
+          process.stderr.write(`🧰 presence: ${probe.toolNames.length} tools advertised\n`)
+        } catch { /* presence enrichment is best-effort — the node still answers */ }
+      })()
       process.stderr.write(`🕸  tiny-tech mesh node: ${mesh.instanceId}\n`)
       process.stderr.write('   answering devduck/broadcast + devduck/cmd — ^C to stop\n')
 
@@ -290,20 +499,20 @@ async function main() {
       // for `reload`/`ask`: the point of the socket is that the menu answers
       // instantly, and standing up a whole agent per click doesn't.
       const { startTrayServer } = await import('./tray.js')
-      const { desktopSenses } = await import('./agent/desktop.js')
       const { daemonPaths, daemonLogs } = await import('./daemon.js')
       const trayAgent = new TinyAgent({ api: new Api(), printer: false })
       await trayAgent.init().catch((e: any) => process.stderr.write(`🎛 tray: agent unavailable (${e?.message || e})\n`))
       const startedAt = Date.now()
-      // Resolved once: the senses probe shells `command -v` per binary, and the
-      // tray polls status every few seconds.
-      const senses = desktopSenses()
       const logPath = daemonPaths().logPath
       const tray = await startTrayServer({
         onError: (m) => process.stderr.write(`🎛 ${m}\n`),
         deps: {
           status: () => {
-            const tasks = trayAgent.tasks?.list() || []
+            // The tray's wire vocabulary still says "tasks" — the Swift helper
+            // ships separately and can't be updated in lockstep, and `tasks` is
+            // still the honest word for what the menu bar shows. Only the runner
+            // behind it changed: use_tasks is gone, loops carry this now.
+            const tasks = trayAgent.loops?.list() || []
             const running = tasks.filter((t) => t.status === 'running').length
             const finished = tasks.filter((t) => t.status !== 'running').length
             const failedTools = trayAgent.localTools?.skipped.length || 0
@@ -311,7 +520,6 @@ async function main() {
             return {
               device: dev ? { name: dev.name, id: dev.deviceId, online: true } : null,
               peers: peerCount,
-              senses,
               tools: { loaded: trayAgent.localToolNames.length, failed: failedTools },
               tasks: { running, finished },
               relay: !!poller,
@@ -323,19 +531,25 @@ async function main() {
               events: tickerCache.getRecentEvents(),
             }
           },
-          tasks: () => (trayAgent.tasks?.list() || []).map((t) => ({
+          tasks: () => (trayAgent.loops?.list() || []).map((t) => ({
             id: t.id, status: t.status, prompt: t.prompt, startedAt: t.startedAt, endedAt: t.endedAt,
           })),
-          taskResult: (id) => trayAgent.tasks?.get(id) || null,
-          startTask: (prompt) => trayAgent.tasks?.start(prompt) || { error: 'no task runner on this daemon' },
-          cancelTask: (id) => trayAgent.tasks?.cancel(id) || 'no task runner on this daemon',
+          loops: () => (trayAgent.loops?.list() || []).map((t) => ({
+            id: t.id, status: t.status, prompt: t.prompt, startedAt: t.startedAt, endedAt: t.endedAt,
+            iterations: t.iterations.length,
+          })),
+          taskResult: (id) => trayAgent.loops?.get(id) || null,
+          startTask: (prompt) => trayAgent.loops?.start(oneShot(prompt)) || { error: 'no loop runner on this daemon' },
+          // `stop` ends the loop after the in-flight iteration lands — the same
+          // honest semantics tasks.cancel() had, and the only thing possible.
+          cancelTask: (id) => trayAgent.loops?.stop(id) || 'no loop runner on this daemon',
           logs: (lines) => daemonLogs(lines),
           reloadTools: () => trayAgent.reloadLocalTools(),
           shareFile: (path, note) => {
-            // Validate NOW (the tray deadline is 2s), do the work as a task.
-            // The task's agent has use_computer/fileEditor + the tiny_* cloud
-            // tools, so "look at this screenshot" runs with full context, and
-            // its completion notifies the desktop like any finished task.
+            // Validate NOW (the tray deadline is 2s), do the work in the
+            // background. The loop's agent has use_computer/fileEditor + the
+            // tiny_* cloud tools, so "look at this screenshot" runs with full
+            // context, and its completion notifies the desktop like any finish.
             if (!existsSync(path)) return `no file at ${path}`
             const size = statSync(path).size
             if (!size) return `${path} is empty`
@@ -343,8 +557,8 @@ async function main() {
             const prompt = `[Shared from the menu bar] The user just captured a screenshot at ${path}.` +
               ` Read it with your vision (attach/view the image), describe anything noteworthy,` +
               ` and act on this note from the user: ${note || '(no note — just look and summarise)'}`
-            const r = trayAgent.tasks?.start(prompt)
-            if (!r) return 'no task runner on this daemon'
+            const r = trayAgent.loops?.start(oneShot(prompt))
+            if (!r) return 'no loop runner on this daemon'
             if ('error' in r) return r.error
             return `shared — task ${r.id} is looking at it (answer lands as a notification + your next chat turn)`
           },
@@ -372,7 +586,7 @@ async function main() {
       // Peer table report every 30s
       setInterval(() => {
         const peers = mesh.listPeers()
-        process.stderr.write(`🕸  peers: ${peers.length}${peers.length ? ' — ' + peers.map(p => p.instanceId).join(', ') : ''}\n`)
+        process.stderr.write(`🕸  peers: ${peers.length}${peers.length ? ' — ' + peers.map((p) => p.instanceId).join(', ') : ''}\n`)
       }, 30_000)
       await new Promise(() => {}) // run forever
       return
@@ -413,36 +627,47 @@ async function main() {
     case 'help':
     case '--help':
     case '-h':
-      process.stderr.write(`tiny-tech — tiny.technology MCP server
+      process.stderr.write(`tiny-tech — your tiny on every surface (backend: ${apiUrl})
 
-usage: npx tiny-tech [command]
+usage: npx tiny-tech [--api <url>] [command]
 
 commands:
   (none)           TUI in a terminal; MCP server when spawned over stdio
-  serve            force the MCP server on stdio
+  serve | mcp      force the MCP server on stdio
   tui              full-screen agent UI (Ink) — the pretty one
   repl             plain interactive agent session (pipes-friendly)
   mesh             headless zenoh mesh node (answers peer commands)
+  mesh peers       who is on the mesh right now (auto-discovery, instant)
+  mesh send <id> "<msg>"     ask ONE peer, streamed back to your terminal
+  mesh broadcast "<msg>"     ask EVERY peer at once (fan-out)
   daemon <action>  persistence: install|status|logs|restart|uninstall|show
                    (launchd on macOS, systemd --user on Linux; runs 'mesh')
   tray <action>    talk to a running daemon over its control socket:
                    status|tasks|result <id>|ask <text>|cancel <id>|logs [n]|
                    reload|ping — the same protocol a menu-bar helper speaks
   "any text"       one-shot agent query (e.g. tiny-tech "what did I miss?")
+  init [url]       point this machine at a backend (probes /api/health, writes
+                   ~/.tiny/config.json); 'init status' shows what is resolved;
+                   --worker <url> pins the worker when the app does not advertise one
   login            authorize via browser, store credentials
+  onboard          pick model provider(s) + voice — synced to your tiny account
+  onboard status   show the local model config store
+  sync             two-way config sync with your tiny account (pull, then push)
   connect [app]    optional: connect google|spotify|telegram|whatsapp
   logout           remove stored credentials + device identity
   whoami           show identity + owned tinys
   devices          list your enrolled devices w/ presence
 
 options:
+  --api <url>      talk to this backend for this run (beats TINY_API_URL and config.json)
   --no-mesh        disable the zenoh mesh (ON by default — devduck-compatible)
 
 env:
   TINY_MESH        'false' = disable mesh (default: enabled)
   ZENOH_CONNECT    remote endpoint(s), e.g. tcp/host:7447
   ZENOH_LISTEN     listen endpoint(s) for remote peers
-  TINY_API_URL     override https://tiny.technology
+  TINY_API_URL     the backend URL (default https://tiny.technology; beats ~/.tiny/config.json)
+  TINY_WORKER_URL  the backend's worker (normally learned from <api>/api/health)
   TINY_TOKEN       bearer token (skips credentials file — CI/headless)
   TINY_NO_BROWSER  don't auto-open the login URL (print it instead)
   TINY_HOME        credentials dir (default ~/.tiny)
@@ -451,6 +676,24 @@ env:
                    .mjs exporting { name, description, handler }; the agent
                    hot-reloads them with use_tools, no restart
   TINY_MODEL_*     BYO model for tiny_chat (PROVIDER, API_KEY, ID, BASE_URL)
+  OPENAI_API_KEY   required by the TUI voice call (gpt-realtime is the only
+                   true speech-to-speech model in any API today)
+  TINY_VOICE       call voice: alloy|ash|ballad|coral|echo|sage|shimmer|
+                   verse|marin|cedar (default marin)
+  TINY_VOICE_MODEL realtime model override (default gpt-realtime-2.1-mini)
+  TINY_VOICE_HALF_DUPLEX=1  mute the mic while the tiny is audible. Only for a
+                   built-in-speaker-into-built-in-mic setup, where it would
+                   otherwise hear itself; you can still interrupt (the gate
+                   opens for a voice above the measured echo —
+                   TINY_VOICE_BARGE_MARGIN / _BARGE_FLOOR / _BARGE_FRAMES)
+  TINY_VOICE_NOISE_REDUCTION  near_field (default) | far_field | off — the API's
+                   own noise reduction on the input its VAD listens to
+  TINY_VOICE_BACKEND  force sox|ffmpeg; TINY_VOICE_INPUT picks the mic device
+
+  TINY_OPENAPI     '0' = don't mount use_openapi (any HTTP API from its spec)
+  TINY_OPENAPI_DIR loaded specs + credentials (default ~/.tiny/openapi, 0600).
+                   A credential is bound to the host its spec named and is
+                   refused for any other one
 
 app connections (optional — 'tiny-tech connect' writes these to
 ~/.tiny/integrations.json for you; exporting them yourself also works):

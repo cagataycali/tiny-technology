@@ -47,11 +47,23 @@ function entrypoint(): { node: string; cli: string } {
   return { node: process.execPath, cli: new URL('./cli.js', import.meta.url).pathname }
 }
 
-/** Env vars the daemon needs — captured at install time (launchd/systemd have no shell profile) */
-function envFileContent(extraEnv: Record<string, string> = {}): string {
+/**
+ * Single-quote a value for `sh`/`bash` sourcing. The env file is read with
+ * `set -a; . file`, so an UNQUOTED value containing a space, `$`, backtick or
+ * quote isn't just mangled — it can abort the source, and under KeepAlive a
+ * wrapper that dies at its first line is a daemon that crash-loops forever
+ * with nothing in the log but bash syntax errors. Single quotes make every
+ * byte literal; an embedded `'` becomes the standard `'\''` splice.
+ */
+function shQuote(v: string): string {
+  return `'${v.replace(/'/g, `'\\''`)}'`
+}
+
+/** Env vars the daemon needs — captured at install time (launchd/systemd have no shell profile).
+ *  Exported for tests: the quoting contract must survive a real `set -a; . file` round-trip. */
+export function envFileContent(extraEnv: Record<string, string> = {}): string {
   const keep = [
     'TINY_API_URL', 'TINY_HOME', 'TINY_TOKEN', 'TINY_MESH', 'TINY_TOOLS_DIR',
-    'TINY_BROWSER_BIN', 'TINY_BROWSER_PROFILE',
     'TINY_MODEL_PROVIDER', 'TINY_MODEL_API_KEY', 'TINY_MODEL_ID', 'TINY_MODEL_BASE_URL',
     'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'AWS_PROFILE',
     'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GOOGLE_API_KEY',
@@ -75,7 +87,7 @@ function envFileContent(extraEnv: Record<string, string> = {}): string {
   const lines: string[] = ['# tiny-tech daemon environment (captured at install; edit + restart to change)']
   for (const k of keep) {
     const v = extraEnv[k] ?? process.env[k]
-    if (v) lines.push(`${k}=${v}`)
+    if (v) lines.push(`${k}=${shQuote(v)}`)
   }
   return lines.join('\n') + '\n'
 }
@@ -125,7 +137,7 @@ function plistContent(p: DaemonPaths): string {
 
 function unitContent(p: DaemonPaths): string {
   return `[Unit]
-Description=tiny-tech daemon (tiny.technology mesh node)
+Description=tiny-tech daemon (tiny mesh node)
 After=network-online.target
 Wants=network-online.target
 
@@ -169,7 +181,7 @@ export function installDaemon(opts: { dryRun?: boolean } = {}): string {
     return [
       `── ${p.unitPath} ──`, unit,
       `── ${p.wrapperPath} ──`, wrapper,
-      `── ${p.envPath} ──`, env.replace(/=(.{4}).+$/gm, '=$1***'),
+      `── ${p.envPath} ──`, env.replace(/^([A-Z0-9_]+)='(.{4}).+'$/gm, "$1='$2***'"),
     ].join('\n')
   }
 

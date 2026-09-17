@@ -196,7 +196,7 @@ export class AmbientMode {
       }
       return `Continue working on: '${topic.slice(0, 200)}'\n\n` +
         `Iteration ${this.iterations + 1}. What's the next step? Take action.\n` +
-        `If truly complete, say '[AMBIENT_DONE]'. Otherwise, keep making progress.`
+        `If truly complete, end your response with [AMBIENT_DONE] on a line of its own. Otherwise, keep making progress.`
     }
     // Standard prompts rotate — same three angles devduck uses.
     const prompts = [

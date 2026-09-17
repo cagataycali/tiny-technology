@@ -101,3 +101,37 @@ test('total budget enforced across files', () => {
   const b = write('a2.pdf', Buffer.alloc(2_000_000))
   assert.throws(() => filesToContentBlocks([a, b]), /combined/)
 })
+
+// ── bounded reads ───────────────────────────────────────────────────────────
+// The text branch had no size cap at all: it readFileSync'd the whole file and
+// only THEN sliced to 50k chars. Attaching a 2GB production.log — exactly the
+// file you attach to an agent — buffered 2GB to keep 50k characters, and past
+// Node's ~2GB ceiling threw ERR_FS_FILE_TOO_LARGE instead of a useful message.
+
+test('a text file far past the cap is truncated, and says so', () => {
+  const b = fileToContentBlock(write('giant.log', 'y'.repeat(2_000_000)))
+  assert.match(b.text, /\[truncated\]/)
+  assert.ok(b.text.length < 51_200, `kept ${b.text.length} chars`)
+})
+
+test('a file that ends exactly inside the read window is NOT called truncated', () => {
+  // The complete/incomplete distinction: a short read means EOF, so this really
+  // is the whole file and claiming otherwise would be a lie about the content.
+  const b = fileToContentBlock(write('small.txt', 'just a few words\n'))
+  assert.doesNotMatch(b.text, /\[truncated\]/)
+  assert.match(b.text, /just a few words/)
+})
+
+test('a big EXTENSIONLESS binary is rejected without being read whole', () => {
+  // The sniff only ever looked at 8KB, but `raw` used to be every byte — so a
+  // huge extensionless blob was read completely in order to reject it.
+  const buf = Buffer.alloc(1_500_000, 0x41)
+  buf[3] = 0x00                               // a null byte inside the sniff window
+  assert.throws(() => fileToContentBlock(write('bigbin', buf)), /binary file/)
+})
+
+test('a directory is refused with a sentence, not a bare EISDIR', () => {
+  // statSync succeeds on a directory and extname('logs') is '', so a directory
+  // used to fall through to the text path and die inside readFileSync.
+  assert.throws(() => fileToContentBlock(dir), /is a directory/)
+})

@@ -151,13 +151,14 @@ test('renderStatuses marks ready, partial and missing distinctly', () => {
   assert.match(out[2], /^ {2}· Spotify {3}not connected$/)
 })
 
-test('isServiceKey accepts exactly the four services', () => {
+test('isServiceKey accepts exactly the services that exist', () => {
   for (const k of SERVICE_KEYS) assert.equal(isServiceKey(k), true)
-  assert.equal(isServiceKey('slack'), false)
+  assert.equal(isServiceKey('discord'), false)
+  assert.equal(isServiceKey('Slack'), false, 'the key is the lowercase one the CLI prints')
   assert.equal(isServiceKey(''), false)
 })
 
-test('every service key has a label and the set is the documented four', () => {
+test('every service key has a label, and the set is the documented one', () => {
   assert.deepEqual(SERVICE_KEYS.sort(), ['google', 'spotify', 'telegram', 'whatsapp'])
   for (const k of SERVICE_KEYS) assert.ok(SERVICE_LABELS[k])
 })

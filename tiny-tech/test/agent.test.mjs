@@ -114,3 +114,55 @@ test('local agent payment posture: quote yes, execute NEVER', async () => {
   // tool, and the wallet enum stays read-only (no set_price/claim).
   assert.ok(!names.includes('tiny_pay_confirm'), 'confirm must NOT be mounted locally')
 })
+
+/**
+ * invokeTool — the seam voice calls execute through.
+ *
+ * 🩹 Found by using the thing: the SDK's vended tools (bash, fileEditor,
+ * notebook) take a ToolContext as their SECOND argument and throw "Tool context
+ * is required for bash operations" without one. A voice call speaks whatever a
+ * tool returns, so calling them bare turned "does the build pass?" into the tiny
+ * reading an internal error out loud — with the two most useful tools in the
+ * roster being exactly the ones that failed. These tests pin the contract:
+ * every tool gets a context, and it carries the real agent.
+ */
+test('invokeTool hands every tool a ToolContext carrying the real agent', async () => {
+  const { TinyAgent } = await import('../dist/agent/agent.js')
+  const a = Object.create(TinyAgent.prototype)
+  const fakeAgent = { id: 'the-real-strands-agent' }
+  let sawContext
+  const tool = {
+    toolSpec: { name: 'needs_context', description: '', inputSchema: { type: 'object' } },
+    // Exactly how the vended tools behave.
+    invoke: async (input, context) => {
+      if (!context) throw new Error('Tool context is required for needs_context operations')
+      sawContext = context
+      return `ran with ${input.n}`
+    },
+  }
+  a.allTools = [tool]
+  a.agent = fakeAgent
+
+  assert.strictEqual(await a.invokeTool('needs_context', { n: 7 }), 'ran with 7')
+  assert.strictEqual(sawContext.agent, fakeAgent, 'the context must carry the SAME agent the typed session uses')
+  assert.strictEqual(sawContext.toolUse.name, 'needs_context')
+  assert.deepStrictEqual(sawContext.toolUse.input, { n: 7 })
+  assert.ok(sawContext.toolUse.toolUseId, 'a tool use without an id is not a tool use')
+  assert.ok(sawContext.invocationState, 'hooks and tools read invocationState')
+})
+
+test('invokeTool stringifies structured results — a voice call speaks strings', async () => {
+  const { TinyAgent } = await import('../dist/agent/agent.js')
+  const a = Object.create(TinyAgent.prototype)
+  a.agent = {}
+  a.allTools = [{ toolSpec: { name: 'j' }, invoke: async () => ({ ok: true, files: 2 }) }]
+  assert.strictEqual(await a.invokeTool('j'), '{"ok":true,"files":2}')
+})
+
+test('invokeTool names a missing tool instead of failing obscurely', async () => {
+  const { TinyAgent } = await import('../dist/agent/agent.js')
+  const a = Object.create(TinyAgent.prototype)
+  a.allTools = []
+  a.agent = {}
+  await assert.rejects(() => a.invokeTool('ghost'), /no tool named ghost/)
+})

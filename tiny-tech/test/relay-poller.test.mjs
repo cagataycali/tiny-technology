@@ -10,7 +10,7 @@
  */
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -98,4 +98,80 @@ test('an unknown envelope type is answered, not dropped', async () => {
 test('an unparseable envelope is answered too (the sender is waiting)', async () => {
   const { payload } = await reply({ invoke: async () => 'x' }, '{not json')
   assert.match(payload.result, /^Error:/)
+})
+
+// ── backoff on error STATUS, not just on network failure ────────────────────
+// fetch REJECTS on a network failure but RESOLVES on 500/502/429, so an error
+// status used to take the success path: failures reset to 0, no backoff, another
+// PUT every 5s indefinitely, from every enrolled device at once. The ladder that
+// exists for network blips never engaged for the outage most likely to need it,
+// and 429 — the one response whose entire meaning is "slow down" — was ignored.
+
+const { startRelayPoller } = await import('../dist/mesh/relay-poller.js')
+
+// startRelayPoller reads the enrolled identity off disk (handleEnvelope above is
+// handed one directly), so these need a device.json in the temp TINY_HOME.
+writeFileSync(join(home, 'device.json'), JSON.stringify(device))
+
+/** Poll for `ms` against a fetch that always answers `status`; count the PUTs. */
+async function pollsIn(ms, status, body = { messages: [] }) {
+  let puts = 0
+  globalThis.fetch = async (_url, init) => {
+    if (init?.method === 'PUT') puts++
+    return { ok: status >= 200 && status < 300, status, json: async () => body }
+  }
+  const h = startRelayPoller({ agentFactory: async () => ({ invoke: async () => 'x' }), pollIntervalMs: 5 })
+  assert.ok(h, 'the device is enrolled, so the poller started')
+  await new Promise((r) => setTimeout(r, ms))
+  h.stop()
+  return puts
+}
+
+test('a healthy relay is polled at full rate', async () => {
+  const puts = await pollsIn(200, 200)
+  assert.ok(puts > 10, `expected steady polling, got ${puts} PUTs in 200ms`)
+})
+
+test('a 500ing relay is backed off instead of hammered', async () => {
+  const healthy = await pollsIn(200, 200)
+  const broken = await pollsIn(200, 500)
+  assert.ok(broken < healthy / 2,
+    `500 must throttle: ${broken} PUTs vs ${healthy} healthy in the same window`)
+})
+
+test('429 — the response that MEANS slow down — actually slows it down', async () => {
+  const broken = await pollsIn(200, 429)
+  assert.ok(broken < 12, `429 must back off, got ${broken} PUTs in 200ms`)
+})
+
+test('401 still stops the poller outright rather than backing off', async () => {
+  let stopped = null
+  globalThis.fetch = async () => ({ ok: false, status: 401, json: async () => ({}) })
+  const h = startRelayPoller({
+    agentFactory: async () => ({ invoke: async () => 'x' }),
+    pollIntervalMs: 5,
+    onStop: (r) => { stopped = r },
+  })
+  await new Promise((r) => setTimeout(r, 60))
+  h.stop()
+  assert.match(stopped || '', /revoked/, 'a revoked device stops, it does not retry')
+})
+
+test('a relay that recovers resets the ladder', async () => {
+  // Otherwise one bad patch would leave the device permanently slow.
+  let puts = 0
+  let status = 500
+  globalThis.fetch = async (_url, init) => {
+    if (init?.method === 'PUT') puts++
+    return { ok: status < 300, status, json: async () => ({ messages: [] }) }
+  }
+  const h = startRelayPoller({ agentFactory: async () => ({ invoke: async () => 'x' }), pollIntervalMs: 5 })
+  await new Promise((r) => setTimeout(r, 120))
+  const whileBroken = puts
+  status = 200
+  await new Promise((r) => setTimeout(r, 200))
+  const afterRecovery = puts - whileBroken
+  h.stop()
+  assert.ok(afterRecovery > whileBroken,
+    `recovery must speed back up: ${whileBroken} PUTs while broken, ${afterRecovery} after`)
 })

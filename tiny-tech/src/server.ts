@@ -11,12 +11,14 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { z } from 'zod'
 import { TinyApi, AuthRequiredError } from './api.js'
-import { login, DEFAULT_API_URL } from './auth.js'
+import { login } from './auth.js'
+import { apiUrl, apiHost, requireWorkerUrl } from './config.js'
 import { filesToContentBlocks } from './files.js'
 import { WALLET_NETWORKS, faucetOutcome, topUpAdvice } from './wallet.js'
 import { loadDevice, startHeartbeatLoop } from './device.js'
 
-const WORKER_PUBLIC = 'https://plugin.tiny.technology'
+/** The worker behind the configured backend — derived, never a literal (config.ts). */
+const WORKER_PUBLIC = () => requireWorkerUrl()
 
 // Handshake version = the real package version (dist/ and src/ both sit one
 // level below package.json). A literal here drifted to 0.2.0 while the
@@ -29,10 +31,46 @@ const PKG_VERSION: string = (() => {
   }
 })()
 
-// MCP tool results are content blocks; everything we return is JSON-ish
-const ok = (data: any) => ({
-  content: [{ type: 'text' as const, text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }],
-})
+/**
+ * Strands content blocks → MCP content blocks.
+ *
+ * Two of this machine's tools answer with PIXELS, not prose: use_computer
+ * (a screenshot) and use_device (a phone or a Mac that screenshotted itself
+ * for the asker). In the Strands vocabulary that is `[{ image: { format,
+ * source: { bytes } } }, { text }]`; MCP spells the same thing `{ type:
+ * 'image', data, mimeType }`. Before this mapper the bridge JSON-stringified
+ * the array, so an MCP client got 200 KB of base64 inside a text block and
+ * the model "saw" nothing. Returns null for anything that is not a block
+ * array, so ok() falls back to its text path and every other tool is
+ * untouched.
+ */
+export function strandsToMcpContent(data: unknown): any[] | null {
+  if (!Array.isArray(data) || !data.length) return null
+  const out: any[] = []
+  for (const b of data) {
+    if (!b || typeof b !== 'object') return null
+    if (typeof (b as any).text === 'string') { out.push({ type: 'text', text: (b as any).text }); continue }
+    const img = (b as any).image
+    const bytes = img?.source?.bytes
+    if (img && typeof bytes === 'string') {
+      const fmt = String(img.format || 'png').toLowerCase()
+      out.push({ type: 'image', data: bytes, mimeType: fmt === 'jpg' ? 'image/jpeg' : `image/${fmt}` })
+      continue
+    }
+    return null // not a block array after all — let ok() stringify it whole
+  }
+  return out
+}
+
+// MCP tool results are content blocks; everything we return is JSON-ish —
+// except a Strands block array, which is mapped block for block.
+const ok = (data: any) => {
+  const blocks = strandsToMcpContent(data)
+  if (blocks) return { content: blocks }
+  return {
+    content: [{ type: 'text' as const, text: typeof data === 'string' ? data : JSON.stringify(data, null, 2) }],
+  }
+}
 const fail = (message: string) => ({
   content: [{ type: 'text' as const, text: `Error: ${message}` }],
   isError: true,
@@ -50,6 +88,182 @@ function guard<A extends any[]>(fn: (...args: A) => Promise<any>) {
   }
 }
 
+// ── This machine's own tools, over MCP ──────────────────────────────────────
+
+/**
+ * How long to wait for one device tool call before giving up on it.
+ *
+ * Above the longest deadline any device tool sets for ITSELF (npm.ts:
+ * NPM_INSTALL_TIMEOUT_MS = 180_000), and deliberately so: a watchdog set below
+ * a tool's own limit turns a slow-but-working `use_npm install` into an error,
+ * while one set above it only ever fires on a call whose own deadline failed —
+ * a genuinely wedged osascript or a serial port that never answers. Without it
+ * an MCP client with no timeout of its own waits forever on a single tool call
+ * and the user has no way back but killing the client.
+ */
+export const DEVICE_CALL_TIMEOUT_MS = 240_000
+
+/** TINY_MCP_DEVICE_TIMEOUT_MS, when it is a positive number. */
+export function deviceCallTimeout(raw: string | undefined): number {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : DEVICE_CALL_TIMEOUT_MS
+}
+
+/**
+ * Which device tools this MCP session should expose.
+ *
+ * All 25 of them, by default — the point of the bridge is that a client which
+ * mounts tiny-tech gets this machine, not just the platform. The opt-out exists
+ * because the descriptions are 27 KB (measured, all 25 on this Mac ≈ 7k tokens
+ * of catalog) and a client wired to one narrow job pays that on every request:
+ *
+ *   TINY_MCP_DEVICE_TOOLS=0                → none, platform tools only
+ *   TINY_MCP_DEVICE_TOOLS=apple,use_notes  → just those two
+ *   TINY_MCP_DEVICE_TOOLS unset / 1 / all  → everything this machine can do
+ *
+ * A name is accepted with or without the `use_` prefix, because both spellings
+ * are in the user's face already: the tool is `use_notes` in the agent's
+ * transcript and `notes` in the capability labels on /devices.
+ *
+ * Names that match nothing come back in `unknown` rather than being dropped —
+ * a typo'd env var that silently mounts nothing looks exactly like a Mac with
+ * no capabilities, and the stderr line is the only place it can be caught.
+ */
+export function deviceToolsWanted(
+  spec: string | undefined,
+  available: string[],
+): { mount: string[]; unknown: string[] } {
+  const raw = (spec || '').trim().toLowerCase()
+  if (!raw || ['1', 'on', 'true', 'yes', 'all'].includes(raw)) return { mount: [...available], unknown: [] }
+  if (['0', 'off', 'false', 'no', 'none'].includes(raw)) return { mount: [], unknown: [] }
+  const asked = raw.split(/[\s,]+/).filter(Boolean)
+  const wanted = new Set(asked.map((a) => (a.startsWith('use_') ? a : `use_${a}`)))
+  // `available` order, not the caller's: the catalog should read the same
+  // whichever way the env var was typed.
+  const mount = available.filter((n) => wanted.has(n.toLowerCase()))
+  const have = new Set(available.map((n) => n.toLowerCase()))
+  const unknown = asked.filter((a) => !have.has(a.startsWith('use_') ? a : `use_${a}`))
+  return { mount, unknown }
+}
+
+/**
+ * Run one device call against a deadline.
+ *
+ * The loser is NOT cancelled — nothing here can kill a wedged osascript or an
+ * open serial read, and pretending otherwise would be worse than saying so.
+ * What this buys is that the CLIENT gets an answer and can move on, and that
+ * the answer says the work may still be running on the machine.
+ */
+export async function withDeadline<T>(name: string, ms: number, work: () => Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work(),
+      new Promise<never>((_, reject) => {
+        // Rounded seconds read as "within 0s" for any sub-second deadline,
+        // which is the one number nobody believes.
+        const waited = ms < 1000 ? `${ms}ms` : `${Math.round(ms / 1000)}s`
+        timer = setTimeout(
+          () => reject(new Error(
+            `${name} did not answer within ${waited}. It may still be running on this machine `
+            + '(a permission dialog waiting on screen, a device that never replied). '
+            + 'Raise TINY_MCP_DEVICE_TIMEOUT_MS if this call is legitimately slow.',
+          )),
+          ms,
+        )
+      }),
+    ])
+  } finally {
+    // Cleared, not unref'd: an abandoned 4-minute timer per call would keep
+    // this process alive well after the client hung up.
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * Build this machine's device tools — or none of them, loudly.
+ *
+ * Every gate in makeDeviceTools() spawns something (`command -v`, a serial
+ * probe, a store file read), and this runs at BOOT, before the transport is
+ * connected. One probe throwing on an unusual box would otherwise abort
+ * startServer() and the client would see a server that never came up at all,
+ * rather than a server without a Flipper. The builder is injected because that
+ * is the only way to test the failure: on a real Mac it never fails.
+ */
+export async function loadDeviceTools(
+  build: () => Promise<any[]>,
+  warn?: (line: string) => void,
+): Promise<any[]> {
+  try {
+    return await build()
+  } catch (e: any) {
+    warn?.(`tiny-tech: device tools unavailable (${String(e?.message || e)}) — platform tools only\n`)
+    return []
+  }
+}
+
+/**
+ * Bridge this machine's device tools onto an MCP server.
+ *
+ * `register` and `warn` are injected rather than closed over for one reason:
+ * every mistake this bridge can make is invisible from the outside. All 25 real
+ * tools carry a zod object, so the "no schema" branch is unreachable through
+ * makeDeviceTools() and a test that only spawns the server can never see it —
+ * and a registration that THROWS (a name already taken, an SDK that rejects a
+ * schema) would take the whole server down at boot with no tools at all, which
+ * is exactly the failure a spawned-server test reports as "no capabilities".
+ * With a fake registry both are one assertion each.
+ */
+export function bridgeDeviceTools(opts: {
+  /** What makeDeviceTools() built for this machine. */
+  tools: any[]
+  register: (name: string, config: any, handler: (args: any) => Promise<any>) => void
+  /** TINY_MCP_DEVICE_TOOLS */
+  spec?: string
+  /** TINY_MCP_DEVICE_TIMEOUT_MS */
+  timeoutRaw?: string
+  warn?: (line: string) => void
+}): string[] {
+  const { tools, register, spec, timeoutRaw } = opts
+  const warn = opts.warn || (() => {})
+  const { mount, unknown } = deviceToolsWanted(spec, tools.map((t) => t.name))
+  if (unknown.length) warn(`tiny-tech: TINY_MCP_DEVICE_TOOLS names nothing on this machine: ${unknown.join(', ')}\n`)
+
+  const ms = deviceCallTimeout(timeoutRaw)
+  const wanted = new Set(mount)
+  const mounted: string[] = []
+  for (const t of tools) {
+    if (!wanted.has(t.name)) continue
+    const shape = t._inputSchema?.shape
+    if (!shape || typeof shape !== 'object') {
+      // Skipped rather than registered with an empty schema: a tool whose
+      // arguments the client cannot express is a worse lie than an absent one.
+      warn(`tiny-tech: ${t.name} has no object schema — not mounted\n`)
+      continue
+    }
+    try {
+      register(t.name, {
+        // openWorld because these reach the world outside this process — a
+        // click lands on the user's screen, a message actually sends. No
+        // readOnlyHint on any of them: each tool carries read AND write actions
+        // (use_notes lists and creates), so the honest hint is the one MCP
+        // implies for a non-read-only tool — treat it as destructive and ask.
+        annotations: { openWorldHint: true },
+        description: t.description,
+        inputSchema: shape,
+        // guard() here, not at the call site, so a device tool that breaks its
+        // own contract and THROWS becomes an isError content block like every
+        // other tool on this server instead of a protocol-level crash.
+      }, guard(async (args: Record<string, any>) => ok(await withDeadline(t.name, ms, () => t._callback(args)))))
+      mounted.push(t.name)
+    } catch (e: any) {
+      // One tool the SDK won't take must cost that tool, not the machine.
+      warn(`tiny-tech: ${t.name} could not be mounted (${String(e?.message || e)})\n`)
+    }
+  }
+  return mounted
+}
+
 export async function startServer(): Promise<void> {
   const api = new TinyApi()
 
@@ -62,13 +276,13 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_whoami', {
     annotations: { readOnlyHint: true },
-    description: 'Who am I on tiny.technology? Returns identity and the list of tinys (AI personas) the user owns.',
+    description: `Who am I on ${apiHost()}? Returns identity and the list of tinys (AI personas) the user owns.`,
     inputSchema: {},
   }, guard(async () => ok(await api.get('/api/me'))))
 
   server.registerTool('tiny_login', {
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
-    description: 'Log in to tiny.technology — opens the browser for a one-click authorization. Use when other tiny_* tools report auth errors.',
+    description: `Log in to ${apiHost()} — opens the browser for a one-click authorization. Use when other tiny_* tools report auth errors.`,
     inputSchema: {},
   }, guard(async () => {
     // Client-side expiry isn't enough — a revoked/garbage token looks
@@ -81,7 +295,7 @@ export async function startServer(): Promise<void> {
         if (me?.authenticated) return ok(`Already logged in as @${me.user?.login}. Credentials at ~/.tiny/credentials.json`)
       } catch { /* token rejected — fall through to a fresh login */ }
     }
-    const creds = await login(process.env.TINY_API_URL || DEFAULT_API_URL)
+    const creds = await login(apiUrl())
     api.reload()
     return ok(`Logged in as @${creds.user.login}`)
   }))
@@ -90,7 +304,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_learn', {
     annotations: { destructiveHint: false },
-    description: "Store a durable memory about the user in tiny.technology's server-side memory graph (follows them across every agent and device — Claude Code today, their phone tomorrow). Keep entries short and factual, ≤2000 chars. When a new fact REPLACES an outdated one (moved, changed stack, new job), pass the old memory id in `supersedes` — it's closed as history, never deleted. When facts belong together, link them via `edges`.",
+    description: `Store a durable memory about the user in ${apiHost()}'s server-side memory graph (follows them across every agent and device — Claude Code today, their phone tomorrow). Keep entries short and factual, ≤2000 chars. When a new fact REPLACES an outdated one (moved, changed stack, new job), pass the old memory id in \`supersedes\` — it's closed as history, never deleted. When facts belong together, link them via \`edges\`.`,
     inputSchema: {
       content: z.string().min(1).max(2000).describe('The fact/preference/context to remember'),
       supersedes: z.array(z.union([z.string(), z.number()])).optional().describe('Memory ids this fact replaces (closed bitemporally, kept as history)'),
@@ -201,11 +415,11 @@ export async function startServer(): Promise<void> {
       limit: z.number().int().min(1).max(50).optional(),
     },
   }, guard(async ({ query, prefix, limit }: { query?: string; prefix?: string; limit?: number }) => {
-    if (query) return ok(await api.getPublic(`${WORKER_PUBLIC}/retrieve?text=${encodeURIComponent(query)}`))
+    if (query) return ok(await api.getPublic(`${await WORKER_PUBLIC()}/retrieve?text=${encodeURIComponent(query)}`))
     const qs = new URLSearchParams()
     if (prefix) qs.set('prefix', prefix)
     if (limit) qs.set('limit', String(limit))
-    return ok(await api.getPublic(`${WORKER_PUBLIC}/list?${qs}`))
+    return ok(await api.getPublic(`${await WORKER_PUBLIC()}/list?${qs}`))
   }))
 
   server.registerTool('tiny_get', {
@@ -224,7 +438,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_create', {
     annotations: { destructiveHint: false },
-    description: 'Create a new tiny (AI persona at tiny.technology/<name>). Names are slugified; the tiny is live immediately.',
+    description: `Create a new tiny (AI persona at ${apiHost()}/<name>). Names are slugified; the tiny is live immediately.`,
     inputSchema: {
       name: z.string().min(1).describe('Name/slug for the tiny'),
       systemPrompt: z.string().min(1).describe('The persona/system prompt'),
@@ -340,11 +554,134 @@ export async function startServer(): Promise<void> {
     if (action === 'browse') {
       // Worker validation rejects an empty q param — omit it entirely
       const qs = query ? `?q=${encodeURIComponent(query)}&limit=20` : '?limit=20'
-      return ok(await api.getPublic(`${WORKER_PUBLIC}/tools/browse${qs}`))
+      return ok(await api.getPublic(`${await WORKER_PUBLIC()}/tools/browse${qs}`))
     }
     if (!builder || !name) return fail('login and name required for install')
     return ok(await api.post('/api/tools/install', { login: builder, name }))
   }))
+
+  // ── Mesh (zenoh auto-discovery) ────────────────────────────────────────
+  // The MCP surface gets the same fleet view the REPL has. Peers come from the
+  // local file registry (whatever the daemon/repl already discovered — instant,
+  // no second multicast session), and send/broadcast lazily open a client
+  // session that does NOT answer commands (the daemon is this machine's
+  // responder; two responders per box would double every broadcast).
+  let mcpMesh: any = null
+  const meshClient = async () => {
+    if (mcpMesh?.isRunning) return mcpMesh
+    const { MeshNode } = await import('./mesh/zenoh.js')
+    mcpMesh = new MeshNode({ modelLabel: 'tiny-tech (mcp)' })
+    await mcpMesh.start()
+    await new Promise((r) => setTimeout(r, 1200)) // let presence land
+    return mcpMesh
+  }
+
+  server.registerTool('mesh_peers', {
+    title: 'Mesh peers',
+    description: 'List agents auto-discovered on the local zenoh mesh (tiny nodes + devduck instances on this LAN or connected endpoints): instance id, host, model, platform, cwd, tool count, freshness. Use before mesh_send to pick a target.',
+    inputSchema: { verbose: z.boolean().optional().describe("include each peer's tool list") },
+  }, guard(async ({ verbose }: any) => {
+    const { registry } = await import('./mesh/registry.js')
+    let live = registry.live()
+    if (!live.length) {
+      const mesh = await meshClient()
+      await new Promise((r) => setTimeout(r, 4000)) // scout window
+      const peers = mesh.listAllPeers()
+      if (!peers.length) return ok('No peers discovered. Start tiny elsewhere on this LAN (`npx tiny-tech`), or set ZENOH_CONNECT for off-LAN peers.')
+      return ok({ peers: peers.map((p: any) => ({
+        id: p.instanceId, hostname: p.hostname, model: p.model, platform: p.platform,
+        cwd: p.cwd, tool_count: p.toolCount, seen_seconds_ago: Math.round((Date.now() - p.lastSeen) / 1000),
+        ...(verbose ? { tools: p.tools } : {}),
+      })) })
+    }
+    return ok({
+      peer_count: live.length,
+      peers: live.map((e) => ({
+        id: e.id, ...(e.pid === process.pid ? { self: true } : {}),
+        hostname: e.metadata?.hostname, model: e.metadata?.model,
+        platform: e.metadata?.platform, cwd: e.metadata?.cwd,
+        tool_count: e.metadata?.tool_count,
+        seen_seconds_ago: Math.round((Date.now() - e.last_seen) / 1000),
+        ...(verbose ? { tools: e.metadata?.tools, identity: e.metadata?.system_prompt } : {}),
+      })),
+    })
+  }))
+
+  server.registerTool('mesh_send', {
+    title: 'Ask one mesh peer',
+    description: 'Send a command to ONE mesh peer (id from mesh_peers). That machine runs it through its own agent with ITS local tools — shell, screen, files — and returns the answer.',
+    inputSchema: {
+      peer_id: z.string().min(1),
+      message: z.string().min(1),
+      wait_seconds: z.number().int().min(1).max(300).optional(),
+    },
+  }, guard(async ({ peer_id, message, wait_seconds }: any) => {
+    const mesh = await meshClient()
+    const results = await mesh.send(peer_id, message, (wait_seconds || 60) * 1000)
+    if (!results.length) return fail(`No response from ${peer_id} (timeout — is it still in mesh_peers?)`)
+    return ok(results.map((r: any) => r.result).join('\n'))
+  }))
+
+  server.registerTool('mesh_broadcast', {
+    title: 'Ask every mesh peer',
+    description: 'Send a command to EVERY agent on the mesh and collect all answers. Fan-out work across the fleet (e.g. "how much disk is free?").',
+    inputSchema: {
+      message: z.string().min(1),
+      wait_seconds: z.number().int().min(1).max(300).optional(),
+    },
+  }, guard(async ({ message, wait_seconds }: any) => {
+    const mesh = await meshClient()
+    const results = await mesh.broadcast(message, (wait_seconds || 60) * 1000)
+    if (!results.length) return fail('No responses (timeout or no peers)')
+    return ok(results.map((r: any) => `── ${r.responder} ──\n${r.result}`).join('\n\n'))
+  }))
+
+  // ── This machine (use_* — the device tools) ───────────────────────────
+  // The REPL, the daemon and every mesh peer already reach this Mac's screen,
+  // Messages, Notes, calendar, contacts, Flipper, browser and package
+  // universes through makeDeviceTools(). An MCP client mounting tiny-tech
+  // reached NONE of it — it got the platform (tiny_*) and the user's forged
+  // tools (my_*) and stopped there, so Claude Desktop could search the tiny
+  // universe but not read the calendar of the machine it was running on.
+  //
+  // Nothing is re-implemented here. Each tool already carries the two things
+  // MCP needs — a zod object schema (`_inputSchema`, whose `.shape` is exactly
+  // the form registerTool() wants) and a callback returning a plain string —
+  // so the bridge is a loop, and every capability gate stays where it was:
+  // makeDeviceTools() only builds the tools whose backend exists on this box.
+  //
+  // 📡 use_device rides the same bridge — but it is NOT in makeDeviceTools()
+  // and never was. Those are the tools of THIS machine and need no account;
+  // use_device is the FLEET (the iPhone, the robots, the daemon on the other
+  // laptop) reached through the tiny relay with the user's Bearer token. The
+  // REPL agent has registered it as its own builtin since day one (agent.ts),
+  // so a client that mounted tiny-tech over MCP could drive this Mac's screen
+  // but not ask the phone for anything: the "hand over the machine" bridge
+  // was true and still missed the one tool that reaches PAST the machine.
+  // Appended here, it gets the same selection (TINY_MCP_DEVICE_TOOLS=device
+  // works; =0 takes it away with the rest), the same deadline (above its own
+  // 45 s invoke wait and a robot's couple of minutes) and the same guard. It
+  // mounts logged OUT too — the callback catches AuthRequiredError itself and
+  // answers { ok:false, error } with the login hint, like every tiny_* tool.
+  async function mountDeviceTools(): Promise<string[]> {
+    // Imported here rather than at the top so a throwing capability probe costs
+    // this section only. ~118ms to import and ~22ms to build all 25 (measured,
+    // this Mac) — paid once, at boot, before the transport is connected.
+    const tools = await loadDeviceTools(
+      async () => [
+        ...(await import('./agent/device-tools.js')).makeDeviceTools().tools,
+        (await import('./agent/device-invoke.js')).makeUseDeviceTool(api),
+      ],
+      (line) => process.stderr.write(line),
+    )
+    return bridgeDeviceTools({
+      tools,
+      register: (name, config, handler) => server.registerTool(name, config, handler),
+      spec: process.env.TINY_MCP_DEVICE_TOOLS,
+      timeoutRaw: process.env.TINY_MCP_DEVICE_TIMEOUT_MS,
+      warn: (line) => process.stderr.write(line),
+    })
+  }
 
   // ── Dynamic my_* tools ────────────────────────────────────────────────
 
@@ -430,7 +767,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_share', {
     annotations: { destructiveHint: true, openWorldHint: true },
-    description: "Conversation share links. action:'create' publishes a snapshot ({role, content} messages) as a short tiny.technology URL; 'list' shows the user's existing links; 'revoke' kills one by id. Confirm before revoking.",
+    description: `Conversation share links. action:'create' publishes a snapshot ({role, content} messages) as a short ${apiHost()} URL; 'list' shows the user's existing links; 'revoke' kills one by id. Confirm before revoking.`,
     inputSchema: {
       action: z.enum(['create', 'list', 'revoke']).describe("What to do (default 'create' when messages given)"),
       tiny: z.string().optional().describe('create: tiny name the conversation belongs to (default: tiny)'),
@@ -471,7 +808,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_wallet', {
     annotations: { destructiveHint: false },
-    description: "The user's tiny.technology wallet. Actions: 'balance' (+ recent history), 'deposit_info' (how THIS deployment funds a wallet — read it before advising anything; the reply carries a `top_up` sentence naming the one valid route), 'faucet' (claim the free daily trial credit, where the deployment runs its own chain), 'pricing' (what a resource costs, e.g. a paid tiny), 'set_price' (price one of the user's own tinys, price_micro = USDC millionths, 0 = free), 'claim' (credit an on-chain deposit by tx hash). Balance is real USDC on Base on the public deployment and non-withdrawable trial credit on a testnet or self-hosted chain — never assume which; deposit_info says. NEVER tell a user to buy, bridge or exchange USDC before deposit_info confirms an external rail exists: on a self-hosted chain no exchange sells the token, so that advice costs them real money for credit this deployment cannot accept. Withdrawals and payout-address changes are deliberately NOT exposed here — use the web wallet.",
+    description: `The user's ${apiHost()} wallet. Actions: 'balance' (+ recent history), 'deposit_info' (how THIS deployment funds a wallet — read it before advising anything; the reply carries a \`top_up\` sentence naming the one valid route), 'faucet' (claim the free daily trial credit, where the deployment runs its own chain), 'pricing' (what a resource costs, e.g. a paid tiny), 'set_price' (price one of the user's own tinys, price_micro = USDC millionths, 0 = free), 'claim' (credit an on-chain deposit by tx hash). Balance is real USDC on Base on the public deployment and non-withdrawable trial credit on a testnet or self-hosted chain — never assume which; deposit_info says. NEVER tell a user to buy, bridge or exchange USDC before deposit_info confirms an external rail exists: on a self-hosted chain no exchange sells the token, so that advice costs them real money for credit this deployment cannot accept. Withdrawals and payout-address changes are deliberately NOT exposed here — use the web wallet.`,
     inputSchema: {
       action: z.enum(['balance', 'deposit_info', 'faucet', 'pricing', 'set_price', 'claim']).describe('What to do'),
       resource: z.string().optional().describe("pricing/set_price: the resource, e.g. 'tiny:<slug>'"),
@@ -513,7 +850,7 @@ export async function startServer(): Promise<void> {
     annotations: { destructiveHint: false },
     description: "Get a payment QUOTE for consulting a paid x402 service (e.g. a priced tiny) — probes the endpoint, and if it answers 402 returns a signed quote {quote, price_micro, network, payee, expires_at, summary}. NO money moves. Present the quote's summary to the user and STOP — only after they explicitly approve may tiny_pay_confirm be called with the same quote + message. Free endpoints answer immediately (response included, paid_micro: 0).",
     inputSchema: {
-      url: z.string().url().describe('The https x402 endpoint, e.g. https://tiny.technology/api/x402/chat/<slug>'),
+      url: z.string().url().describe( `The https x402 endpoint, e.g. ${apiUrl()}/api/x402/chat/<slug>`),
       message: z.string().min(1).max(8000).describe('The message/task the payment buys — bound into the quote'),
       max_spend_micro: z.number().int().positive().optional().describe('Tighten the spend ceiling (USDC millionths); platform cap applies regardless'),
     },
@@ -541,7 +878,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_send_message', {
     annotations: { destructiveHint: false, openWorldHint: true },
-    description: "Send a direct message to another tiny.technology user — by @login or by one of their tiny's slugs. Delivery: their 💬 inbox on every tiny page, a push notification, and Telegram if they've paired a bot. Max 2000 chars.",
+    description: `Send a direct message to another ${apiHost()} user — by @login or by one of their tiny's slugs. Delivery: their 💬 inbox on every tiny page, a push notification, and Telegram if they've paired a bot. Max 2000 chars.`,
     inputSchema: {
       to: z.string().min(1).describe("Recipient: @login, login, or a tiny slug they own"),
       message: z.string().min(1).max(2000).describe('The message'),
@@ -553,7 +890,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_messages', {
     annotations: { readOnlyHint: false },
-    description: "The user's DM inbox on tiny.technology. Without args: all threads (peer, last message, unread counts). With `with`: the full conversation with that user — opening it marks inbound messages read. Check when the user asks about messages or at session start if they expect DMs.",
+    description: `The user's DM inbox on ${apiHost()}. Without args: all threads (peer, last message, unread counts). With \`with\`: the full conversation with that user — opening it marks inbound messages read. Check when the user asks about messages or at session start if they expect DMs.`,
     inputSchema: {
       with: z.string().optional().describe('Peer @login to open that thread (marks read)'),
       limit: z.number().int().min(1).max(200).optional().describe('Max messages in thread view (default 50)'),
@@ -568,7 +905,7 @@ export async function startServer(): Promise<void> {
 
   server.registerTool('tiny_follow', {
     annotations: { destructiveHint: false },
-    description: "Follow or unfollow a tiny.technology builder (by @login) — followers see the builder's PUBLIC memories in their feed (tiny_graph mode 'feed'). action 'check' reports current state without changing it. Unfollow closes the edge as history (bitemporal).",
+    description: `Follow or unfollow a ${apiHost()} builder (by @login) — followers see the builder's PUBLIC memories in their feed (tiny_graph mode 'feed'). action 'check' reports current state without changing it. Unfollow closes the edge as history (bitemporal).`,
     inputSchema: {
       login: z.string().min(1).describe('Builder GitHub login (with or without @)'),
       action: z.enum(['follow', 'unfollow', 'check']).optional().describe('Default: follow'),
@@ -637,6 +974,50 @@ export async function startServer(): Promise<void> {
     return r?.ok === false ? fail(r.error || 'save failed') : ok(r)
   }))
 
+  server.registerTool('tiny_model_providers', {
+    annotations: { destructiveHint: false, idempotentHint: true },
+    description: "The user's multi-provider BYO-model credential store (\"pizza selection\") — bedrock/anthropic/openai/… configured side by side and synced across every device they're signed into. 'list' is safe (keys never returned, only hasKey). 'set' upserts one provider (apiKey: omit=keep, ''=clear, value=replace; active:true makes it the live chat config). 'remove' deletes one. 'sync' pulls the cloud store into ~/.tiny/model-config.json and applies it to this process — how a CLI picks up config made on the web, and vice versa.",
+    inputSchema: {
+      action: z.enum(['list', 'set', 'remove', 'sync']).describe('list = read (safe) · set = upsert one · remove = delete one · sync = pull cloud → local store'),
+      provider: z.string().optional().describe("set/remove: e.g. 'bedrock', 'anthropic', 'openai'"),
+      modelId: z.string().optional().describe('set: model id'),
+      baseUrl: z.string().optional().describe('set: OpenAI-compatible base URL'),
+      region: z.string().optional().describe('set: bedrock region'),
+      maxTokens: z.string().optional().describe('set: max output tokens'),
+      apiKey: z.string().optional().describe("set: ONLY to change the stored key ('' clears; omit to keep)"),
+      active: z.boolean().optional().describe('set: true → this provider becomes the active chat config'),
+    },
+  }, guard(async (input: any) => {
+    if (input.action === 'list') {
+      const r = await api.get('/api/model-providers')
+      return r?.ok === false ? fail(r.error || 'model providers unavailable') : ok(r)
+    }
+    if (input.action === 'sync') {
+      const { loadModelConfig, pullFromCloud, applyModelEnv } = await import('./onboard.js')
+      const store = loadModelConfig()
+      const r = await pullFromCloud(api, store)
+      if (r.error) return fail(r.error)
+      applyModelEnv()
+      return ok({ pulled: r.pulled, active: store.active, voice: store.voice })
+    }
+    if (!input.provider) return fail('provider required')
+    if (input.action === 'remove') {
+      const r = await api.delete('/api/model-providers', { provider: input.provider })
+      return r?.ok === false ? fail(r.error || 'remove failed') : ok(r)
+    }
+    const body: any = {
+      provider: input.provider,
+      modelId: input.modelId ?? '',
+      baseUrl: input.baseUrl ?? '',
+      region: input.region ?? '',
+      maxTokens: input.maxTokens ?? '',
+      isActive: !!input.active,
+    }
+    if (input.apiKey !== undefined) body.apiKey = input.apiKey
+    const r = await api.post('/api/model-providers', body)
+    return r?.ok === false ? fail(r.error || 'save failed') : ok(r)
+  }))
+
   server.registerTool('tiny_archives', {
     annotations: { destructiveHint: true },
     description: "Cloud archives of chat sessions (synced across the user's devices). 'list' → the user's archives; 'get' → one archive by id; 'save' → archive a conversation ({role, content} messages — the server redacts credentials); 'delete' → remove one by id.",
@@ -671,7 +1052,7 @@ export async function startServer(): Promise<void> {
   server.registerPrompt('tiny-context', {
     description: "The user's recent tiny memories, formatted for injection at session start",
   }, async () => {
-    let block = 'Not logged in to tiny.technology — no memory context available.'
+    let block = 'Not logged in to ${apiHost()} — no memory context available.'
     try {
       const d = await api.get('/api/learnings?limit=30')
       const items = (d.learnings || []).map((l: any) => `- ${l.content}`).join('\n')
@@ -700,7 +1081,7 @@ export async function startServer(): Promise<void> {
 
   server.registerResource('identity', 'tiny://me', {
     title: 'Your tiny identity',
-    description: 'Who you are on tiny.technology and the tinys you own (same data as tiny_whoami).',
+    description: `Who you are on ${apiHost()} and the tinys you own (same data as tiny_whoami).`,
     mimeType: 'application/json',
   }, async (uri) => {
     try {
@@ -775,6 +1156,14 @@ export async function startServer(): Promise<void> {
   // ── Boot ──────────────────────────────────────────────────────────────
 
   await mountForgedTools() // no-op when logged out
+
+  // This machine's own tools — no account needed, so they mount before the
+  // login check: a client on a box that never signed in still gets the screen,
+  // the calendar and the clipboard.
+  const mountedDevice = await mountDeviceTools()
+  process.stderr.write(mountedDevice.length
+    ? `tiny-tech: this machine → ${mountedDevice.map((n) => n.replace(/^use_/, '')).join(' ')}\n`
+    : 'tiny-tech: no device tools mounted (TINY_MCP_DEVICE_TOOLS)\n')
 
   if (!api.authenticated) {
     process.stderr.write('tiny-tech: not logged in — tools will prompt for `npx tiny-tech login` (or call tiny_login)\n')

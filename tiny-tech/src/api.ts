@@ -4,6 +4,7 @@
  * Wraps fetch with the Bearer token, JSON handling, friendly 401s, and an
  * SSE reader for /api/chat streams.
  */
+import { apiUrlFor } from './config.js'
 import { loadCredentials, credentialsValid, type Credentials } from './auth.js'
 import { loadDevice } from './device.js'
 
@@ -43,9 +44,10 @@ export class TinyApi {
   }
 
   get baseUrl(): string {
-    // Env override wins over the stored apiUrl — otherwise pointing the CLI
-    // at a staging server silently keeps talking to the creds' origin
-    return process.env.TINY_API_URL || this.creds?.apiUrl || 'https://tiny.technology'
+    // An explicit setting (--api / TINY_API_URL / config.json) wins over the
+    // stored apiUrl — otherwise pointing the CLI at another backend silently
+    // keeps talking to the creds' origin. See config.ts for the order.
+    return apiUrlFor(this.creds?.apiUrl)
   }
 
   private headers(extra?: Record<string, string>): Record<string, string> {

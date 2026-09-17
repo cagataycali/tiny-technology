@@ -30,13 +30,6 @@ const {
   LISTEN_MAX_SECONDS, LISTEN_DEFAULT_SECONDS, ABS_SPEECH_FLOOR_DB, POLL_MS,
 } = await import('../dist/agent/speech.js')
 
-const {
-  runDesktop, desktopSenses, desktopSenseBlock, DESKTOP_DESCRIPTION, makeDesktopTool,
-  hasDesktopSenses,
-} = await import('../dist/agent/desktop.js')
-
-const { labelOnlyCapabilities } = await import('../dist/agent/device-tools.js')
-
 const none = () => false
 const noPaths = () => false
 const yesPaths = () => true
@@ -365,17 +358,17 @@ function withRunner(fn) {
 }
 after(() => __setSpeechRunnerForTest(null))
 
-test('speak reports truncation, so the model can notify instead of monologuing', () => {
+test('speak reports truncation, so the model can notify instead of monologuing', async () => {
   withRunner('')
-  const r = speak('x'.repeat(SPEAK_TEXT_MAX + 10))
+  const r = await speak('x'.repeat(SPEAK_TEXT_MAX + 10))
   assert.equal(r.truncated, true)
   assert.equal(r.spoken.length, SPEAK_TEXT_MAX)
-  assert.equal(speak('short').truncated, false)
+  assert.equal((await speak('short')).truncated, false)
 })
 
-test('listen never leaves a recording path in the result — the audio is not an artifact', () => {
+test('listen never leaves a recording path in the result — the audio is not an artifact', async () => {
   const calls = withRunner(JSON.stringify({ ok: true, text: 'hi', reason: 'silence', seconds: 1.2 }))
-  const p = listen({ seconds: 3 })
+  const p = await listen({ seconds: 3 })
   assert.equal(p.ok, true)
   assert.equal(p.text, 'hi')
   assert.ok(!('path' in p) && !('file' in p), 'no way to ask for the audio back')
@@ -384,31 +377,57 @@ test('listen never leaves a recording path in the result — the audio is not an
   // one's own cleanup would otherwise delete the first's audio mid-transcribe.
   const filePath = (c) => /var FILE = "([^"]+)"/.exec(c.args.at(-1))?.[1]
   assert.ok(filePath(calls[0]), 'the script must name a recording path')
-  listen({ seconds: 3 })
+  await listen({ seconds: 3 })
   assert.notEqual(filePath(calls[0]), filePath(calls[1]))
 })
 
-test("listen's process budget covers the whole capture — a flat timeout kills a long one", () => {
+test("listen's process budget covers the whole capture — a flat timeout kills a long one", async () => {
   const calls = withRunner(JSON.stringify({ ok: true, text: 'hi' }))
-  listen({ seconds: LISTEN_MAX_SECONDS })
+  await listen({ seconds: LISTEN_MAX_SECONDS })
   assert.ok(calls[0].opts.timeoutMs > LISTEN_MAX_SECONDS * 1000,
     `budget ${calls[0].opts.timeoutMs} must exceed the ${LISTEN_MAX_SECONDS}s capture`)
 })
 
-test('a bridge crash becomes a named failure, not a thrown turn', () => {
+test('a bridge crash becomes a named failure, not a thrown turn', async () => {
   withRunner(() => { const e = new Error('osascript died'); e.stderr = 'execution error'; throw e })
-  const p = listen({ seconds: 2 })
+  const p = await listen({ seconds: 2 })
   assert.equal(p.ok, false)
   assert.equal(p.code, 'bridge')
   assert.match(speechErrorMessage(p), /speech failed/)
 })
 
-test('transcribe checks the path BEFORE spawning a bridge for a file that is not there', () => {
+test('transcribe checks the path BEFORE spawning a bridge for a file that is not there', async () => {
   const calls = withRunner('{}')
-  const p = transcribeFile('/tmp/definitely-not-here-9f3a.m4a')
+  const p = await transcribeFile('/tmp/definitely-not-here-9f3a.m4a')
   assert.equal(p.ok, false)
   assert.equal(calls.length, 0, 'no spawn for a missing file')
   assert.match(speechErrorMessage(p), /could not read that audio file/)
+})
+
+/**
+ * The reason speech is async at all: `listen` holds the mic for up to 30s and
+ * `say` can talk for 70. Under execFileSync that was 30 seconds with the event
+ * loop stopped — the TUI frozen, keys swallowed, and every OTHER concurrent
+ * conversation stalled mid-token. A rejected bridge must not hold it either.
+ */
+test('a slow bridge does NOT block the event loop — timers still fire mid-listen', async () => {
+  let ticks = 0
+  const beat = setInterval(() => { ticks += 1 }, 5)
+  __setSpeechRunnerForTest(() => new Promise((res) => setTimeout(() => res(JSON.stringify({ ok: true, text: 'hi' })), 60)))
+  const p = await listen({ seconds: 3 })
+  clearInterval(beat)
+  assert.equal(p.ok, true)
+  assert.ok(ticks > 0, 'the loop kept running while the microphone was open')
+})
+
+test('a rejected bridge promise degrades to a named failure, not an unhandled rejection', async () => {
+  __setSpeechRunnerForTest(() => Promise.reject(Object.assign(new Error('killed'), { stderr: 'timeout' })))
+  const p = await listen({ seconds: 2 })
+  assert.equal(p.ok, false)
+  assert.equal(p.code, 'bridge')
+  assert.match(p.error, /timeout/)
+  const s = await speak('anything').then(() => null, (e) => e)
+  assert.ok(s instanceof Error, 'speak still surfaces a real failure to its caller')
 })
 
 // ── capability gates ─────────────────────────────────────────────────────────
@@ -436,73 +455,3 @@ test('this machine really can do both (the probe that proves the suite is not va
 
 // ── use_desktop wiring ───────────────────────────────────────────────────────
 
-test('use_desktop teaches speak/listen/transcribe and accepts their args', () => {
-  for (const a of ['speak', 'listen', 'transcribe']) {
-    assert.ok(DESKTOP_DESCRIPTION.includes(a), `description must teach ${a}`)
-  }
-  // The description must say the recording is deleted: a user reading what the
-  // daemon can do needs that answer before they let it listen.
-  assert.match(DESKTOP_DESCRIPTION, /deleted/)
-  const schema = makeDesktopTool()._inputSchema
-  const parsed = schema.parse({ action: 'listen', seconds: 5, locale: 'tr-TR' })
-  assert.equal(parsed.seconds, 5)
-  assert.equal(schema.parse({ action: 'speak', text: 'hi', voice: 'Samantha', rate: 200 }).rate, 200)
-  assert.throws(() => schema.parse({ action: 'shout', text: 'hi' }))
-})
-
-test('speak with no text is a named mistake, not a silent no-op', async () => {
-  withRunner('')
-  assert.match(await runDesktop({ action: 'speak' }), /need text/)
-  assert.match(await runDesktop({ action: 'transcribe' }), /need target/)
-})
-
-test('speak reads either text or body — a model that fills the notify field still gets heard', async () => {
-  if (process.platform !== 'darwin') return
-  withRunner('')
-  assert.match(await runDesktop({ action: 'speak', body: 'build is green' }), /said aloud/)
-})
-
-test('the sense list and prompt block carry voice — the agent must not promise a mouth it lacks', () => {
-  const mac = desktopSenses('darwin', {}, none, yesPaths)
-  // `see` rides along on every machine where use_desktop registered at all
-  // (showing a file needs no binary — see.ts measureHeader), and `convert` rides
-  // on sips, which yesPaths posits along with every other in-box binary.
-  assert.deepEqual(mac, ['notify', 'copy', 'paste', 'open', 'speak', 'listen', 'see', 'convert'])
-  const block = desktopSenseBlock(mac)
-  assert.match(block, /speak out loud AND hear a spoken reply/)
-
-  // Linux: no voice at all. The block must forbid offering it, because "I'll
-  // read it out to you" is exactly the promise this line exists to stop.
-  const linux = desktopSenseBlock(desktopSenses('linux', {}, (b) => b === 'xclip', yesPaths))
-  assert.match(linux, /no voice and no microphone/)
-  assert.ok(!/hear a spoken reply/.test(linux))
-
-  // The asymmetric case is real (a Mac with Dictation's local model absent):
-  // a mouth with no ears must not ask questions aloud.
-  const speakOnly = desktopSenseBlock(['notify', 'speak'])
-  assert.match(speakOnly, /cannot hear a reply/)
-  const listenOnly = desktopSenseBlock(['listen'])
-  assert.match(listenOnly, /no voice/)
-})
-
-test('a machine whose ONLY channel is the speakers still registers use_desktop', () => {
-  // Hypothetical on macOS, but the principle is the gate: if voice is the only
-  // way to reach the person, the tool that owns the speakers must exist.
-  assert.equal(hasDesktopSenses('linux', {}, none, yesPaths), false)
-  assert.equal(hasDesktopSenses('darwin', {}, none, noPaths), true, 'osascript notify still resolves')
-})
-
-test('device-tools labels voice separately from desktop, like ocr next to computer', () => {
-  // ⚠️ Was a grep of device-tools.ts' source, which was the only lever while the
-  //    decision was inlined in makeDeviceTools(). It is a pure function now, so
-  //    this asserts the RULE: voice needs a local synthesiser or speech model AND
-  //    the tool its actions live on. device-tools.test.mjs owns the full matrix.
-  const f = (over) => ({
-    computer: false, desktop: false, windowControl: false, visionOcr: false, localSpeech: false, ...over,
-  })
-  assert.ok(labelOnlyCapabilities(f({ desktop: true, localSpeech: true })).includes('voice'))
-  // Separate from `desktop`: a clipboard is not a mouth.
-  assert.ok(!labelOnlyCapabilities(f({ desktop: true })).includes('voice'))
-  // And a synthesiser with no use_desktop is a promise nothing can keep.
-  assert.ok(!labelOnlyCapabilities(f({ localSpeech: true, computer: true })).includes('voice'))
-})

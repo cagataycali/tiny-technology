@@ -34,7 +34,7 @@ JUNK='(^|/)\.gradle/|/build/|node_modules|\.wrangler'
 # docs/assets/video/tiny-hero-15s.mp4 (removed here in 6c93dc1). The
 # film-*/store-* suites read business/ and store-assets/ — the private
 # marketing tree that is not part of this repo — so they cannot run here.
-EXCLUDE='^web/public/(android/manifest\.json|ios/manifest\.plist|tiny-hero\.mp4)$|^web/tests/(film|store)-[a-z-]+\.test\.ts$|^docs/[^/]+\.md$|^docs/audits/'
+EXCLUDE='^web/public/(android/manifest\.json|ios/manifest\.plist|tiny-hero\.mp4)$|^web/tests/(film|store)-[a-z-]+\.test\.ts$|^docs/[^/]+\.md$|^docs/audits/|^tiny-tech/(\.github/|IMPROVEMENTS\.md$|PORT_STATE\.md$)'
 EXEMPT='^docs/index\.md$'   # the one root-level page that IS the site
 
 # SCRUB — the mechanical part of open-sourcing, applied to every upstream blob
@@ -107,6 +107,13 @@ for it in .env.example .npmrc AGENTS.md SECURITY.md app components.json componen
     scan "$SOURCE" "$it/" "web/$it/"
   fi
 done
+
+echo "── tiny-tech (upstream: its own repo at tinyai-id/tiny-tech; published on npm)"
+if [ -d "$SOURCE/tiny-tech/.git" ] || git -C "$SOURCE/tiny-tech" rev-parse HEAD >/dev/null 2>&1; then
+  scan "$SOURCE/tiny-tech" "" "tiny-tech/"
+else
+  echo "  (skipped — no tiny-tech checkout at $SOURCE/tiny-tech)"
+fi
 
 echo "── docs site (root-level docs/*.md are upstream working notes, never mirrored;"
 echo "   docs/audits/ likewise; CONCEPTS/FINE_PRINT/SELF_HOSTING/brand/screenshots are"

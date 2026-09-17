@@ -51,7 +51,7 @@
  * back — deliberately with no option to keep it. A background daemon that leaves
  * captures of the room on disk is a liability, not a feature.
  */
-import { execFileSync } from 'node:child_process'
+import { run as execRun } from './exec.js'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -517,15 +517,28 @@ export function formatListenResult(p: SpeechPayload): string {
 
 // ── exec seam ───────────────────────────────────────────────────────────────
 
-export type SpeechRunner = (bin: string, args: string[], opts: { input?: string; timeoutMs: number }) => string
+/**
+ * ASYNCHRONOUS on purpose, and this is the one thing here that isn't about
+ * speech at all.
+ *
+ * `listen` holds the microphone for up to 30 seconds and `say` can talk for 70.
+ * Run through execFileSync, that is 30 seconds with the Node event loop stopped
+ * dead: the Ink TUI paints nothing, the composer swallows keys, every OTHER
+ * conversation streaming beside this one stalls mid-token, and the mesh stops
+ * answering its relay. Concurrency made that a bug with a blast radius — the
+ * same one App.tsx's `!cmd` fixed by dropping execSync — so the slowest tool in
+ * the tree cannot be the one that owns the thread.
+ *
+ * A test seam may still be plain and synchronous: everything downstream awaits,
+ * and `await 'a string'` is a string.
+ */
+export type SpeechRunner = (bin: string, args: string[], opts: { input?: string; timeoutMs: number }) => string | Promise<string>
 
+// exec.ts owns the three guarantees this needs — the timeout really kills, the
+// error carries stderr (osaJson reads it for the bridge message), and stdin is
+// closed even with nothing to send, which `say -f -` depends on to stop reading.
 const realRun: SpeechRunner = (bin, args, opts) =>
-  execFileSync(bin, args, {
-    encoding: 'utf-8',
-    timeout: opts.timeoutMs,
-    maxBuffer: 8 * 1024 * 1024,
-    ...(opts.input == null ? {} : { input: opts.input }),
-  }).toString()
+  execRun(bin, args, { timeoutMs: opts.timeoutMs, input: opts.input })
 
 let run: SpeechRunner = realRun
 
@@ -540,10 +553,10 @@ export function __setSpeechRunnerForTest(fn: SpeechRunner | null): void {
 export interface SpeakResult { spoken: string; truncated: boolean; outPath?: string }
 
 /** Speak text aloud (or render it to a file when `outPath` is given). */
-export function speak(text: string, opts: SpeakOpts = {}): SpeakResult {
+export async function speak(text: string, opts: SpeakOpts = {}): Promise<SpeakResult> {
   const body = String(text ?? '')
   const cmd = sayCommand(body, opts)
-  run(cmd.bin, cmd.args, { input: cmd.input, timeoutMs: speakTimeoutMs(cmd.input, opts.rate) })
+  await run(cmd.bin, cmd.args, { input: cmd.input, timeoutMs: speakTimeoutMs(cmd.input, opts.rate) })
   return {
     spoken: cmd.input,
     truncated: body.length > cmd.input.length,
@@ -551,10 +564,10 @@ export function speak(text: string, opts: SpeakOpts = {}): SpeakResult {
   }
 }
 
-function osaJson(script: string, timeoutMs: number): SpeechPayload {
+async function osaJson(script: string, timeoutMs: number): Promise<SpeechPayload> {
   let out: string
   try {
-    out = run('osascript', ['-l', 'JavaScript', '-e', script], { timeoutMs })
+    out = await run('osascript', ['-l', 'JavaScript', '-e', script], { timeoutMs })
   } catch (e: any) {
     return { ok: false, code: 'bridge', error: String(e?.stderr || e?.message || e).slice(0, 300) }
   }
@@ -562,9 +575,9 @@ function osaJson(script: string, timeoutMs: number): SpeechPayload {
 }
 
 /** Transcribe an audio file that already exists, on-device. */
-export function transcribeFile(filePath: string, opts: { locale?: string } = {}): SpeechPayload {
+export async function transcribeFile(filePath: string, opts: { locale?: string } = {}): Promise<SpeechPayload> {
   if (!fs.existsSync(filePath)) return { ok: false, code: '-11800' }
-  return osaJson(transcribeScript(filePath, opts.locale), 120_000)
+  return await osaJson(transcribeScript(filePath, opts.locale), 120_000)
 }
 
 /**
@@ -577,13 +590,13 @@ let listenSeq = 0
 
 /** Record from the mic until the speaker stops (or the cap), transcribe
  * on-device, and delete the recording. */
-export function listen(opts: VadOpts & { locale?: string } = {}): SpeechPayload {
+export async function listen(opts: VadOpts & { locale?: string } = {}): Promise<SpeechPayload> {
   const plan = vadPlan(opts)
   const file = path.join(os.tmpdir(), `tiny_listen_${process.pid}_${Date.now()}_${++listenSeq}.m4a`)
   // Budget = the whole capture + transcription + bridge startup. A flat timeout
   // would kill a legitimate 30s listen at its most useful moment.
   const budget = Math.round(plan.maxFrames * plan.pollSec * 1000) + 90_000
-  const res = osaJson(listenScript(file, plan, opts.locale), budget)
+  const res = await osaJson(listenScript(file, plan, opts.locale), budget)
   // The script deletes the file itself; this is the belt for the case where it
   // died before finish() ran — a crashed listen must not leave audio on disk.
   try { if (fs.existsSync(file)) fs.unlinkSync(file) } catch { /* nothing else to do */ }

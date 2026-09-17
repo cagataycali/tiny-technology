@@ -20,9 +20,10 @@
  * secrets, and long work goes through the task runner rather than running inline.
  */
 import { createServer, connect, type Server, type Socket } from 'node:net'
-import { existsSync, unlinkSync, statSync, chmodSync, mkdirSync } from 'node:fs'
+import { existsSync, unlinkSync, statSync, chmodSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 /**
  * Bumped whenever a reply's SHAPE changes. It rides in every reply because the
@@ -61,6 +62,27 @@ export const TRAY_TIMEOUT_MS = 2_000
  */
 export const SOCKET_PATH_MAX = 103
 
+/**
+ * Our own package version, rebroadcast in every `ping`.
+ *
+ * The protocol number answers "can you decode my replies"; it does NOT answer
+ * "is the brain behind this socket the current one". Those came apart in the
+ * field: a tiny-tech 0.8.3 daemon left over from an `npx` run owned
+ * ~/.tiny/tray.sock for two days, speaking protocol 1 perfectly while missing
+ * three releases of commands — so the menu bar rendered, and rendered the wrong
+ * daemon. Version is the field that makes that visible, hence
+ * `decideSocketOwnership` below can prefer the newer brain instead of
+ * first-daemon-wins.
+ */
+export const TRAY_VERSION: string = (() => {
+  try {
+    // dist/tray.js and src/tray.ts both sit one level below package.json.
+    return JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8')).version || '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+})()
+
 function tinyDir(): string {
   return process.env.TINY_HOME || join(homedir(), '.tiny')
 }
@@ -77,9 +99,222 @@ export function socketPathError(path: string): string | null {
   return null
 }
 
+// ── the notification PUSH channel ───────────────────────────────────────────
+
+/**
+ * How many notifications may wait for a tray that is not looking. Bounded on
+ * purpose: an agent in a loop can ask a question every few seconds, and an
+ * unbounded queue turns "nobody opened the menu" into a memory leak that later
+ * floods the user with a hundred stale prompts. The OLDEST go first — the most
+ * recent question is the one still worth answering — and the drops are COUNTED
+ * so the tray can say "3 missed" instead of quietly lying by omission.
+ */
+export const TRAY_NOTIFY_MAX = 50
+
+/** How many answered/abandoned ids we remember, so "already answered" can be
+ *  told apart from "never existed". Bounded for the same reason as the queue. */
+const TRAY_NOTIFY_MEMORY = 200
+
+export type TrayNotifyKind = 'info' | 'confirm' | 'select' | 'text'
+
+export interface TrayNotification {
+  id: string
+  kind: TrayNotifyKind
+  title: string
+  body: string
+  context?: Record<string, string>
+  options?: string[]
+  sound?: string
+  createdAt: number
+  /** A question: the tray must post an `answer` back or the asker times out. */
+  needsAnswer: boolean
+  /** Set once a tray has drained it — a second poll must not re-render it. */
+  delivered?: boolean
+}
+
+/** What a tray posts back. `cancelled` is a dismissal, and a dismissal is NOT
+ *  consent, so it never carries a value (enforced in answer(), not trusted). */
+export interface TrayNotifyAnswer {
+  value?: string
+  cancelled?: boolean
+}
+
+export interface TrayNotifyDrain {
+  notifications: TrayNotification[]
+  /** Dropped since the last drain — reported once, then cleared. */
+  dropped: number
+  /** Still waiting for an answer after this drain. */
+  pending: number
+}
+
+type TrayNotifyWaiter = (a: TrayNotifyAnswer | null) => void
+
+/**
+ * The push channel's core: enqueue → drain → answer, with no socket, no agent
+ * and no UI in it. The socket handler and the notify backend are both thin
+ * shells over this, which is why the interesting behaviour (the cap, delivery
+ * marking, refusing a stale id) is testable without binding anything.
+ */
+export class TrayNotifyQueue {
+  private items: TrayNotification[] = []
+  private waiters = new Map<string, TrayNotifyWaiter>()
+  private resolved: string[] = []
+  private droppedCount = 0
+  private seq = 0
+  /** When a tray last DRAINED. This is the freshness signal a notify backend
+   *  needs: a socket that exists proves a daemon, not a human watching a menu. */
+  lastPollAt = 0
+
+  constructor(private readonly max: number = TRAY_NOTIFY_MAX) { }
+
+  enqueue(n: Partial<TrayNotification> & { title: string }): TrayNotification {
+    const kind: TrayNotifyKind = (['info', 'confirm', 'select', 'text'] as string[]).includes(String(n.kind))
+      ? (n.kind as TrayNotifyKind)
+      : 'info'
+    const item: TrayNotification = {
+      id: n.id || `n${Date.now().toString(36)}${(++this.seq).toString(36)}`,
+      kind,
+      title: clampText(String(n.title || '')),
+      body: clampText(String(n.body ?? '')),
+      createdAt: n.createdAt ?? Date.now(),
+      needsAnswer: n.needsAnswer ?? kind !== 'info',
+    }
+    if (n.options?.length) item.options = n.options.slice(0, 32).map((o) => clampText(String(o)))
+    if (n.context && Object.keys(n.context).length) {
+      item.context = Object.fromEntries(
+        Object.entries(n.context).slice(0, 32).map(([k, v]) => [String(k).slice(0, 200), clampText(String(v))]),
+      )
+    }
+    if (n.sound) item.sound = String(n.sound).slice(0, 100)
+
+    this.items.push(item)
+    while (this.items.length > this.max) {
+      const gone = this.items.shift()!
+      this.droppedCount++
+      // A dropped question must not leave its asker waiting for a tray that
+      // will never see it: release it now so the asker falls through.
+      // NOT { cancelled: true }: the user never saw this question, so calling it
+      // a cancellation would report a refusal they never made. null means "no
+      // answer exists", which is what makes the asker fall through to a dialog.
+      this.waiters.get(gone.id)?.(null)
+      this.waiters.delete(gone.id)
+      this.remember(gone.id)
+    }
+    return item
+  }
+
+  /** Everything a tray has not seen yet, marked delivered as it goes out. */
+  drain(now = Date.now()): TrayNotifyDrain {
+    this.lastPollAt = now
+    const out = this.items.filter((i) => !i.delivered)
+    for (const i of out) i.delivered = true
+    const dropped = this.droppedCount
+    this.droppedCount = 0
+    // A delivered info-only entry has nothing left to happen to it.
+    this.items = this.items.filter((i) => i.needsAnswer)
+    return { notifications: out, dropped, pending: this.items.length }
+  }
+
+  answer(id: string, a: TrayNotifyAnswer): { ok: true } | { ok: false; error: string } {
+    if (!id) return { ok: false, error: 'need id' }
+    const idx = this.items.findIndex((i) => i.id === id)
+    if (idx < 0) {
+      return this.resolved.includes(id)
+        ? { ok: false, error: `notification ${id} was already answered or expired` }
+        : { ok: false, error: `no such notification: ${id}` }
+    }
+    this.items.splice(idx, 1)
+    this.remember(id)
+    // Dismissal is not consent: a cancelled answer carries no value, whatever
+    // the caller put in the field.
+    const clean: TrayNotifyAnswer = a.cancelled
+      ? { cancelled: true }
+      : { value: clampText(String(a.value ?? '')) }
+    const w = this.waiters.get(id)
+    this.waiters.delete(id)
+    w?.(clean)
+    return { ok: true }
+  }
+
+  /**
+   * Wait for a tray to answer, or give up. Giving up RETURNS null rather than a
+   * cancelled answer, so the caller can tell "the user said no" from "nobody
+   * was there" — the first is a decision, the second means try another backend.
+   */
+  await(id: string, timeoutMs: number): Promise<TrayNotifyAnswer | null> {
+    return new Promise((resolve) => {
+      let done = false
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        this.abandon(id)
+        resolve(null)
+      }, Math.max(1, timeoutMs))
+      // Deliberately NOT unref'd. Someone is awaiting this promise, and an unref'd
+      // deadline in a process with nothing else pending never fires: the await
+      // hangs forever instead of falling through to a dialog, which is the very
+      // failure this timeout exists to prevent. It is bounded by
+      // TRAY_ANSWER_TIMEOUT_MS, so holding the loop open is cheap and finite.
+      this.waiters.set(id, (ans) => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve(ans)
+      })
+    })
+  }
+
+  /** Drop an entry nobody is waiting for any more (its asker gave up). */
+  abandon(id: string): void {
+    const idx = this.items.findIndex((i) => i.id === id)
+    if (idx >= 0) this.items.splice(idx, 1)
+    this.waiters.delete(id)
+    this.remember(id)
+  }
+
+  pending(): number { return this.items.length }
+  dropped(): number { return this.droppedCount }
+  fresh(windowMs: number, now = Date.now()): boolean {
+    return this.lastPollAt > 0 && now - this.lastPollAt <= windowMs
+  }
+
+  clear(): void {
+    for (const [, w] of this.waiters) w({ cancelled: true })
+    this.items = []
+    this.waiters.clear()
+    this.resolved = []
+    this.droppedCount = 0
+    this.lastPollAt = 0
+  }
+
+  private remember(id: string): void {
+    this.resolved.push(id)
+    if (this.resolved.length > TRAY_NOTIFY_MEMORY) {
+      this.resolved.splice(0, this.resolved.length - TRAY_NOTIFY_MEMORY)
+    }
+  }
+}
+
+/**
+ * The process-wide queue. In-process on purpose: the thing that enqueues (a
+ * notify backend inside the agent) and the thing that serves the socket are the
+ * same daemon. A CLI in some other process therefore never records a tray poll,
+ * its tray backend reports itself unavailable, and the question goes to a
+ * dialog — the honest outcome, rather than a prompt queued into the void.
+ */
+let sharedNotifyQueue = new TrayNotifyQueue()
+export function trayNotifications(): TrayNotifyQueue { return sharedNotifyQueue }
+/** Tests only: a fresh queue with no cross-test residue. */
+export function resetTrayNotifications(): TrayNotifyQueue {
+  sharedNotifyQueue = new TrayNotifyQueue()
+  return sharedNotifyQueue
+}
+/** When a tray last drained this process's queue (0 = never). */
+export function lastTrayPollAt(): number { return sharedNotifyQueue.lastPollAt }
+
 // ── commands ────────────────────────────────────────────────────────────────
 
-export const TRAY_COMMANDS = ['ping', 'status', 'tasks', 'result', 'ask', 'cancel', 'logs', 'reload', 'share'] as const
+export const TRAY_COMMANDS = ['ping', 'status', 'tasks', 'loops', 'result', 'ask', 'cancel', 'logs', 'reload', 'share', 'notifications', 'answer'] as const
 export type TrayCommandName = (typeof TRAY_COMMANDS)[number]
 
 // ── event kinds ─────────────────────────────────────────────────────────────
@@ -106,7 +341,10 @@ export const WORKER_EVENT_KINDS = [
   'dm',                                           // messages.ts
   'follow',                                       // learnings.ts
   'tiny_visit',                                   // visit.ts
-  'device_result',                                // relay.ts (late device reply)
+  'device_result',                                // relay.ts (late device reply via LATE_REPLY_KIND)
+  'device_task_result',                           // relay.ts (a background job on a device finished — use_loop)
+  'device_ask',                                   // ask.ts (POST /api/devices/ask — a device asked the owner agent)
+  'nicla_transcript',                             // transcripts.ts (device event)
   'tool-update',                                  // tool-updates.ts
   'telegram', 'telegram_out', 'telegram_button',  // telegram.ts, telegram-api.ts
   'pay_alarm',                                    // reconcile-alarm.ts (🚨 needs a human)
@@ -156,7 +394,7 @@ export function normalizeEventKind(kind: string): string {
   if (k.includes('visit')) return 'visit'
   if (k.includes('job') || k.includes('schedule')) return 'job'
   if (k.includes('telegram')) return 'telegram'
-  if (k.startsWith('device')) return 'device'
+  if (k.startsWith('device') || k.startsWith('nicla_')) return 'device'  // nicla_wake / nicla_sentry / nicla_transcript
   if (k.startsWith('tool')) return 'tool'
   if (k.includes('message') || k.includes('dm') || k.includes('chat')) return 'message'
   // Fall through as-is. Two things ride on this line: `follow` is already spelled
@@ -260,6 +498,10 @@ export interface TraySummary {
 export interface TrayDeps {
   status: () => TrayStatus | Promise<TrayStatus>
   tasks?: () => TraySummary[]
+  /** Background LOOPS (use_loop) — hours-long iterating jobs. `iterations`
+   *  rides in `prompt`'s summary line; a dedicated field keeps Swift decoding
+   *  one Codable per list. */
+  loops?: () => Array<TraySummary & { iterations?: number }>
   /** Full record for ONE task (its `result` is what the tray wants to show). */
   taskResult?: (id: string) => { status: string; result?: string } | null
   startTask?: (prompt: string) => { id: string } | { error: string }
@@ -273,6 +515,11 @@ export interface TrayDeps {
    * never holding the socket for a model turn.
    */
   shareFile?: (path: string, note: string) => string | Promise<string>
+  /**
+   * The push channel's queue. Defaults to this process's shared queue — a dep
+   * only so a test can hand in its own without touching module state.
+   */
+  notifications?: TrayNotifyQueue
 }
 
 export interface TrayReply {
@@ -307,8 +554,10 @@ export async function handleTrayCommand(raw: unknown, deps: TrayDeps): Promise<T
   try {
     switch (cmd) {
       case 'ping':
-        // Also the handshake: a helper reads `protocol` here before it renders.
-        return reply({ pid: process.pid, commands: [...TRAY_COMMANDS] })
+        // Also the handshake: a helper reads `protocol` here before it renders,
+        // and a SECOND daemon reads `version` here to decide whether the socket's
+        // current owner is a newer brain than itself (see decideSocketOwnership).
+        return reply({ pid: process.pid, version: TRAY_VERSION, commands: [...TRAY_COMMANDS] })
 
       case 'status':
         return reply({ status: await deps.status() })
@@ -316,6 +565,11 @@ export async function handleTrayCommand(raw: unknown, deps: TrayDeps): Promise<T
       case 'tasks': {
         if (!deps.tasks) return unavailable(cmd)
         return reply({ tasks: deps.tasks() })
+      }
+
+      case 'loops': {
+        if (!deps.loops) return unavailable(cmd)
+        return reply({ loops: deps.loops() })
       }
 
       case 'result': {
@@ -379,6 +633,32 @@ export async function handleTrayCommand(raw: unknown, deps: TrayDeps): Promise<T
         return reply({ message: clampText(String(await deps.shareFile(path, note))) })
       }
 
+      case 'notifications': {
+        // The PUSH half of the channel. A tray polls this; everything pending
+        // comes back at once, marked delivered so the next poll doesn't
+        // re-render the same prompt. `dropped` is reported exactly once, and
+        // draining is also the freshness signal the notify backend reads — a
+        // socket proves a daemon, a DRAIN proves someone is watching the menu.
+        const q = deps.notifications ?? trayNotifications()
+        const d = q.drain()
+        return reply({ notifications: d.notifications, dropped: d.dropped, pending: d.pending })
+      }
+
+      case 'answer': {
+        // The RETURN half: the user clicked something in the menu bar. Caps
+        // apply in this direction too — the value is arbitrary typed text from
+        // a kind=text prompt, and it ends up in an agent's context.
+        const q = deps.notifications ?? trayNotifications()
+        const id = String(msg.id ?? '').trim()
+        if (!id) return fail('need id')
+        const cancelled = msg.cancelled === true
+        const r = q.answer(id, cancelled ? { cancelled: true } : { value: clampText(String(msg.value ?? '')) })
+        // An id the daemon has never heard of, or one already answered, is a
+        // stale menu — a real condition to report, not an exception to throw.
+        if (!r.ok) return fail(r.error, { id })
+        return reply({ id, accepted: true, cancelled })
+      }
+
       default:
         // Named, not ignored: a helper built against a newer protocol should be
         // able to tell "this daemon is old" from "I sent nonsense".
@@ -425,6 +705,174 @@ export function probeSocket(path: string, timeoutMs = 300): Promise<SocketState>
   })
 }
 
+// ── who owns the socket ─────────────────────────────────────────────────────
+
+/**
+ * Is `pid` a process that still exists?
+ *
+ * `process.kill(pid, 0)` sends no signal — it only asks the kernel whether the
+ * pid is addressable. Two failure modes, and they mean OPPOSITE things:
+ *   ESRCH  → no such process. Dead. Its socket file is garbage.
+ *   EPERM  → the process EXISTS but belongs to another user (or another
+ *            security context), so we may not signal it. That is ALIVE.
+ * Treating EPERM as dead is how a cleanup routine deletes a running program's
+ * socket, so the ambiguity is resolved conservatively: anything that is not a
+ * definite ESRCH counts as alive.
+ */
+export function pidAlive(pid: unknown): boolean {
+  const n = Number(pid)
+  if (!Number.isInteger(n) || n <= 0) return false
+  try {
+    process.kill(n, 0)
+    return true
+  } catch (e: any) {
+    return e?.code === 'EPERM'
+  }
+}
+
+/**
+ * Compare two dotted versions. Returns -1 / 0 / 1, or null when either side
+ * isn't a version at all — null is a real answer here, not an error: "I cannot
+ * tell" must never be rounded to "mine is newer", because that would authorise
+ * unlinking a live socket.
+ */
+export function compareVersions(a: string | undefined, b: string | undefined): number | null {
+  const parse = (v: string | undefined): number[] | null => {
+    if (typeof v !== 'string') return null
+    // Drop any -beta.1 / +build tail: prerelease ordering is not a distinction
+    // the tray needs, and pretending otherwise invents precision.
+    const core = v.trim().split(/[-+]/)[0]
+    if (!/^\d+(\.\d+)*$/.test(core)) return null
+    return core.split('.').map((n) => Number(n))
+  }
+  const pa = parse(a), pb = parse(b)
+  if (!pa || !pb) return null
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] ?? 0, y = pb[i] ?? 0
+    if (x < y) return -1
+    if (x > y) return 1
+  }
+  return 0
+}
+
+/** What a handshake with the current socket owner found out. */
+export interface SocketOwnerFacts {
+  /** Does the socket path exist at all? */
+  exists: boolean
+  /** Did a `ping` come back `ok`? */
+  pingOk: boolean
+  ownerPid?: number
+  ownerProtocol?: number
+  ownerVersion?: string
+  /** Result of `pidAlive(ownerPid)`. Undefined = no pid to test. */
+  ownerAlive?: boolean
+  /** Ours, injectable so the decision stays a pure function under test. */
+  ourProtocol?: number
+  ourVersion?: string
+}
+
+export type SocketOwnershipAction = 'bind' | 'takeover' | 'yield'
+
+export interface SocketOwnershipDecision {
+  action: SocketOwnershipAction
+  /** One sentence, meant to be logged verbatim: it names what was replaced. */
+  reason: string
+}
+
+/**
+ * ⚖️ THE ONLY PLACE that decides whether a second daemon may take the tray
+ * socket. Pure — facts in, verdict out — because the alternative is deciding it
+ * inline in `startTrayServer`, where the branch that unlinks another process's
+ * socket can only be tested by actually running two daemons.
+ *
+ * Three outcomes:
+ *   bind      — nothing is there. Just listen.
+ *   takeover  — what is there is NOT a working current daemon: no reply, a dead
+ *               owner pid, an older protocol, or an older version. Unlink, bind,
+ *               and say what was displaced.
+ *   yield     — a live owner speaking our protocol or better, at our version or
+ *               newer. Run without a tray and say who has it.
+ *
+ * The asymmetry is deliberate. Stealing from a live equal-or-newer daemon splits
+ * the machine in two (both serve, the tray reaches one, the user's commands land
+ * in the other), and that is worse than having no menu bar. Whereas leaving a
+ * three-releases-old brain in charge is the bug this function exists for: it is
+ * indistinguishable from a working tray until a command is missing.
+ *
+ * A ping that answers WITHOUT a version is treated as older, not as unknown:
+ * `version` ships in the same release as this check, so a daemon that omits it
+ * necessarily predates it.
+ */
+export function decideSocketOwnership(facts: SocketOwnerFacts): SocketOwnershipDecision {
+  const ourProtocol = facts.ourProtocol ?? TRAY_PROTOCOL
+  const ourVersion = facts.ourVersion ?? TRAY_VERSION
+  const who = `pid ${facts.ownerPid ?? '?'}, protocol ${facts.ownerProtocol ?? '?'}, version ${facts.ownerVersion ?? 'unknown'}`
+
+  if (!facts.exists) return { action: 'bind', reason: 'no socket at that path yet' }
+
+  if (!facts.pingOk) {
+    return { action: 'takeover', reason: 'socket file exists but nothing answered a ping — reclaiming a leftover inode' }
+  }
+
+  // A reply proves SOMETHING is listening, but the listener can still be a
+  // zombie inode served by a process that has since exited on some platforms —
+  // and more usefully, the pid it reports is checkable. Only a DEFINITE ESRCH
+  // counts against it (pidAlive treats EPERM as alive).
+  if (facts.ownerPid !== undefined && facts.ownerAlive === false) {
+    return { action: 'takeover', reason: `socket owner ${who} is no longer running — reclaiming` }
+  }
+
+  const ownerProtocol = Number(facts.ownerProtocol)
+  if (Number.isFinite(ownerProtocol) && ownerProtocol < ourProtocol) {
+    return { action: 'takeover', reason: `replacing an older tray protocol (${who}) with protocol ${ourProtocol} — its replies can no longer be rendered` }
+  }
+  if (!Number.isFinite(ownerProtocol)) {
+    return { action: 'takeover', reason: `socket owner (${who}) answered without a protocol number — it predates the handshake, replacing it` }
+  }
+  if (ownerProtocol > ourProtocol) {
+    // A protocol ABOVE ours cannot have come from a build older than ours,
+    // whatever its version string says (a fork, a dev build, a hand-rolled
+    // helper). We would also be unable to decode its replies, so evicting it on
+    // a version comparison we do not understand is the wrong way round.
+    return { action: 'yield', reason: `another daemon owns the tray socket (${who}) and speaks a NEWER protocol than ours (${ourProtocol})` }
+  }
+
+  const cmp = compareVersions(facts.ownerVersion, ourVersion)
+  if (facts.ownerVersion === undefined || cmp === null) {
+    // No version at all → predates this release. An UNPARSEABLE version is the
+    // same evidence: it is not a claim to be newer, and it cannot have been
+    // produced by a build that ships this function.
+    return { action: 'takeover', reason: `replacing a stale tray brain (${who}) with version ${ourVersion} — it predates the version handshake` }
+  }
+  if (cmp < 0) {
+    return { action: 'takeover', reason: `replacing a stale tray brain (${who}) with version ${ourVersion} — the menu bar would otherwise talk to the older daemon` }
+  }
+
+  return { action: 'yield', reason: `another daemon owns the tray socket (${who})` }
+}
+
+/**
+ * Do the handshake: connect to whatever is at `path` and ask it who it is.
+ * Never throws; a socket that refuses, times out or answers garbage all come
+ * back as `pingOk: false`, which `decideSocketOwnership` reads as reclaimable.
+ */
+export async function inspectSocketOwner(path: string, timeoutMs = 500): Promise<SocketOwnerFacts> {
+  if (!existsSync(path)) return { exists: false, pingOk: false }
+  const r = await trayRequest({ cmd: 'ping' }, { path, timeoutMs })
+  if (!r.ok) return { exists: true, pingOk: false }
+  const ownerPid = Number.isInteger(Number(r.pid)) && Number(r.pid) > 0 ? Number(r.pid) : undefined
+  return {
+    exists: true,
+    pingOk: true,
+    ownerPid,
+    ownerProtocol: Number.isFinite(Number(r.protocol)) ? Number(r.protocol) : undefined,
+    ownerVersion: typeof r.version === 'string' ? r.version : undefined,
+    // No pid to check = the reply itself is the only evidence, and it proves a
+    // listener. Undefined, not false: absence of a pid is not proof of death.
+    ownerAlive: ownerPid === undefined ? undefined : pidAlive(ownerPid),
+  }
+}
+
 export interface TrayServerOptions {
   path?: string
   deps: TrayDeps
@@ -458,13 +906,27 @@ export async function startTrayServer(opts: TrayServerOptions): Promise<TrayServ
     return null
   }
 
-  const state = await probeSocket(path)
-  if (state === 'live') {
-    report(`tray: ${path} is already served by another tiny-tech daemon — not binding`)
+  // Who, if anyone, has this socket — and may we have it? The old code asked
+  // only "is something listening" (probeSocket) and yielded to anything that
+  // was, which is first-daemon-wins: an `npx tiny-tech` from three releases ago
+  // kept the menu bar for two days because it happened to start first.
+  const facts = await inspectSocketOwner(path)
+  const decision = decideSocketOwnership(facts)
+  if (decision.action === 'yield') {
+    report(`tray: ${path} is already served by another tiny-tech daemon — ${decision.reason} — not binding`)
     return null
   }
-  if (state === 'dead') {
-    try { unlinkSync(path) } catch (e: any) {
+  if (decision.action === 'takeover' && facts.exists) {
+    // Unlink ONLY, never a signal: the other process may be doing real work and
+    // ending it is not this function's business. What we remove is whatever is
+    // sitting at OUR path inside a 0700 directory (a socket after a crash, or a
+    // zero-byte file when something got interrupted mid-bind) — refusing a
+    // non-socket here would lock the daemon out of its own menu bar forever, and
+    // unlinkSync on a directory fails loudly rather than destroying anything.
+    try {
+      unlinkSync(path)
+      report(`tray: took over ${path} — ${decision.reason}`)
+    } catch (e: any) {
       report(`tray: cannot remove stale socket ${path}: ${e?.message || e}`)
       return null
     }
@@ -632,6 +1094,12 @@ export function formatTrayReply(r: TrayReply): string {
     return tasks.length
       ? tasks.map((t) => `${t.id}  ${t.status.padEnd(11)} ${t.prompt.slice(0, 60)}`).join('\n')
       : '(no tasks)'
+  }
+  const loops = r.loops as Array<TraySummary & { iterations?: number }> | undefined
+  if (loops) {
+    return loops.length
+      ? loops.map((t) => `${t.id}  ${t.status.padEnd(11)} ${String(t.iterations ?? 0).padStart(3)} iters  ${t.prompt.slice(0, 50)}`).join('\n')
+      : '(no loops)'
   }
   if (typeof r.text === 'string') return r.text
   if (typeof r.result === 'string') return `[${r.state}]\n${r.result}`

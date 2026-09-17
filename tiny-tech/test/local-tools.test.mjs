@@ -555,3 +555,34 @@ test('an unresolved collision really does throw from the Agent constructor', asy
     tools: [tool({ name: 'bash', description: 'builtin', callback: () => 'x' }), ...unguarded.tools],
   }))
 })
+
+// ── per-call registry resolution (fork fix — shared rail) ───────────────────
+import { resolveRegistries, reloadLocalTools as reloadMulti } from '../dist/agent/local-tools.js'
+
+test('resolveRegistries: executing agent registry first, session second, deduped', () => {
+  const a = { addOrReplace() {}, remove() {}, list: () => [] }
+  const b = { addOrReplace() {}, remove() {}, list: () => [] }
+  assert.deepEqual(resolveRegistries({ agent: { toolRegistry: a } }, () => b), [a, b])
+  assert.deepEqual(resolveRegistries({ agent: { toolRegistry: a } }, () => a), [a])
+  assert.deepEqual(resolveRegistries(undefined, () => b), [b])
+  assert.deepEqual(resolveRegistries({ agent: {} }, () => null), [])
+})
+
+test('reloadLocalTools: an array of registries all receive the load and the removals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tiny-lt-multi-'))
+  const mk = () => {
+    const m = new Map()
+    return { m, addOrReplace(ts) { for (const t of ts) m.set(t.name, t) }, remove(n) { m.delete(n) }, list: () => [...m.values()] }
+  }
+  const r1 = mk(); const r2 = mk()
+  try {
+    writeFileSync(join(dir, 'multi_probe.mjs'), `export default { name: 'multi_probe', description: 'd', handler() { return 'ok' } }\n`)
+    const { names } = await reloadMulti([r1, r2], { dir })
+    assert.deepEqual(names, ['multi_probe'])
+    assert.ok(r1.m.has('multi_probe') && r2.m.has('multi_probe'), 'both registries loaded')
+    rmSync(join(dir, 'multi_probe.mjs'))
+    const second = await reloadMulti([r1, r2], { dir, previous: names })
+    assert.deepEqual(second.removed, ['multi_probe'])
+    assert.ok(!r1.m.has('multi_probe') && !r2.m.has('multi_probe'), 'both registries dropped it')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})

@@ -9,25 +9,27 @@
 import { tool } from '@strands-agents/sdk'
 import { z } from 'zod'
 import { TinyApi } from '../api.js'
+import { apiHost, apiUrl, requireWorkerUrl } from '../config.js'
 import { topUpAdvice } from '../wallet.js'
 
-const WORKER_PUBLIC = 'https://plugin.tiny.technology'
+/** The worker behind the configured backend — derived, never a literal (config.ts). */
+const WORKER_PUBLIC = () => requireWorkerUrl()
 
 const j = (d: any) => (typeof d === 'string' ? d : JSON.stringify(d))
 
 export function makeTinyTools(api: TinyApi) {
   const whoami = tool({
     name: 'tiny_whoami',
-    description: 'Who am I on tiny.technology? Identity + owned tinys.',
+    description: `Who am I on ${apiHost()}? Identity + owned tinys.`,
     inputSchema: z.object({}),
     callback: async () => j(await api.get('/api/me')),
   })
 
   const learn = tool({
     name: 'tiny_learn',
-    description: "Store a durable memory about the user in tiny.technology's cross-agent memory graph (≤2000 chars, short + factual). Use supersedes to replace outdated facts.",
+    description: `Store a durable memory about the user in ${apiHost()}'s cross-agent memory graph (≤2000 chars, short + factual). Use supersedes to replace outdated facts.`,
     inputSchema: z.object({
-      content: z.string().min(1).max(2000),
+      content: z.string().min(1).max(10000),
       supersedes: z.string().optional().describe('Memory id this replaces'),
       visibility: z.enum(['private', 'public']).optional(),
     }),
@@ -64,15 +66,15 @@ export function makeTinyTools(api: TinyApi) {
 
   const search = tool({
     name: 'tiny_search',
-    description: 'Search the tiny.technology universe of public AIs (RAG over every public tiny).',
+    description: `Search the ${apiHost()} universe of public AIs (RAG over every public tiny).`,
     inputSchema: z.object({ query: z.string().min(1) }),
     callback: async ({ query }) =>
-      j(await api.getPublic(`${WORKER_PUBLIC}/retrieve?text=${encodeURIComponent(query)}`)),
+      j(await api.getPublic(`${await WORKER_PUBLIC()}/retrieve?text=${encodeURIComponent(query)}`)),
   })
 
   const askTiny = tool({
     name: 'ask_tiny',
-    description: "Chat with any tiny on tiny.technology (agent-as-a-tool). The tiny answers with its own identity, knowledge and skills.",
+    description: `Chat with any tiny on ${apiHost()} (agent-as-a-tool). The tiny answers with its own identity, knowledge and skills.`,
     inputSchema: z.object({
       tiny: z.string().min(1).describe('Tiny slug (e.g. "tiny", "support")'),
       message: z.string().min(1),
@@ -107,7 +109,7 @@ export function makeTinyTools(api: TinyApi) {
 
   const sendMessage = tool({
     name: 'tiny_send_message',
-    description: 'Send a DM to another tiny.technology user (@login or tiny slug). Max 2000 chars.',
+    description: `Send a DM to another ${apiHost()} user (@login or tiny slug). Max 2000 chars.`,
     inputSchema: z.object({ to: z.string().min(1), message: z.string().min(1).max(2000) }),
     callback: async ({ to, message }) =>
       j(await api.post('/api/messages', { to, message, viaTiny: 'tiny-tech' })),
@@ -169,7 +171,7 @@ export function makeTinyTools(api: TinyApi) {
     name: 'tiny_pay_quote',
     description: 'Quote a payment for a paid x402 service — NO money moves. Show the returned summary to the user; only they can execute it (web/iOS payer card or MCP tiny_pay_confirm).',
     inputSchema: z.object({
-      url: z.string().url().describe('https x402 endpoint, e.g. https://tiny.technology/api/x402/chat/<slug>'),
+      url: z.string().url().describe( `https x402 endpoint, e.g. ${apiUrl()}/api/x402/chat/<slug>`),
       message: z.string().min(1).max(8000),
       max_spend_micro: z.number().int().positive().optional(),
     }),

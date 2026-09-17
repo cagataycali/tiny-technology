@@ -3,7 +3,7 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert'
-import { daemonPaths, installDaemon } from '../dist/daemon.js'
+import { daemonPaths, installDaemon, envFileContent } from '../dist/daemon.js'
 
 test('daemon: paths match the platform', () => {
   const p = daemonPaths()
@@ -62,8 +62,53 @@ test('daemon: dry-run masks env secrets', () => {
   try {
     const out = installDaemon({ dryRun: true })
     assert.ok(!out.includes('sk-supersecretvalue123'), 'secret leaked into dry-run output')
-    assert.match(out, /OPENAI_API_KEY=sk-s\*\*\*/)
+    assert.match(out, /OPENAI_API_KEY='sk-s\*\*\*'/)
   } finally {
     delete process.env.OPENAI_API_KEY
   }
+})
+
+// ── env-file quoting contract ────────────────────────────────────────────────
+// The wrapper reads the env file with `set -a; . file`. Before the shQuote fix
+// a value with a space aborted the source (bash: word: command not found) and
+// KeepAlive turned that into a silent crash-loop; a value with `$` or
+// backticks was mangled — or EXECUTED. The proof is a real bash round-trip:
+// whatever envFileContent wrote must come back byte-identical from `. file`.
+
+import { writeFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
+
+/** Write content as a file, source it the way the wrapper does, echo one var. */
+function sourceAndRead(content, key) {
+  const dir = mkdtempSync(join(tmpdir(), 'tiny-daemon-env-'))
+  const f = join(dir, 'daemon.env')
+  writeFileSync(f, content)
+  try {
+    return execFileSync('bash', ['-c', `set -a; . "${f}"; printf %s "\${${key}}"`], { encoding: 'utf8' })
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('daemon: env values with spaces survive a real bash source round-trip', () => {
+  const v = 'user with spaces@example.com'
+  const out = sourceAndRead(envFileContent({ GOOGLE_IMPERSONATE_SUBJECT: v }), 'GOOGLE_IMPERSONATE_SUBJECT')
+  assert.strictEqual(out, v)
+})
+
+test('daemon: env values with quotes, $ and backticks are literal, never executed', () => {
+  const v = `pa's$w"or\`d $(rm -rf /tmp/nope)`
+  const out = sourceAndRead(envFileContent({ TINY_TOKEN: v }), 'TINY_TOKEN')
+  assert.strictEqual(out, v)
+})
+
+test('daemon: a broken value cannot abort the vars after it', () => {
+  // Before quoting, TINY_TOKEN='a b' made bash treat `b` as a command and the
+  // remaining lines still loaded — but a value with a quote could kill the
+  // whole source. Both keys must arrive regardless of order.
+  const content = envFileContent({ TINY_TOKEN: "it's got a space", TINY_API_URL: 'https://tiny.technology' })
+  assert.strictEqual(sourceAndRead(content, 'TINY_API_URL'), 'https://tiny.technology')
+  assert.strictEqual(sourceAndRead(content, 'TINY_TOKEN'), "it's got a space")
 })

@@ -10,6 +10,7 @@
  * revoked device gets 401 and the poller stops itself.
  */
 import { loadDevice, type DeviceIdentity } from '../device.js'
+import { apiUrlFor } from '../config.js'
 import { buildRelayReply, type HostedImage } from '../agent/media.js'
 
 const POLL_INTERVAL_MS = 5_000
@@ -29,19 +30,26 @@ export interface RelayPollerOptions {
   agentFactory: () => Promise<RelayAgent>
   apiUrl?: string
   onStop?: (reason: string) => void
+  /**
+   * Tick length, for tests. The backoff ladder is defined in multiples of the
+   * poll interval, so proving it engages at all requires a tick shorter than the
+   * 5s production one — same reason handleEnvelope is exported.
+   */
+  pollIntervalMs?: number
 }
 
 export function startRelayPoller(opts: RelayPollerOptions): { stop: () => void } | null {
   const device = loadDevice()
   if (!device) return null // not enrolled — nothing to poll
 
-  const apiUrl = opts.apiUrl || process.env.TINY_API_URL || device.apiUrl || 'https://tiny.technology'
+  const apiUrl = opts.apiUrl || apiUrlFor(device.apiUrl)
+  const tick = opts.pollIntervalMs ?? POLL_INTERVAL_MS
   let running = true
   let consecutiveFailures = 0
 
   const loop = async () => {
     while (running) {
-      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS))
+      await new Promise((r) => setTimeout(r, tick))
       if (!running) break
       try {
         const res = await fetch(`${apiUrl}/api/devices/relay`, {
@@ -54,15 +62,24 @@ export function startRelayPoller(opts: RelayPollerOptions): { stop: () => void }
           opts.onStop?.('device revoked — relay poller stopped')
           return
         }
+        // fetch REJECTS on a network failure but RESOLVES on 500/502/429 — so an
+        // error status used to take the success path: failures reset to 0, no
+        // backoff, another request in 5s, forever, from every enrolled device at
+        // once. The ladder that exists for network blips never engaged for the
+        // outage most likely to need it, and a struggling relay got a thundering
+        // herd from its own fleet. 429 was the sharpest case: the one response
+        // whose entire meaning is "slow down" was the one being ignored.
+        if (!res.ok) throw new Error(`relay responded ${res.status}`)
         const data: any = await res.json().catch(() => ({}))
         consecutiveFailures = 0
         for (const msg of data.messages || []) {
           handleEnvelope(device, apiUrl, msg, opts).catch(() => {})
         }
       } catch {
-        // Network blip — back off up to 60s, keep trying
+        // Network blip or error status — back off up to 60s, keep trying. A
+        // recovered relay resets the ladder on its first good response.
         consecutiveFailures++
-        const backoff = Math.min(consecutiveFailures * POLL_INTERVAL_MS, 60_000)
+        const backoff = Math.min(consecutiveFailures * tick, 60_000)
         await new Promise((r) => setTimeout(r, backoff))
       }
     }

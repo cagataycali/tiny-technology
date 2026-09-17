@@ -35,7 +35,9 @@ after(() => rmSync(home, { recursive: true, force: true }))
 const {
   TRAY_PROTOCOL, TRAY_LINE_MAX, TRAY_TEXT_MAX, TRAY_MAX_CONNS, SOCKET_PATH_MAX, TRAY_COMMANDS,
   traySocketPath, socketPathError, handleTrayCommand, probeSocket, startTrayServer,
+  TrayNotifyQueue,
   trayRequest, formatTrayReply,
+  TRAY_VERSION, pidAlive, compareVersions, decideSocketOwnership, inspectSocketOwner,
 } = await import('../dist/tray.js')
 
 let seq = 0
@@ -45,17 +47,32 @@ const freshPath = () => join(home, `s${seq++}.sock`)
 const fullDeps = (over = {}) => ({
   status: () => ({ peers: 2, relay: true, senses: ['screenshot'], tools: { loaded: 3, failed: 0 } }),
   tasks: () => [{ id: 't1', status: 'running', prompt: 'hello', startedAt: 1 }],
+  loops: () => [{ id: 'l1', status: 'running', prompt: 'iterate', startedAt: 1, iterations: 3 }],
   taskResult: (id) => (id === 't1' ? { status: 'done', result: 'the answer' } : null),
   startTask: (prompt) => ({ id: `task-${prompt.length}` }),
   cancelTask: (id) => `stopped watching ${id}`,
   logs: (lines) => `last ${lines} lines`,
   reloadTools: () => '2 local tools',
   shareFile: (path, note) => `sharing ${path}${note ? ` (${note})` : ''}`,
+  // A queue with ONE answerable prompt already in it, id 't1' to match the id the
+  // sweep below sends. Without this the sweep asks the daemon to answer a
+  // notification that was never raised, and `answer` rightly refuses — the sweep
+  // would then be testing the refusal path while claiming to test the happy one.
+  notifications: (() => {
+    const q = new TrayNotifyQueue()
+    q.enqueue({ id: 't1', kind: 'confirm', title: 'seeded for the command sweep', body: 'answerable' })
+    return q
+  })(),
   ...over,
 })
 
 // ── the command layer (no socket needed) ─────────────────────────────────────
 
+// Every command, given ARGUMENTS THAT MAKE SENSE FOR IT, succeeds and stamps the
+// protocol. The sweep passes one flat bag of args, so anything the sweep can only
+// fail at (an id that was never enqueued) has to be seeded in fullDeps, not
+// papered over by loosening this assertion: `answer` refusing an unknown id is
+// correct behaviour and has its own test.
 test('every command answers, and the reply carries the protocol version', async () => {
   const deps = fullDeps()
   for (const cmd of TRAY_COMMANDS) {
@@ -255,6 +272,170 @@ test('a live socket is never stolen; a dead one is reclaimed', async () => {
   const third = await startTrayServer({ path, deps: fullDeps() })
   assert.ok(third, 'a stale socket must not lock the daemon out forever')
   third.close()
+})
+
+// ── ownership: whose brain is behind the socket ──────────────────────────────
+
+test('pidAlive: a real pid is alive, an absurd one is not, and EPERM means ALIVE', () => {
+  assert.equal(pidAlive(process.pid), true)
+  assert.equal(pidAlive(0), false, 'pid 0 is the process group, never a liveness answer')
+  assert.equal(pidAlive(-1), false)
+  assert.equal(pidAlive('nonsense'), false)
+  assert.equal(pidAlive(undefined), false)
+  // pid 1 is launchd/init: it exists and we are NOT allowed to signal it, so
+  // process.kill(1, 0) raises EPERM. Reading that as "dead" is how a cleanup
+  // routine deletes a running program's socket — the one mistake this guards.
+  assert.equal(pidAlive(1), true, 'EPERM is a live process we may not touch, not a dead one')
+})
+
+test('compareVersions orders releases, and says null when it cannot tell', () => {
+  assert.equal(compareVersions('0.8.3', '0.11.4'), -1, '8 < 11 numerically, even though "8" > "1" as text')
+  assert.equal(compareVersions('0.11.4', '0.8.3'), 1)
+  assert.equal(compareVersions('0.11.4', '0.11.4'), 0)
+  assert.equal(compareVersions('1.0', '1.0.0'), 0, 'a missing segment is zero')
+  assert.equal(compareVersions('0.11.4-beta.1', '0.11.4'), 0, 'prerelease tails are not a distinction the tray needs')
+  // null, never a number: "I cannot tell" must not be rounded to "mine is
+  // newer", because that answer authorises unlinking a live socket.
+  assert.equal(compareVersions(undefined, '0.11.4'), null)
+  assert.equal(compareVersions('main', '0.11.4'), null)
+  assert.equal(compareVersions('', '0.11.4'), null)
+})
+
+test('decideSocketOwnership: nothing there means just bind', () => {
+  const d = decideSocketOwnership({ exists: false, pingOk: false })
+  assert.equal(d.action, 'bind')
+})
+
+test('decideSocketOwnership: a socket nobody answers is a leftover inode', () => {
+  const d = decideSocketOwnership({ exists: true, pingOk: false })
+  assert.equal(d.action, 'takeover')
+  assert.match(d.reason, /nothing answered/)
+})
+
+test('decideSocketOwnership: a reply from a pid that no longer exists is reclaimed', () => {
+  const d = decideSocketOwnership({
+    exists: true, pingOk: true, ownerPid: 424242, ownerAlive: false,
+    ownerProtocol: TRAY_PROTOCOL, ownerVersion: TRAY_VERSION,
+  })
+  assert.equal(d.action, 'takeover')
+  assert.match(d.reason, /no longer running/)
+})
+
+test('decideSocketOwnership: an OLDER brain is replaced, and the log says what it was', () => {
+  // The live bug, verbatim: tiny-tech 0.8.3 left over from an `npx` run owned
+  // ~/.tiny/tray.sock for two days. It spoke protocol 1 perfectly, so
+  // first-daemon-wins kept it — and the menu bar talked to a daemon three
+  // releases old, missing `loops` entirely, reporting 0 tools loaded.
+  const d = decideSocketOwnership({
+    exists: true, pingOk: true, ownerPid: 17113, ownerAlive: true,
+    ownerProtocol: 1, ownerVersion: '0.8.3',
+    ourProtocol: 1, ourVersion: '0.11.4',
+  })
+  assert.equal(d.action, 'takeover')
+  assert.match(d.reason, /17113/, 'the reason must name the pid it displaced')
+  assert.match(d.reason, /0\.8\.3/, 'and the version it displaced')
+})
+
+test('decideSocketOwnership: a ping with no version at all predates the handshake', () => {
+  const d = decideSocketOwnership({ exists: true, pingOk: true, ownerPid: 999, ownerAlive: true, ownerProtocol: 1 })
+  assert.equal(d.action, 'takeover')
+  assert.match(d.reason, /predates/)
+})
+
+test('decideSocketOwnership: an older PROTOCOL is replaced regardless of version', () => {
+  const d = decideSocketOwnership({
+    exists: true, pingOk: true, ownerPid: 5, ownerAlive: true,
+    ownerProtocol: 0, ownerVersion: '99.0.0',
+    ourProtocol: 2, ourVersion: '0.11.4',
+  })
+  assert.equal(d.action, 'takeover')
+  assert.match(d.reason, /protocol/)
+})
+
+test('decideSocketOwnership: a LIVE equal-or-newer daemon is never stolen from', () => {
+  // Splitting the machine in two — both daemons serving, the tray reaching one,
+  // the user's commands landing in the other — is worse than no menu bar.
+  for (const ownerVersion of ['0.11.4', '0.12.0', '1.0.0']) {
+    const d = decideSocketOwnership({
+      exists: true, pingOk: true, ownerPid: process.pid, ownerAlive: true,
+      ownerProtocol: TRAY_PROTOCOL, ownerVersion,
+      ourProtocol: TRAY_PROTOCOL, ourVersion: '0.11.4',
+    })
+    assert.equal(d.action, 'yield', `must yield to ${ownerVersion}`)
+    assert.match(d.reason, /another daemon owns the tray socket/)
+    assert.match(d.reason, new RegExp(String(process.pid)), 'and name who has it')
+  }
+})
+
+test('decideSocketOwnership: a NEWER protocol also wins, even at a lower version', () => {
+  const d = decideSocketOwnership({
+    exists: true, pingOk: true, ownerPid: process.pid, ownerAlive: true,
+    ownerProtocol: 9, ownerVersion: '0.1.0',
+    ourProtocol: 1, ourVersion: '0.11.4',
+  })
+  // Protocol 9 with version 0.1.0 is a hand-rolled helper or a fork, not
+  // something to evict: it can decode us but we cannot decode it.
+  assert.equal(d.action, 'yield')
+})
+
+test('ping carries the package version, so a second daemon can compare brains', async () => {
+  const r = await handleTrayCommand({ cmd: 'ping' }, fullDeps())
+  assert.equal(r.ok, true)
+  assert.equal(r.protocol, TRAY_PROTOCOL)
+  assert.equal(r.version, TRAY_VERSION)
+  assert.match(String(r.version), /^\d+\.\d+\.\d+/, 'a real version, not a placeholder')
+  assert.equal(r.pid, process.pid)
+})
+
+test('inspectSocketOwner reads a live daemon, and reports a dead path honestly', async () => {
+  const path = freshPath()
+  assert.deepEqual(await inspectSocketOwner(path), { exists: false, pingOk: false })
+
+  const s = await startTrayServer({ path, deps: fullDeps() })
+  const facts = await inspectSocketOwner(path)
+  assert.equal(facts.exists, true)
+  assert.equal(facts.pingOk, true)
+  assert.equal(facts.ownerPid, process.pid)
+  assert.equal(facts.ownerProtocol, TRAY_PROTOCOL)
+  assert.equal(facts.ownerVersion, TRAY_VERSION)
+  assert.equal(facts.ownerAlive, true)
+  s.close()
+
+  // A file that is not a server: exists, answers nothing.
+  writeFileSync(path, '')
+  const dead = await inspectSocketOwner(path, 200)
+  assert.equal(dead.exists, true)
+  assert.equal(dead.pingOk, false)
+  rmSync(path, { force: true })
+})
+
+test('a stale 0.8.3-style daemon LOSES the socket to a current one', async () => {
+  // End to end against a real socket: a server that answers ping the way
+  // tiny-tech 0.8.3 did — protocol 1, a live pid, no version field, and no
+  // `loops` in its command list.
+  const path = freshPath()
+  const old = createServer((sock) => {
+    sock.on('data', () => {
+      sock.write(JSON.stringify({ ok: true, protocol: 1, pid: process.pid, commands: ['ping', 'status'] }) + '\n')
+    })
+  })
+  await new Promise((r) => old.listen(path, r))
+
+  const msgs = []
+  const fresh = await startTrayServer({ path, deps: fullDeps(), onError: (m) => msgs.push(m) })
+  assert.ok(fresh, 'the current daemon must be able to take the tray from an older brain')
+  assert.match(msgs.join(' '), /took over/)
+  // Never a signal: the displaced server is still running, it just no longer
+  // owns the path. Killing it would end whatever work it was doing.
+  assert.equal(old.listening, true, 'the old process must be left alive — unlink only')
+
+  const r = await trayRequest({ cmd: 'ping' }, { path })
+  assert.equal(r.version, TRAY_VERSION, 'the socket now answers with the current version')
+  assert.ok(r.commands.includes('loops'), 'and with the current command list')
+
+  fresh.close()
+  await new Promise((r) => old.close(r))
+  rmSync(path, { force: true })
 })
 
 test('close() is idempotent and survives a path that is already gone', async () => {
@@ -516,3 +697,39 @@ function rawExchange(path, payload, expect = 1) {
     sock.on('error', (e) => { clearTimeout(timer); reject(e) })
   })
 }
+
+// ── loops (use_loop visibility) ─────────────────────────────────────────────
+
+test('loops: lists background loops with iteration counts', async () => {
+  const r = await handleTrayCommand({ cmd: 'loops' }, {
+    status: () => ({}),
+    loops: () => [
+      { id: 'l1', status: 'running', prompt: 'refactor until green', iterations: 7 },
+      { id: 'l2', status: 'done', prompt: 'watch the deploy', iterations: 42 },
+    ],
+  })
+  assert.equal(r.ok, true)
+  assert.equal(r.loops.length, 2)
+  assert.equal(r.loops[0].iterations, 7)
+})
+
+test('loops: unavailable without the dep (server-mode daemon)', async () => {
+  const r = await handleTrayCommand({ cmd: 'loops' }, { status: () => ({}) })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /not available/)
+})
+
+test('formatTrayReply renders loops with iterations, and the empty case', () => {
+  const rendered = formatTrayReply({
+    ok: true, protocol: 1,
+    loops: [{ id: 'l1', status: 'running', prompt: 'goal', iterations: 12 }],
+  })
+  assert.match(rendered, /l1/)
+  assert.match(rendered, /12 iters/)
+  assert.equal(formatTrayReply({ ok: true, protocol: 1, loops: [] }), '(no loops)')
+})
+
+test('ping advertises loops in the command roster', async () => {
+  const r = await handleTrayCommand({ cmd: 'ping' }, { status: () => ({}) })
+  assert.ok(r.commands.includes('loops'))
+})

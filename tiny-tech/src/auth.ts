@@ -3,7 +3,7 @@
  *
  * Flow (RFC 8252 style):
  *   1. listen on a random 127.0.0.1 port
- *   2. open https://tiny.technology/auth/cli?port=<port>&state=<nonce>
+ *   2. open <api>/auth/cli?port=<port>&state=<nonce> (the configured backend, see config.ts)
  *   3. user approves on the consent page → 302 to us with ?code&state
  *   4. exchange code at POST /api/auth/cli/token → 90-day bearer JWT
  *   5. store at ~/.tiny/credentials.json (0600)
@@ -17,8 +17,10 @@ import { spawn } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, chmodSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { apiUrl as configuredApiUrl } from './config.js'
 
-export const DEFAULT_API_URL = 'https://tiny.technology'
+/** Re-exported for callers that only need the public default; resolution lives in config.ts. */
+export { DEFAULT_API_URL } from './config.js'
 
 export interface Credentials {
   version: 1
@@ -41,7 +43,7 @@ export function loadCredentials(): Credentials | null {
   if (process.env.TINY_TOKEN) {
     return {
       version: 1,
-      apiUrl: process.env.TINY_API_URL || DEFAULT_API_URL,
+      apiUrl: configuredApiUrl(),
       token: process.env.TINY_TOKEN,
       user: { id: 'env', login: 'env' },
       expires: Number.MAX_SAFE_INTEGER,
@@ -132,7 +134,7 @@ div{text-align:center}h1{color:${ok ? '#00FF88' : '#ff6b6b'}}p{color:#888}
  * Run the full browser login flow. Resolves with stored credentials.
  */
 export async function login(
-  apiUrl: string = DEFAULT_API_URL,
+  apiUrl: string = configuredApiUrl(),
   timeoutMs = 5 * 60 * 1000,
   onAuthUrl?: (url: string) => void
 ): Promise<Credentials> {
