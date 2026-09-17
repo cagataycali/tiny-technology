@@ -173,6 +173,21 @@ struct OnboardingView: View {
                     .padding(.horizontal, 24)
                     .padding(.bottom, 28)
             }
+            // 📐 The readable measure the transcript, composer and login screen use
+            // (Views.swift's "P2.4" 760pt, web max-w-4xl).
+            //
+            // ⚠️ The whole tour was phone-shaped on iPad, and it is what a FRESH
+            // INSTALL opens on — the first five screens anyone sees. On a 1032pt
+            // canvas "Continue" stretched 984pt edge to edge, the page emoji/title/
+            // body sat centred in a 1376pt-tall column, and the gap between the copy
+            // and the button read as a rendering failure rather than a layout. The
+            // 760 cap is a no-op on every iPhone (widest is 440pt), so this changes
+            // nothing on the device the tour was designed for.
+            //
+            // Applied to the VStack, not the pages: the TabView's page dots and the
+            // controls have to share the copy's width or the centring disagrees.
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
 
             // Narration mute — the voiceover starts on its own, so the way
             // out must be one obvious tap (persisted for replays too).
@@ -242,9 +257,19 @@ struct OnboardingView: View {
         }
     }
 
+    /// ⚠️ THIS PAGE NAMED THE WRONG HARDWARE ON iPAD, three times in two sentences:
+    /// "Your phone becomes a node… this iPhone joins your fleet… the phone answers".
+    /// It is page 2 of the tour a FRESH INSTALL opens on, so on an iPad it was among
+    /// the first things anyone read, and it was talking about a different device.
+    ///
+    /// The noun comes from `LocalHardware.selfNoun` — the one answer to "what is this
+    /// machine called", already tested for all three shapes. `deviceNoun` (Views.swift)
+    /// was a second, older copy of that question that returned "phone" for iPad; both
+    /// now read the same source. "this iPhone" was hardcoded and had no copy at all.
     private var fleet: some View {
-        page("📡", "Your phone becomes a node",
-             "Sign in and this iPhone joins your fleet. Your web agent can reach it from anywhere — ask what's around and the phone answers with a live Bluetooth scan, battery, unread messages.") {
+        let noun = LocalHardware.selfNoun(LocalHardware.current)
+        return page("📡", "Your \(noun) becomes a node",
+             "Sign in and this \(noun) joins your fleet. Your web agent can reach it from anywhere — ask what's around and the \(noun) answers with a live Bluetooth scan, battery, unread messages.") {
             Text("Manage every device at tiny.technology/devices — revoke this one anytime.")
                 .font(.caption)
                 .foregroundStyle(.tertiary)

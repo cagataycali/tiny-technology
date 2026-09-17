@@ -9,6 +9,7 @@
  * never drain the wallet unattended.
  *
  * States: awaiting (quote + buttons) → paying (spinner) → paid (receipt) /
+ * pending (sent, confirming) / unknown (no answer came back — see Phase) /
  * failed (reason) / declined. Expiry is re-checked at tap-time (the server
  * enforces it authoritatively too).
  */
@@ -42,6 +43,13 @@ struct PayQuoteItem: Identifiable, Equatable, Codable {
 /// SETTLED payment resurfaced as a dead "Approve" card — the opposite of the
 /// truth, and an invite to pay twice. Codable; rides PayQuoteItem.settled.
 struct PaySettled: Equatable, Codable {
+    /// ⚠️ No `unknown` here on purpose. This enum is a persisted CODEC shared
+    /// with web (PaySettled.phase) and Android (PaySettled.outcome), so adding a
+    /// case is a three-client wire change — and an unconfirmed payment has no
+    /// terminal outcome to persist anyway. A reload therefore re-derives an
+    /// unconfirmed card as `.awaiting`, exactly as `failed` already does: safe
+    /// for the same reason the Check again button is, since re-approving the SAME
+    /// quote collides on its jti and comes back `already_paid`.
     enum Outcome: String, Codable { case paid, pending, failed, declined }
     let outcome: Outcome
     let paidMicro: Int
@@ -110,7 +118,14 @@ struct PayQuoteCard: View {
     var onSettled: ((PaySettled) -> Void)? = nil
     @Environment(\.tinyAccent) private var accent
 
-    enum Phase: Equatable { case awaiting, paying, paid, pending, failed, declined }
+    /// `unknown` is the third answer to "did the money move?". The server-side
+    /// doctrine has carried it for a while (chain/settle-outcome.mjs: settled /
+    /// not_settled / unknown — *"NEVER refund, that double-pays a landing
+    /// transfer"*), but this card had room for two, so an approval whose answer
+    /// never came back landed on `failed` and told the user "Payment not sent"
+    /// about a payment that may well have settled. See the `guard let r else`
+    /// branch in approve().
+    enum Phase: Equatable { case awaiting, paying, paid, pending, unknown, failed, declined }
     @State private var phase: Phase = .awaiting
     @State private var paidMicro: Int = 0
     @State private var settleErr: String = ""
@@ -191,6 +206,7 @@ struct PayQuoteCard: View {
                 }
             case .pending:  status(icon: "clock.badge.checkmark", spinner: false, title: "Payment sent — confirming",
                                    body: settleErr.isEmpty ? "The payment was sent and is confirming on-chain. It’ll be verified shortly — no need to retry." : settleErr)
+            case .unknown:  unconfirmed
             case .failed:   failed
             case .declined: status(icon: "hand.raised.fill", spinner: false, title: "Payment declined",
                                    body: "You declined this payment. Nothing was charged.", danger: true)
@@ -227,10 +243,42 @@ struct PayQuoteCard: View {
         switch phase {
         case .paid:     return "Payment sent. \(paidBody)"
         case .pending:  return "Payment sent, confirming on-chain. \(settleErr.isEmpty ? "It will be verified shortly." : settleErr)"
+        // Spoken, this one matters most: a blind user can't glance at the card
+        // again, so "Payment not sent" here was the whole outcome they got — and
+        // it named the one thing the app cannot know.
+        case .unknown:  return "\(Self.unconfirmedTitle). \(unconfirmedBody)"
         case .failed:   return "Payment not sent. \(settleErr.isEmpty ? "The payment could not be completed." : settleErr)"
         case .declined: return "Payment declined. Nothing was charged."
         case .awaiting, .paying: return nil
         }
+    }
+
+    // ── The words for an answer that never came ───────────────────────────────
+    // Identical on all three clients (web PayReceipt.tsx's UNCONFIRMED_*, Android
+    // WalletCore.UNCONFIRMED_TITLE/unconfirmedBody) and compared literally in
+    // tests/pay-answer-unknown.test.ts — a money card whose copy drifts per
+    // platform is three different promises about the same payment.
+    //
+    // What each sentence is allowed to claim:
+    //   · "was sent" — true and checkable. The PUT left the device; that is the
+    //     only half of the round trip we witnessed.
+    //   · "can't tell whether it went through" — the honest verdict, and the one
+    //     the old copy replaced with a guess.
+    //   · "settles at most once" — NOT a reassurance, a property: the execute
+    //     route keys its spend ref on the quote's jti, so re-approving the SAME
+    //     quote collides (`already_spent` → 409 `already_paid`) and the card
+    //     flips to "Payment sent". Checking again is how the user LEARNS.
+    //   · past the TTL the route 410s on `nowSec > q.exp` BEFORE it ever reaches
+    //     that dedup, so the answer is no longer obtainable from here — hence the
+    //     second body, which points at the wallet ledger instead of a button.
+    static let unconfirmedTitle = "Couldn’t confirm this payment"
+    static let unconfirmedCheckable =
+        "Your approval was sent but no answer came back, so we can’t tell whether the payment went through. Checking again is safe — the same approval settles at most once."
+    static let unconfirmedExpired =
+        "Your approval was sent but no answer came back, and this quote has expired — so it can’t be checked from here. Your wallet’s activity list will show it if it settled."
+
+    private var unconfirmedBody: String {
+        expired ? Self.unconfirmedExpired : Self.unconfirmedCheckable
     }
 
     // Restore the terminal state a prior tap already reached (C3): a reload
@@ -362,6 +410,33 @@ struct PayQuoteCard: View {
         }
     }
 
+    // ── Unknown — the approval left us and the answer never came back ─────────
+    private var unconfirmed: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            // Accent, not red (`tone` deliberately lists only failed/declined):
+            // this is not a failure, and an alarm colour is itself a claim. The
+            // glyph says only what we know — a question, not `wifi.slash`, which
+            // would name a cause nobody checked.
+            status(icon: "questionmark.circle", spinner: false,
+                   title: Self.unconfirmedTitle, body: unconfirmedBody)
+            // ONE action, and it is a question rather than a payment: re-PUTting
+            // the same quote either settles it once or collides on its jti and
+            // comes back `already_paid` → `.paid`. Deliberately NOT "Get fresh
+            // quote" — a fresh quote carries a NEW jti, so it is a second
+            // payment, and offering it here is how an in-doubt payment becomes
+            // two. Hidden past the TTL, where the route 410s before the dedup.
+            if !expired {
+                Button(action: approve) {
+                    Text("↻ Check again")
+                        .font(.caption.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(accent, in: Capsule())
+                        .foregroundStyle(.black)
+                }
+            }
+        }
+    }
+
     /// The expired-but-re-quotable case: the primary button re-mints instead of
     /// paying (needs the url the quote was minted for).
     private var canReQuoteExpired: Bool { expired && active.url != nil }
@@ -408,11 +483,21 @@ struct PayQuoteCard: View {
 
     // ── The ONLY money-moving action ─────────────────────────────────────────
     private func approve() {
-        // One PUT per tap: allow the first approval and a retry after a
-        // recoverable (insufficient-balance) failure, but never while a request
-        // is in flight or after a terminal success/decline.
-        guard phase == .awaiting || phase == .failed else { return }
+        // One PUT per tap: allow the first approval, a retry after a recoverable
+        // (insufficient-balance) failure, and the `.unknown` card's "Check again"
+        // — but never while a request is in flight or after a terminal
+        // success/decline. The unknown re-PUT is safe by the same jti dedup a
+        // retry relies on, and it is the only way the user can learn what
+        // happened.
+        guard phase == .awaiting || phase == .failed || phase == .unknown else { return }
         if expired {
+            // From `.unknown` a lapsed TTL must NOT become `.failed`. The answer
+            // we never received may have been a settlement; the quote expiring
+            // since then only means we can no longer ASK. Staying unconfirmed
+            // swaps the body for the expired wording (see `unconfirmedBody`)
+            // instead of upgrading "we don't know" into "not sent" as the clock
+            // passes — which is the original defect with a delay on it.
+            if phase == .unknown { return }
             // The quote's 5-min TTL lapsed between render and this tap — the
             // common case is a user who hit an insufficient-balance failure,
             // tapped "Add funds", topped up, and came back past the TTL to tap
@@ -441,17 +526,24 @@ struct PayQuoteCard: View {
                                       body: ["quote": active.quote, "message": active.message])
             await MainActor.run {
                 guard let r else {
-                    settleErr = "No response — check your connection and try again."
-                    // Don't clobber needsFunds/canReQuote here: a network blip
-                    // during a RETRY (the first attempt already learned it was a
-                    // funds shortfall / re-quotable) must keep the recovery path
-                    // visible — the quote moved no money and is still spendable, so
-                    // Add funds + Retry (or Get fresh quote) is still the right
-                    // offer. Web parity: PayReceipt re-derives both from the
-                    // retained `settled`, and its catch leaves `settled` untouched.
-                    // On a FIRST attempt both are still their initial false, so this
-                    // correctly shows only the inert error, no phantom buttons.
-                    phase = .failed
+                    // 🎲 THE THIRD ANSWER. nil is two things — a transport
+                    // failure/timeout, or a body that wasn't JSON — and NEITHER
+                    // is "nothing was sent". The PUT left the device; the server
+                    // may have reserved, signed, settled and debited before the
+                    // answer was lost. This used to be `.failed`, which put a red
+                    // "Payment not sent" over a payment that may have gone
+                    // through, and a body telling the user to "try again" — read
+                    // as "pay again", the exact double-pay the 409 branch below
+                    // exists to prevent. chain/settle-outcome.mjs has carried the
+                    // three-valued verdict for a while ("unknown … NEVER refund —
+                    // that double-pays a landing transfer"); the clients had room
+                    // for two, and the reader they short-changed is the user.
+                    //
+                    // needsFunds/canReQuote are left as they are rather than
+                    // cleared, but the unconfirmed card reads neither: its one
+                    // action is Check again, and a definitive reply to THAT sets
+                    // both from the server, which outranks anything remembered.
+                    phase = .unknown
                     return
                 }
                 if (r["ok"] as? Bool) == true {

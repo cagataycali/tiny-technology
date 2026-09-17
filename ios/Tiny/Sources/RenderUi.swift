@@ -5,12 +5,20 @@
  * Instead the props JSON is inspected and drawn with real SwiftUI:
  *   - array of {label, value…} rows → Swift Charts (bars, or lines when
  *     dense/multi-series)
+ *   - rows that DON'T chart → a table headed by the rows' own keys
  *   - scalar dictionary → key/value grid
  *   - array of strings → bullet list
- *   - anything else → titled card noting the full version lives on the web
+ *   - nothing renderable → a card that says so
  *
  * The iOS platform note in Api.chatStream steers agents to put data in
  * props, so most live calls land in the chart/key-value paths.
+ *
+ * ⚠️ There is no "see it on the web" fallback here, and there must not be: for
+ * a native session `renderUiNativeTool` (lib/chat/tools/client-side.ts) makes
+ * `props` REQUIRED and documents componentCode as "Ignored on this client —
+ * omit it", and `RenderUiItem` carries only id/title/propsJson. So this app
+ * never receives the React source and cannot know a web version of the payload
+ * exists. It used to say one did anyway.
  */
 import SwiftUI
 import Charts
@@ -75,6 +83,14 @@ func parseRenderUi(_ propsJson: String) -> RenderUiContent {
         for rows in candidates {
             if let (points, series) = chartPoints(rows) { return .chart(points: points, seriesCount: series) }
         }
+        // 🏷️ Rows in hand that simply don't CHART are still rows. `{"data":
+        // [{"name":"a","status":"ok"},{"name":"b","status":"fail"}]}` — an
+        // ordinary record list, no numeric column — used to fall past the
+        // key/value path (which skips container values) all the way to .empty,
+        // and the card told the user to go look on the web. Before the scalar
+        // path, like android: the array is the data, loose scalars are usually
+        // the title/meta around it.
+        if let rows = candidates.first, let t = tableFromRows(rows) { return t }
         // Scalar dict → key/value rows (capped — untrusted props, eager views)
         let kvs = dict.compactMap { (k, v) -> (key: String, value: String)? in
             if v is [String: Any] || v is [Any] || v is NSNull { return nil }
@@ -83,8 +99,12 @@ func parseRenderUi(_ propsJson: String) -> RenderUiContent {
         if !kvs.isEmpty { return .keyValues(Array(kvs)) }
         return .empty
     }
-    if let rows = obj as? [[String: Any]], let (points, series) = chartPoints(rows) {
-        return .chart(points: points, seriesCount: series)
+    if let rows = obj as? [[String: Any]] {
+        if let (points, series) = chartPoints(rows) { return .chart(points: points, seriesCount: series) }
+        // Same rule one level up: a top-level `[{…},{…}]` that can't chart was
+        // dropped here too — the `as? String` list path below never matches an
+        // array of objects, so it landed on .empty.
+        if let t = tableFromRows(rows) { return t }
     }
     if let arr = obj as? [Any] {
         let items = arr.prefix(RENDER_LIST_CAP).compactMap { $0 as? String }
@@ -123,23 +143,46 @@ private func firstString(_ dict: [String: Any], _ keys: String...) -> String? {
 private func parseTable(_ dict: [String: Any]) -> RenderUiContent? {
     guard let cols = dict["columns"] as? [String], !cols.isEmpty else { return nil }
     let columns = Array(cols.prefix(6))
-    func stringify(_ cell: Any?) -> String {
-        guard let cell = cell, !(cell is NSNull) else { return "" }
-        return "\(cell)"
-    }
     if let rawRows = dict["rows"] as? [[Any]], !rawRows.isEmpty {
         let rows = rawRows.prefix(30).map { row in
-            (0..<columns.count).map { c in c < row.count ? stringify(row[c]) : "" }
+            (0..<columns.count).map { c in c < row.count ? cellString(row[c]) : "" }
         }
         return .table(columns: columns, rows: Array(rows))
     }
     if let objRows = dict["rows"] as? [[String: Any]], !objRows.isEmpty {
         let rows = objRows.prefix(30).map { row in
-            columns.map { col in stringify(row[col]) }
+            columns.map { col in cellString(row[col]) }
         }
         return .table(columns: columns, rows: Array(rows))
     }
     return nil
+}
+
+/// One table cell. Missing and JSON-null both read as blank; everything else is
+/// stringified, because a cell the app can't pretty-print is still evidence
+/// there is something there.
+private func cellString(_ cell: Any?) -> String {
+    guard let cell, !(cell is NSNull) else { return "" }
+    return "\(cell)"
+}
+
+/// Rows the chart path rejected, drawn as a table headed by the rows' OWN keys.
+///
+/// No key-name guessing: the app does not know which key is "the label", so it
+/// shows every column under its own name (android's DataRows guesses
+/// label|name|x for the label and value|y|count for the value, and renders a
+/// BLANK row for records using neither). Columns are the sorted union of the
+/// capped rows' keys — sorted because a Swift Dictionary has no order of its
+/// own, so anything else would draw the same payload differently each launch.
+/// Caps match the `columns`/`rows` path this reuses: ≤6 columns, ≤30 rows.
+private func tableFromRows(_ rows: [[String: Any]]) -> RenderUiContent? {
+    let capped = Array(rows.prefix(30))
+    var keys = Set<String>()
+    for row in capped { keys.formUnion(row.keys) }
+    let columns = Array(keys.sorted().prefix(6))
+    guard !columns.isEmpty else { return nil }
+    return .table(columns: columns,
+                  rows: capped.map { row in columns.map { cellString(row[$0]) } })
 }
 
 /// Rows share ≥1 all-numeric column → chart data. First all-string column
@@ -174,6 +217,30 @@ private func chartPoints(_ rows: [[String: Any]]) -> ([ChartPoint], Int)? {
         }
     }
     return (points, seriesKeys.count)
+}
+
+/// Why the voice tool must NOT append this card and claim it is on screen, or
+/// nil when there is something to draw. Pure and separate (house shape:
+/// `Bluetooth.deviceClaim`) so the claim is a test and not a live call.
+func renderUiRefusal(_ content: RenderUiContent) -> String? {
+    guard case .empty = content else { return nil }
+    return "nothing renderable in props — put the data itself in props "
+        + "({data:[{label,value}]}, {columns,rows}, {items:[{title,subtitle}]} or {markdown}) "
+        + "and call again. No card was added, so do not say one is on screen."
+}
+
+/// What the card resolved to, in one word — for a tool result the agent reads
+/// out loud (`voiceRenderUi`). Announcing "the chart" over a table is the same
+/// mistake one size down from announcing a card that never rendered.
+func renderUiShapeName(_ content: RenderUiContent) -> String {
+    switch content {
+    case .chart: return "chart"
+    case .keyValues: return "key/value"
+    case .list, .titledItems: return "list"
+    case .markdown: return "text"
+    case .table: return "table"
+    case .empty: return "empty"
+    }
 }
 
 // ── Card ───────────────────────────────────────────────────────────────────
@@ -220,7 +287,14 @@ struct RenderUiCard: View {
                     }
                 }
             case .empty:
-                Label("Interactive version on the web app", systemImage: "safari")
+                // 🏷️ Was `Label("Interactive version on the web app",
+                // systemImage: "safari")`. Two claims, neither one this app's to
+                // make: that the payload can't be drawn here (it usually could —
+                // see tableFromRows), and that a richer version of it is waiting
+                // on the web. iOS never receives componentCode, so there is
+                // nothing to be waiting: for a native session the tool contract
+                // tells the model to omit it. What's left is the honest half.
+                Label("No data in this card", systemImage: "square.dashed")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }

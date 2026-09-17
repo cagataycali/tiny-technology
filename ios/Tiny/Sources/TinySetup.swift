@@ -5,8 +5,13 @@
  * advertises a connectable "tiny-XXXX" beacon and exposes one GATT
  * characteristic that accepts newline-terminated JSON, chunked across writes:
  *
- *   {"ssid","key","device_id","token","name"}\n
+ *   {"networks":[{"ssid","key"},…],"ssid","key","device_id","token","name"}\n
  *   → notify {"ok":true,"complete":true[,"missing":[…]]}  → device reboots
+ *
+ * WiFi is a LIST (`WifiNetworks`): the board sweeps it in order so one necklace
+ * roams between home, a phone hotspot and an office without being re-provisioned
+ * at every doorway. The top-level pair is the first entry repeated, for a board
+ * on firmware older than the list.
  *
  * Flow here mirrors the Meta-glasses pairing UX: NearbyView spots the beacon
  * (TinyBeaconInfo) → "Set up" sheet → this LINKS to the board first, and only
@@ -114,13 +119,17 @@ final class TinyProvisioner: NSObject, ObservableObject, @unchecked Sendable {
 
     // ── Step 2: write the config, wait for the board's verdict ────────────
 
-    func send(config: [String: String], limit: Int = tinyConfigLimitVision) {
+    func send(config: [String: String],
+              networks: [WifiNetwork] = [],
+              limit: Int = tinyConfigLimitVision) {
         guard let p = peripheral, let ch = configChar, p.state == .connected else {
             fail("Lost the link before the configuration could be sent — try again.")
             return
         }
-        var json = (try? JSONSerialization.data(withJSONObject: config)) ?? Data()
-        json.append(0x0A) // newline terminates one payload on the firmware side
+        // WifiNetworks.encoded owns the frame, newline included: the sheet sizes
+        // its list against the same function, and a second encoder here is how
+        // what it promises drifts from what crosses the air.
+        let json = WifiNetworks.encoded(identity: config, networks: networks)
         guard json.count <= limit else {
             fail("Configuration is too large for the device (\(json.count) bytes).")
             return
@@ -342,6 +351,98 @@ extension TinyProvisioner: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 }
 
+/// 🔴 What this app may CLAIM about a board it has just tried to enroll.
+///
+/// Enrolment is the one irreversible step in setup — `POST /api/devices` mints
+/// the board's token and returns it exactly once (see this file's header), so a
+/// row created and not configured is an orphan that "can never be provisioned,
+/// only revoked". The sheet answered every way that request could end with one
+/// composite `guard` and one sentence:
+///
+///     "Could not enroll the device — check your connection and login."
+///
+/// Three separate things wrong with that, and the app already knew better:
+///
+///   1. **Two mutually exclusive causes with opposite remedies**, which is inc
+///      15's whole lesson (`LoadFailure`) reappearing on the highest-stakes
+///      action in the panel. The reader is told to check a login the button has
+///      already verified — `Set up` is `.disabled(session.token == nil)` — so
+///      the only honest half is the one about the connection.
+///   2. **`try?` threw away the answer.** The route's refusals are TYPED and one
+///      of them is the account cap, whose words the devices footer already
+///      quotes: a 424 carrying `device limit reached (20) — revoke one first`
+///      arrived here as "check your connection". `Api.httpMessage` prefers the
+///      server's own sentence for exactly this status.
+///   3. ⚠️⚠️ **"Could not enroll" is a claim about the SERVER's state that the
+///      app cannot make when no answer arrived.** `app/api/devices/route.ts`
+///      turns a worker that took longer than its 10s budget into a 503 —
+///      `relay()`'s `transient` branch — and that worker may have inserted the
+///      row already. Told "could not enroll", the user presses Set up again and
+///      mints a SECOND row for one necklace, the first holding a token that was
+///      returned once into a dropped connection. That is precisely the orphan
+///      this file's link-then-enroll ordering exists to prevent.
+///
+/// `Api.swift` states the rule verbatim, for a different caller: a transport
+/// failure means the request "may well have been delivered and acted on … so
+/// PayQuote must not turn this into a claim about the payment not happening"
+/// (`putBody`'s doc). Same wire, same absence of a decision, same rule.
+///
+/// So: **a 4xx is a DECISION and a 5xx or a dead connection is the absence of
+/// one.** Every refusal on this route is decided before the INSERT (missing
+/// name, lapsed session, the cap), which is what makes `refused` safe to retry.
+/// Pure and file-scope like `DevicesFooter` and `RevokeFailure`: what a surface
+/// may claim is decided where a test can call it.
+enum EnrollOutcome: Equatable {
+    /// The registry minted the row AND handed back the token. The only state
+    /// setup may continue from, because the config write needs that token.
+    case enrolled(id: String, token: String)
+    /// The server looked at this request and declined it. Nothing was created.
+    case refused(String)
+    /// ⚠️ The third answer: no decision reached us, so the row may exist.
+    case unknown(String)
+
+    /// Nothing was created, so the reason is the whole message.
+    static let refusedLead = "Not enrolled."
+    /// Leads with the doubt, because the next thing the user does depends on it.
+    static let unknownLead = "Not confirmed — this board may already be enrolled."
+    /// The remedy that belongs ONLY to the unknown case: a second Set up would
+    /// mint a second row, and the first one's token is already gone.
+    static let checkFleet = "Check My devices first — revoke a row for this board before setting it up again."
+    /// A 2xx we cannot provision from. The row is real; the token isn't ours.
+    static let unreadable = "The server accepted it but sent no usable token."
+
+    /// The red line under the form, or nil for the one outcome that has nothing
+    /// to say here — `.enrolled` moves straight on to writing the config, and
+    /// that phase reports itself.
+    var message: String? {
+        switch self {
+        case .enrolled: return nil
+        case .refused(let why): return "\(Self.refusedLead) \(why)"
+        case .unknown(let why): return "\(Self.unknownLead) \(why) \(Self.checkFleet)"
+        }
+    }
+
+    /// A 2xx body. Both fields are required and both are trimmed: an empty-string
+    /// token passes `as? String` and would be written into the board's flash,
+    /// where every upload it authenticates 401s forever.
+    nonisolated static func read(_ body: [String: Any]) -> EnrollOutcome {
+        let id = (body["device_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let token = (body["device_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !id.isEmpty, !token.isEmpty else { return .unknown(unreadable) }
+        return .enrolled(id: id, token: token)
+    }
+
+    /// A thrown request. `LoadFailure.message` is the house table — this is an
+    /// action the user took, so it gets the chat-flavoured wording every other
+    /// POST failure in the app gets, not the list flavour.
+    nonisolated static func read(error: Error) -> EnrollOutcome {
+        let why = LoadFailure.message(error)
+        guard let status = (error as? ApiError)?.status, (400...499).contains(status)
+        else { return .unknown(why) }
+        return .refused(why)
+    }
+}
+
 /// Sheet launched from NearbyView on an unprovisioned (or any) tiny beacon.
 struct TinySetupView: View {
     let beacon: BleDevice
@@ -357,10 +458,36 @@ struct TinySetupView: View {
     @State private var enrolling = false
     @State private var error: String?
 
+    /// The saved networks themselves live outside this sheet — a board is set up
+    /// once, and the list is meant to outlive that.
+    @ObservedObject private var wifi = WifiStore.shared
+
     /// A Nicla Voice is an nRF52832: BLE only, no WiFi radio at all. Showing it
     /// a WiFi form would collect credentials it can never use and imply a
     /// connection it can never make — a phone is its gateway instead.
     private var isVoice: Bool { beacon.tiny?.kind == .voice }
+
+    /// The identity half of the payload, at its real size, BEFORE it exists.
+    ///
+    /// `POST /api/devices` answers with a `crypto.randomUUID()` (36 chars) and a
+    /// `tind_` + base64url(32 bytes) token — 5 + 43 = 48 (worker
+    /// `src/devices.ts`, `mintToken`). Both widths are fixed and neither needs
+    /// JSON escaping, so this measures the very payload that will be written.
+    /// That matters because the alternative is discovering the overflow AFTER
+    /// enrolling, and this board's token is returned exactly once.
+    private var plannedIdentity: [String: String] {
+        ["device_id": String(repeating: "x", count: 36),
+         "token": String(repeating: "x", count: 48),
+         "name": beacon.name]
+    }
+
+    /// The tail of the list this board cannot hold — named in the UI, never cut
+    /// away quietly.
+    private var dropped: [WifiNetwork] {
+        WifiNetworks.fit(wifi.networks,
+                         identity: plannedIdentity,
+                         budget: tinyConfigLimitVision).dropped
+    }
 
     var body: some View {
         NavigationStack {
@@ -380,11 +507,52 @@ struct TinySetupView: View {
                     }
                 } else {
                     Section {
+                        if wifi.networks.isEmpty {
+                            Text("None saved yet — add the network this board should join below. A phone hotspot counts.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        ForEach(Array(wifi.networks.enumerated()), id: \.element.id) { i, net in
+                            HStack {
+                                Text("\(i + 1)").font(.caption).monospacedDigit()
+                                    .foregroundStyle(.secondary).frame(width: 16, alignment: .trailing)
+                                Text(net.ssid)
+                                Spacer()
+                                if dropped.contains(net) {
+                                    Text("won't fit").font(.caption2).foregroundStyle(.orange)
+                                }
+                            }
+                        }
+                        .onDelete { wifi.remove(at: $0) }
+                        .onMove { wifi.move(from: $0, to: $1) }
+                    } header: {
+                        HStack {
+                            Text("Saved WiFi networks")
+                            Spacer()
+                            if !wifi.networks.isEmpty { EditButton().font(.caption) }
+                        }
+                    } footer: {
+                        Text("The board tries these in order and keeps the first that answers, so it can roam between home and your hotspot without being set up again. Drag to change which one wins. 2.4GHz only — its radio cannot see a 5GHz network.")
+                    }
+
+                    Section {
                         TextField("WiFi network", text: $ssid)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                         SecureField("WiFi password", text: $password)
-                    } header: { Text("Home WiFi") } footer: {
-                        Text("Type the 2.4GHz network name exactly — the board's radio is 2.4GHz only and can't see a 5GHz network. Credentials go straight to the device over Bluetooth.")
+                        Button("Add network") {
+                            wifi.add(ssid: ssid, password: password)
+                            password = ""
+                        }
+                        .disabled(ssid.trimmingCharacters(in: .whitespaces).isEmpty)
+                    } header: { Text("Add a network") } footer: {
+                        // Naming the overflow, not just refusing it: the board's
+                        // buffer is the limit, and a list silently cut to fit
+                        // reads as one that was saved whole.
+                        if !dropped.isEmpty {
+                            Text("Only the first \(wifi.networks.count - dropped.count) fit this board's \(tinyConfigLimitVision)-byte configuration. \(dropped.map(\.ssid).joined(separator: ", ")) won't be sent — remove one, or drag the ones you need above it.")
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text("Type the name exactly. Adding a name that's already saved just updates its password. Kept in this phone's keychain and written to the board over Bluetooth.")
+                        }
                     }
                 }
 
@@ -398,7 +566,7 @@ struct TinySetupView: View {
                         } label: {
                             if enrolling { ProgressView() } else { Text("Set up") }
                         }
-                        .disabled((!isVoice && ssid.isEmpty) || enrolling || session.token == nil)
+                        .disabled((!isVoice && wifi.networks.isEmpty) || enrolling || session.token == nil)
                         if session.token == nil {
                             Text("Log in first — setup enrolls the device to your tiny.")
                                 .font(.caption).foregroundStyle(.secondary)
@@ -450,33 +618,46 @@ struct TinySetupView: View {
             ? ["mic", "wake", "imu", "ble"]
             : ["camera", "mic", "tof", "imu", "ble", "wifi"]
 
-        guard let r: [String: Any] = try? await Api.post("/api/devices", token: token, body: [
-            "name": beacon.name,
-            "platform": platform,
-            "kind": "daemon",
-            "capabilities": caps,
-        ]),
-            let deviceId = r["device_id"] as? String,
-            let deviceToken = r["device_token"] as? String
-        else {
-            error = "Could not enroll the device — check your connection and login."
+        // ⚠️ do/catch, not `try?`. The thrown ApiError is the only thing that
+        // knows whether the server DECIDED against this enrolment or never
+        // answered at all, and those two have different remedies — see
+        // `EnrollOutcome`, which owns every sentence this can end in.
+        let outcome: EnrollOutcome
+        do {
+            outcome = EnrollOutcome.read(try await Api.post("/api/devices", token: token, body: [
+                "name": beacon.name,
+                "platform": platform,
+                "kind": "daemon",
+                "capabilities": caps,
+            ]))
+        } catch let thrown {
+            // Named, because the implicit `error` would shadow this view's own
+            // `@State error` and the next line assigns to that one.
+            outcome = EnrollOutcome.read(error: thrown)
+        }
+        guard case .enrolled(let deviceId, let deviceToken) = outcome else {
+            error = outcome.message
             prov.cancel()
             return
         }
 
-        // Identity only for the Voice: it has no radio that could use ssid/key,
-        // and the firmware ignores those keys. Same chunked-JSON contract either
-        // way, which is why one provisioner serves both boards.
-        var config: [String: String] = [
+        // Identity only for the Voice: it has no radio that could use a network
+        // list, and its 256-byte buffer would refuse one after it crossed the air.
+        // Same chunked-JSON contract either way, which is why one provisioner
+        // serves both boards.
+        let config: [String: String] = [
             "device_id": deviceId,
             "token": deviceToken,
             "name": beacon.name,
         ]
-        if !isVoice {
-            config["ssid"] = ssid
-            config["key"] = password
-        }
-        prov.send(config: config, limit: isVoice ? tinyConfigLimitVoice : tinyConfigLimitVision)
+        let planned = isVoice
+            ? []
+            : WifiNetworks.fit(wifi.networks,
+                               identity: config,
+                               budget: tinyConfigLimitVision).sent
+        prov.send(config: config,
+                  networks: planned,
+                  limit: isVoice ? tinyConfigLimitVoice : tinyConfigLimitVision)
 
         // Remember which unit is a Voice so the gateway knows to keep a BLE
         // link to it after setup — the device cannot heartbeat for itself.

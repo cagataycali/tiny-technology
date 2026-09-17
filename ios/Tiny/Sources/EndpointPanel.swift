@@ -66,6 +66,18 @@ enum EndpointTelemetry {
     /// out entirely, so an idle printer shows a short list rather than a grid of
     /// dashes.
     static func readings(_ t: [String: Any]) -> [TelemetryReading] {
+        // 🦾 An arm's payload (pose, joints_deg, tof_mm, camera, detect) shares
+        // no key with a printer's, so the printer projection below rendered the
+        // robot arm as an empty grid under its camera. Shape decides, not the
+        // device row: this function only ever sees the payload.
+        if ArmCore.isArmTelemetry(t) { return ArmCore.readings(t) }
+        // 🧠 The UNO Q (q-the-brain) answers host vitals (temp_c, load, mem, mcu_link)
+        // — again no key shared with a printer, so it gets its own projection.
+        if QBrainCore.looksLikeBrain(t) { return QBrainCore.readings(QBrainCore.decodeState(t)) }
+        // 🤖 Scout's SDK payload (battery + signal_level) and the Reachy's head{} +
+        // antennas[] — each its own projection (BodyLive.swift).
+        if BodyCore.looksLikeScout(t) { return BodyCore.readings(BodyCore.decodeScout(t)) }
+        if BodyCore.looksLikeReachy(t) { return BodyCore.readings(BodyCore.decodeReachy(t)) }
         var out: [TelemetryReading] = []
         func add(_ label: String, _ value: String?) {
             if let v = value, !v.isEmpty { out.append(TelemetryReading(label: label, value: v)) }
@@ -101,7 +113,12 @@ enum EndpointTelemetry {
     /// Is the machine mid-job? Drives the accent tint on the state row and the
     /// live badge, so a running printer reads differently at a glance.
     static func isRunning(_ t: [String: Any]?) -> Bool {
-        ((t?["gcode_state"] as? String) ?? "").uppercased() == "RUNNING"
+        if let t, ArmCore.isArmTelemetry(t) {
+            // The arm's "mid-job": a guarded move or job is on, i.e. torque is
+            // held or a job is named. A folded arm with torque off is idle.
+            return (t["torque"] as? Bool) == true || t["job"] is [String: Any] || t["job"] is String
+        }
+        return ((t?["gcode_state"] as? String) ?? "").uppercased() == "RUNNING"
     }
 
     /// The one-line note for a failed poll.
@@ -279,7 +296,7 @@ struct EndpointPanel: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(r.label).font(.caption2).foregroundStyle(.secondary)
                             Text(r.value).font(.caption.monospaced())
-                                .foregroundStyle(r.label == "state" && running ? accent : Color.primary)
+                                .foregroundStyle((r.label == "state" || r.label == "pose") && running ? accent : Color.primary)
                                 .lineLimit(1)
                         }
                     }

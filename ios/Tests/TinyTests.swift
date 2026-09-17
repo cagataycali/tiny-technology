@@ -4,6 +4,8 @@
  */
 import Testing
 import Foundation
+// SwiftUI: SidebarVisibilityTests asserts on NavigationSplitViewVisibility.
+import SwiftUI
 @testable import Tiny
 
 // ── MarkdownSplitter ──────────────────────────────────────────────────────
@@ -298,6 +300,12 @@ import Foundation
     }
 
     @Test func emptyOnGarbage() {
+        // Reachability note (android shows non-JSON props as raw text instead):
+        // BOTH iOS producers stringify through a validity check and substitute
+        // "{}" — ChatStreamDecoder.jsonString and ChatModel.voiceRenderUi — so a
+        // non-JSON propsJson cannot arrive here from a live call. That is the
+        // only reason dropping the text is acceptable; if a third producer
+        // appears, this becomes the same defect the table fallback below fixes.
         if case .empty = parseRenderUi("not json") {} else { Issue.record("expected .empty") }
     }
 
@@ -347,6 +355,133 @@ import Foundation
         } else {
             Issue.record("expected .titledItems from label/value shape")
         }
+    }
+
+    // ── rows that don't chart are still rows ───────────────────────────────
+    // 🏷️ THE DEFECT: every one of these landed on .empty, which drew "Interactive
+    // version on the web app" — a card refusing to show data it was holding, and
+    // pointing at a web version this client cannot know exists.
+
+    @Test func recordRowsWithoutANumberStillRender() {
+        // The ordinary case: a list of records, no numeric column, so nothing to
+        // chart. Two rows in hand; the old card showed neither.
+        let props = #"{"data":[{"name":"a","status":"ok"},{"name":"b","status":"fail"}]}"#
+        if case .table(let cols, let rows) = parseRenderUi(props) {
+            #expect(cols == ["name", "status"])
+            #expect(rows == [["a", "ok"], ["b", "fail"]])
+        } else {
+            Issue.record("expected .table from non-charting record rows")
+        }
+    }
+
+    @Test func singleRowUnderAnyKeyStillRenders() {
+        // The exact payload android's RenderUi.kt names as "iOS drops it".
+        if case .table(let cols, let rows) = parseRenderUi(#"{"a":[{"x":"one"}]}"#) {
+            #expect(cols == ["x"])
+            #expect(rows == [["one"]])
+        } else {
+            Issue.record("expected .table from a lone row")
+        }
+    }
+
+    @Test func topLevelRowsWithoutANumberStillRender() {
+        // Same rule one level up: the string-list path can't match objects, so a
+        // top-level [{…},{…}] fell through to .empty too.
+        if case .table(let cols, let rows) = parseRenderUi(#"[{"name":"a"},{"name":"b"}]"#) {
+            #expect(cols == ["name"])
+            #expect(rows == [["a"], ["b"]])
+        } else {
+            Issue.record("expected .table from top-level record rows")
+        }
+    }
+
+    @Test func columnsAreTheSortedUnionAndMissingCellsAreBlank() {
+        // Rows need not agree on their keys: the union is shown, sorted, and a
+        // row missing one gets a blank cell rather than being dropped. An
+        // explicit JSON null is blank too — "<null>", NSNull's description, is
+        // what a cell prints when the coercion forgets it.
+        if case .table(let cols, let rows) = parseRenderUi(#"[{"b":1,"a":"x"},{"a":"y","c":"z","b":null}]"#) {
+            #expect(cols == ["a", "b", "c"])
+            #expect(rows == [["x", "1", ""], ["y", "", "z"]])
+        } else {
+            Issue.record("expected .table from ragged rows")
+        }
+    }
+
+    @Test func rowTableIsCappedLikeTheColumnsPathItReuses() {
+        // Untrusted agent JSON drawn as eager SwiftUI views: 6 columns, 30 rows,
+        // the same caps as the explicit {columns,rows} path. Seven keys also make
+        // the ordering assertion sharp — unsorted, the six kept would be random.
+        let wide = #"[{"g":"7","f":"6","e":"5","d":"4","c":"3","b":"2","a":"1"},"#
+                 + #"{"a":"1","b":"2","c":"3","d":"4","e":"5","f":"6","g":"7"}]"#
+        if case .table(let cols, let rows) = parseRenderUi(wide) {
+            #expect(cols == ["a", "b", "c", "d", "e", "f"])
+            #expect(rows.allSatisfy { $0.count == 6 })
+        } else {
+            Issue.record("expected .table")
+        }
+        let many = "[" + (0..<40).map { #"{"n":"r\#($0)"}"# }.joined(separator: ",") + "]"
+        if case .table(_, let rows) = parseRenderUi(many) {
+            #expect(rows.count == 30)
+            #expect(rows.first == ["r0"])   // the FIRST 30, not a random 30
+        } else {
+            Issue.record("expected .table from 40 rows")
+        }
+    }
+
+    @Test func aChartableCandidateStillWinsOverTheRowTable() {
+        // ⚠️ The fallback must not steal the card from a LATER candidate that
+        // charts: `a` has one non-numeric row, `b` is the real chart.
+        let props = #"{"a":[{"x":"one"}],"b":[{"m":"jan","v":1},{"m":"feb","v":2}]}"#
+        if case .chart(let points, _) = parseRenderUi(props) {
+            #expect(points.count == 2)
+        } else {
+            Issue.record("expected .chart from the candidate that charts")
+        }
+    }
+
+    @Test func rowsBeatLooseScalarsBesideThem() {
+        // {title:…, data:[…]} — the scalars are the meta, the array is the data
+        // (android orders these the same way). Key/value rows of just "title"
+        // would be a card about the caption instead of the content.
+        let props = #"{"title":"Report","data":[{"name":"a","status":"ok"},{"name":"b","status":"fail"}]}"#
+        if case .table(let cols, _) = parseRenderUi(props) {
+            #expect(cols == ["name", "status"])
+        } else {
+            Issue.record("expected .table, not .keyValues from the loose title")
+        }
+    }
+
+    // ── what the voice tool is allowed to claim ────────────────────────────
+
+    @Test func onlyAnUndrawableCardIsRefused() {
+        // voiceRenderUi's return is read OUT LOUD, so it may only say a card is
+        // on screen when one will draw. Every shape that draws → no refusal.
+        for props in [#"{"data":[{"label":"a","value":1},{"label":"b","value":2}]}"#,
+                      #"{"name":"tiny"}"#,
+                      #"["a","b"]"#,
+                      ##"{"markdown":"# hi"}"##,
+                      #"{"columns":["a"],"rows":[["1"]]}"#,
+                      #"{"items":[{"label":"one"}]}"#,
+                      #"{"data":[{"name":"a","status":"ok"},{"name":"b","status":"fail"}]}"#] {
+            #expect(renderUiRefusal(parseRenderUi(props)) == nil, "\(props) draws, so nothing to refuse")
+        }
+        let refusal = renderUiRefusal(parseRenderUi("{}"))
+        #expect(refusal != nil)
+        // It has to tell the agent NOT to announce the card it didn't get, or the
+        // agent describes a card the listening user cannot see.
+        #expect(refusal?.contains("No card was added") == true)
+        #expect(refusal?.contains("do not say one is on screen") == true)
+    }
+
+    @Test func theSpokenNoteNamesTheShapeThatActuallyDrew() {
+        // "here's the chart" over a table is the same mistake one size smaller.
+        #expect(renderUiShapeName(parseRenderUi(#"{"columns":["a"],"rows":[["1"]]}"#)) == "table")
+        #expect(renderUiShapeName(parseRenderUi(#"{"data":[{"name":"a","s":"ok"},{"name":"b","s":"no"}]}"#)) == "table")
+        #expect(renderUiShapeName(parseRenderUi(#"{"data":[{"label":"a","value":1},{"label":"b","value":2}]}"#)) == "chart")
+        #expect(renderUiShapeName(parseRenderUi(##"{"markdown":"# hi"}"##)) == "text")
+        #expect(renderUiShapeName(parseRenderUi(#"{"items":[{"label":"one"}]}"#)) == "list")
+        #expect(renderUiShapeName(parseRenderUi(#"{"name":"tiny"}"#)) == "key/value")
     }
 }
 
@@ -467,12 +602,6 @@ import Foundation
         guard case .err(let message) = AttachmentCodec.encodeDocument(url: tmp) else {
             Issue.record("expected .err for an oversize doc"); return
         }
-        // "2.9MB" is the CANONICAL cross-client copy: web renders the cap in MiB
-        // (`(MAX_DOCUMENT_BYTES/1024/1024).toFixed(1)` → "2.9MB") and Android's
-        // MAX_DOC_LABEL computes the same. A hardcoded "3MB" here was the exact
-        // self-contradiction Android's Attachments.kt docblock documents: the
-        // message reports the FILE's size in MiB, so a stated "3MB" limit read
-        // HIGHER than the 2.9MB file it just refused.
         #expect(message.contains("documents must be under 2.9MB"))
         #expect(message.contains(tmp.lastPathComponent))
     }
@@ -1025,6 +1154,290 @@ import Foundation
 
             TinySession().logout()
             #expect(got)
+        }
+    }
+
+    /// The `forget` tool's three outcomes (web `ForgetOutcome` parity).
+    ///
+    /// The defect: `forgetMemory` computed its answer from the FILTER — the
+    /// in-memory array shrank, so it returned `true` — while `write` swallowed
+    /// both `try?`s. The voice executor surfaced that as `{ removed: true }` to
+    /// the MODEL, which speaks it. A store that refused the write was spoken as
+    /// forgotten, and `buildContext` kept injecting the "forgotten" fact into
+    /// every later request: "I forgot your address" followed by the address,
+    /// forever (web continuity.ts:32-47 documents the identical bug).
+    ///
+    /// ⚠️ Nested inside `LocalDataScrubSuites` on purpose: these tests write to
+    /// the ONE real container, and the sibling suites call `scrubAllLocal()`.
+    /// Run in parallel with them, a scrub deletes this suite's fixture between
+    /// `addMemory` and the assertion — the exact race the parent's doc records.
+    @Suite(.serialized) struct ForgetOutcomeTests {
+        private func fresh(_ name: String) {
+            Continuity.clearMemories(name)
+            #expect(Continuity.memories(name).isEmpty)
+        }
+
+        /// A match that lands is `.forgotten` — and the fact must actually stop
+        /// reaching the model, which is the only thing that makes the claim true.
+        @Test func aMatchThatLandsIsForgottenAndLeavesTheContext() {
+            let t = "test-forget-hit"
+            fresh(t)
+            Continuity.addMemory(t, content: "lives at 12 Elm Street")
+            #expect(Continuity.buildContext(t).contains("12 Elm Street"))
+
+            #expect(Continuity.forgetOutcome(t, "elm street") == .forgotten)
+
+            #expect(Continuity.memories(t).isEmpty)
+            // The whole point: buildContext is what re-injects it every request.
+            #expect(!Continuity.buildContext(t).contains("12 Elm Street"))
+            Continuity.clearMemories(t)
+        }
+
+        /// A needle that matches nothing is `.noMatch`, NOT `.blocked` — and the
+        /// store must survive. Reporting a storage problem here sends someone to
+        /// clear app data over a typo'd match string.
+        @Test func nothingMatchedIsNoMatchAndKeepsTheStore() {
+            let t = "test-forget-miss"
+            fresh(t)
+            Continuity.addMemory(t, content: "likes tea")
+
+            #expect(Continuity.forgetOutcome(t, "coffee") == .noMatch)
+
+            #expect(Continuity.memories(t).count == 1)
+            Continuity.clearMemories(t)
+        }
+
+        /// 🔴 An empty match must never wipe the store — `match` arrives straight
+        /// from the model's forget tool call.
+        ///
+        /// ⚠️ This test passes for a reason that does NOT transfer: Swift's
+        /// `contains("")` returns FALSE, so on iOS an empty needle matches nothing
+        /// and the count check catches it even with the blank guard deleted (a
+        /// mutation confirmed that — an equivalent mutant here). On web and
+        /// Android `includes("")`/`contains("")` are TRUE, so there the guard is
+        /// the whole store's safety catch. Don't read a green here as coverage of
+        /// the shared shape; `survivorsRejectsABlankNeedle` below tests the guard
+        /// itself, and Android tests it on the surface where it bites.
+        @Test func anEmptyMatchIsNoMatchAndWipesNothing() {
+            let t = "test-forget-empty"
+            fresh(t)
+            Continuity.addMemory(t, content: "a")
+            Continuity.addMemory(t, content: "b")
+
+            #expect(Continuity.forgetOutcome(t, "") == .noMatch)
+            #expect(Continuity.forgetOutcome(t, "   ") == .noMatch)
+
+            #expect(Continuity.memories(t).count == 2)
+            Continuity.clearMemories(t)
+        }
+
+        /// The id form matches too (the swipe-to-forget row passes `m.id`).
+        @Test func anIdMatchIsForgotten() {
+            let t = "test-forget-id"
+            fresh(t)
+            Continuity.addMemory(t, content: "opaque content")
+            let id = Continuity.memories(t)[0].id
+
+            #expect(Continuity.forgetOutcome(t, id) == .forgotten)
+            #expect(Continuity.memories(t).isEmpty)
+            Continuity.clearMemories(t)
+        }
+
+        /// `forgetMemory`'s Bool is exactly "`.forgotten`", not "something
+        /// matched" — it delegates so the predicate has ONE implementation.
+        @Test func theBooleanFormIsTrueOnlyForForgotten() {
+            let t = "test-forget-bool"
+            fresh(t)
+            Continuity.addMemory(t, content: "likes tea")
+
+            #expect(Continuity.forgetMemory(t, "coffee") == false)   // .noMatch
+            #expect(Continuity.forgetMemory(t, "tea") == true)        // .forgotten
+            Continuity.clearMemories(t)
+        }
+
+        /// `addMemory` reports DURABILITY, not intent — the caller's
+        /// "remembered" claim is exactly as true as this write.
+        @Test func addMemoryReportsWhetherItLanded() {
+            let t = "test-add-verdict"
+            fresh(t)
+            #expect(Continuity.addMemory(t, content: "kept") == true)
+            #expect(Continuity.memories(t).count == 1)
+            // Nothing was stored, so the claim would be equally untrue.
+            #expect(Continuity.addMemory(t, content: "") == false)
+            #expect(Continuity.addMemory(t, content: "   ") == false)
+            #expect(Continuity.memories(t).count == 1)
+            Continuity.clearMemories(t)
+        }
+
+        /// Each outcome gets its own sentence, and only `.blocked` may claim the
+        /// memory SURVIVED — the user has already been told the fact is gone, so
+        /// that line is the only thing that corrects it.
+        @Test func onlyTheBlockedSentenceSaysTheMemorySurvived() {
+            #expect(ForgetOutcome.blocked.line.contains("still there"))
+            #expect(ForgetOutcome.forgotten.line.contains("forgotten"))
+            // A no-match is not an error and must not blame storage.
+            #expect(!ForgetOutcome.noMatch.line.contains("storage"))
+            #expect(!ForgetOutcome.noMatch.line.contains("still there"))
+            let all: [ForgetOutcome] = [.forgotten, .noMatch, .blocked]
+            #expect(Set(all.map(\.line)).count == 3)
+            #expect(all.allSatisfy { !$0.line.isEmpty })
+        }
+
+        // ---- survivors: pure, so the guard is gated without the container ----
+
+        private func mem(_ content: String) -> MemoryEntry {
+            MemoryEntry(id: String(content.prefix(4)), content: content, tags: nil, ts: 0)
+        }
+
+        /// The blank needle. Free on iOS (Swift's `contains("")` is false) and the
+        /// whole store's safety catch on web + Android, where it is true — so this
+        /// pins the SHARED shape rather than the local behaviour. Kept as an
+        /// explicit test because a "simplification" that drops the guard here
+        /// invites dropping it on the surface where it wipes everything.
+        @Test func survivorsRejectsABlankNeedle() {
+            let store = [mem("home address is 12 Oak"), mem("prefers tea")]
+            for blank in ["", " ", "\t", "\n", "   "] {
+                #expect(Continuity.survivors(store, blank) == nil)
+            }
+        }
+
+        /// nil, not an empty array: "nothing to do" must not reach the write at
+        /// all, or an untouched store gets reported as having refused.
+        @Test func survivorsIsNilWhenNothingMatched() {
+            #expect(Continuity.survivors([mem("prefers tea")], "no such thing") == nil)
+        }
+
+        @Test func survivorsKeepsOnlyTheUnmatchedAndIsCaseInsensitive() {
+            let store = [mem("home address is 12 Oak"), mem("prefers tea")]
+            #expect(Continuity.survivors(store, "ADDRESS")?.map(\.content) == ["prefers tea"])
+        }
+
+        /// The one case where an empty array IS right — "forget everything
+        /// matching aa" legitimately clears it. Distinguishable from the no-op
+        /// only because that returns nil.
+        @Test func survivorsCanLegitimatelyEmptyTheStore() {
+            #expect(Continuity.survivors([mem("aaa"), mem("aab")], "aa")?.isEmpty == true)
+        }
+
+        // ---- clipToCodePoints: the cross-surface truncation unit ----------
+
+        /// ⚠️ `prefix(n)` counts GRAPHEME CLUSTERS, so `"a"*495 + family-emoji`
+        /// is 496 characters to Swift and 506 to web/Android (measured) — a cap
+        /// of 500 cut the three surfaces in three different places, while this
+        /// file promises "byte-compatible with the web's
+        /// buildContinuityContext". Code points are the one unit all three agree
+        /// on.
+        @Test func theClipCountsCodePointsNotCharacters() {
+            // 1200 thumbs. `prefix(1000)` keeps 1000 CLUSTERS = 1000 emoji here,
+            // but web/Android keep 1000 code points = 1000 emoji too — the
+            // divergence shows up when clusters and code points differ, below.
+            let out = Continuity.clipToCodePoints(String(repeating: "👍", count: 1200), 1000)
+            #expect(out.unicodeScalars.count == 1000)
+            #expect(out == String(repeating: "👍", count: 1000))
+        }
+
+        /// The cases where a grapheme cluster is MORE than one code point — the
+        /// exact inputs on which `prefix` and `Array.from` disagree.
+        @Test func theClipSplitsClustersWhereWebAndAndroidDo() {
+            // A ZWJ family is ONE character to Swift and SEVEN code points
+            // everywhere else. Clipping must follow the code points, or iOS keeps
+            // a whole family that the other two truncate.
+            let family = String(repeating: "a", count: 495) + "👨‍👩‍👧‍👦x"
+            #expect(family.count == 497)                      // grapheme clusters (495 a + family + x)
+            #expect(family.unicodeScalars.count == 503)       // code points
+            let out = Continuity.clipToCodePoints(family, 500)
+            #expect(out.unicodeScalars.count == 500)
+            // 500 = 495 a's + the first 5 scalars of the family sequence.
+            #expect(out.utf8.count == 513)
+        }
+
+        /// 🔴 The whole point: the same input must produce the same BYTES on all
+        /// three surfaces. These expectations were measured against the web
+        /// (`Array.from`) and JVM (`codePointCount`) implementations and compared
+        /// by SHA-256 — all three matched. A divergence means one surface now
+        /// sends the model a different context section than the others.
+        @Test func theClipAgreesWithWebAndAndroidByteForByte() {
+            let cases: [(String, Int, Int)] = [
+                (String(repeating: "a", count: 498) + "👍🏽x", 500, 506),
+                (String(repeating: "a", count: 495) + "👨‍👩‍👧‍👦x", 500, 513),
+                (String(repeating: "a", count: 498) + "🇹🇷x", 500, 506),
+                (String(repeating: "a", count: 498) + "éx", 500, 501),
+                (String(repeating: "a", count: 498) + "日本x", 500, 504),
+                (String(repeating: "a", count: 499) + "👍 tail", 500, 503),
+            ]
+            for (input, max, expectedBytes) in cases {
+                let out = Continuity.clipToCodePoints(input, max)
+                #expect(out.unicodeScalars.count == max)
+                #expect(out.utf8.count == expectedBytes, "bytes for \(input.suffix(8))")
+            }
+        }
+
+        @Test func textThatFitsIsReturnedUntouched() {
+            // Including the exact-cap case: an off-by-one silently drops a
+            // character from every memory already short enough to keep whole.
+            let exact = String(repeating: "e", count: 1000)
+            #expect(Continuity.clipToCodePoints(exact, 1000) == exact)
+            #expect(Continuity.clipToCodePoints("short", 1000) == "short")
+            #expect(Continuity.clipToCodePoints("", 1000) == "")
+        }
+
+        /// The store paths must actually USE it — and a real memory round-trips
+        /// through the container, so this is behaviour, not a source scan.
+        ///
+        /// ⚠️ The input has to be one where CLUSTERS and CODE POINTS DISAGREE.
+        /// Measured: with a thumbs-only input (1 cluster = 1 code point each),
+        /// reverting this call site to `prefix(1000)` passed every assertion —
+        /// the test could not tell the defect from the fix. A ZWJ family is ONE
+        /// cluster and SEVEN code points, which is where the two part company.
+        @Test func aStoredMemoryIsClippedByCodePoints() {
+            let t = "test-clip-memory"
+            fresh(t)
+            // 995 a's + a ZWJ family + "x" = 1003 code points but only 997
+            // clusters, so `prefix(1000)` would store the string WHOLE.
+            Continuity.addMemory(t, content: String(repeating: "a", count: 995) + "👨‍👩‍👧‍👦x")
+            let stored = Continuity.memories(t)[0].content
+            #expect(stored.unicodeScalars.count == 1000)
+            // Scalar-level, deliberately: `contains("👦")` would be VACUOUS here,
+            // because inside the intact family that emoji is not a standalone
+            // Character and Swift's substring search matches whole clusters.
+            #expect(!stored.unicodeScalars.contains("\u{1F466}"),
+                    "the family's last member is past the cap but was stored")
+            #expect(!stored.hasSuffix("x"), "the tail past the cap was stored")
+            // …and the cap still holds for a plain over-long memory.
+            Continuity.clearMemories(t)
+            Continuity.addMemory(t, content: String(repeating: "👍", count: 1200))
+            #expect(Continuity.memories(t)[0].content == String(repeating: "👍", count: 1000))
+            Continuity.clearMemories(t)
+        }
+
+        @Test func aLoggedTurnIsClippedByCodePoints() {
+            let t = "test-clip-turn"
+            Continuity.clearTurnLog(t)
+            // Both halves use a cluster/code-point mismatch, for the reason above:
+            // with 1-scalar clusters, `prefix(500)` and the clip agree and this
+            // test votes for neither. q's cap is 500, a's is 800.
+            //
+            // ⚠️ The marker must be SHORT enough that the CLUSTER count stays
+            // under the cap: at 495 a's + family + a 5-char tail the string is
+            // 501 clusters, so `prefix(500)` drops the marker too and the mutant
+            // passes anyway. With a 3-char tail it is 499 clusters — `prefix`
+            // returns the string WHOLE (marker present) while the code-point clip
+            // cuts at 500 of its 505 scalars (marker gone). That gap is the test.
+            Continuity.appendTurn(t, q: String(repeating: "a", count: 495) + "👨‍👩‍👧‍👦ZQX",
+                                  a: String(repeating: "b", count: 795) + "👨‍👩‍👧‍👦YQW")
+            // iOS has no public turn-log reader, so assert through the value
+            // that actually SHIPS: buildContext is what goes to the server as
+            // extraSystem on every request (Session.swift:520).
+            let ctx = Continuity.buildContext(t) ?? ""
+            #expect(ctx.contains("Continuous Turn Log"))
+            // 500 code points = 495 a's + the family's first 5 scalars, so the
+            // marker word past the cap must be GONE from the shipped context.
+            #expect(!ctx.contains("ZQX"), "the q half was not clipped at 500 code points")
+            #expect(!ctx.contains("YQW"), "the a half was not clipped at 800 code points")
+            // And nothing arrives as a replacement character: a lone surrogate
+            // (what a UTF-16 unit-slice leaves) would surface here as U+FFFD.
+            #expect(!ctx.unicodeScalars.contains { $0.value == 0xFFFD })
+            Continuity.clearTurnLog(t)
         }
     }
 }
@@ -1747,6 +2160,100 @@ import Foundation
     }
 }
 
+// ── 🎙️ AdoptFailure ─────────────────────────────────────────────────────────
+//
+// Adopting a Nicla Voice printed ONE sentence for every way it could fail:
+// "Couldn't claim the necklace on the server. Check your connection and try
+// again." /api/devices/adopt answers a different status per cause on purpose —
+// its own comment says the caller's next move on a 404 (enroll it fresh)
+// differs from what it should do on an outage (retry) — and `try?` discarded
+// all of it. Each case below is one NEXT MOVE.
+@Suite struct AdoptFailureTests {
+    @Test("an expired session is not a connection problem")
+    func theSessionCase() {
+        #expect(AdoptFailure.classify(ApiError.http(401, "login required")) == .signedOut)
+        // Deferred to the one status table rather than restated, so an expired
+        // session reads the same here as in every other sheet.
+        #expect(AdoptFailure.signedOut.message == Api.friendlyHTTPError(401))
+        // …and the worker's wire phrase never reaches the panel.
+        #expect(!AdoptFailure.signedOut.message.contains("login required"))
+    }
+
+    @Test("a necklace that is no longer on the account is not told to retry")
+    func theRevokedCase() {
+        #expect(AdoptFailure.classify(ApiError.http(404, "device not found")) == .notInFleet)
+        let m = AdoptFailure.notInFleet.message
+        // The route's own comment names this next move: enroll it fresh.
+        #expect(m.contains("Set it up again"))
+        #expect(!m.lowercased().contains("connection"))
+        #expect(!m.lowercased().contains("try again"))
+        #expect(!m.contains("device not found"))
+    }
+
+    @Test("only an outage is reported as an outage")
+    func theOutageCase() {
+        // 503 is the route's own `registry unreachable, retryable: true`.
+        for e in [ApiError.http(503, "registry unreachable"), ApiError.http(500, nil),
+                  ApiError.http(0, nil)] {
+            #expect(AdoptFailure.classify(e) == .uncertain)
+        }
+        // A rotation whose reply was lost may still have landed, so the panel
+        // must not claim nothing happened.
+        #expect(AdoptFailure.uncertain.message.contains("may or may not have moved"))
+    }
+
+    @Test("a 2xx with no key says the handover already happened")
+    func theKeyLostCase() {
+        // `Api.request` throws `.http` for every non-2xx, so `.badResponse` out
+        // of `Api.post` can ONLY be a 2xx whose body wasn't usable.
+        #expect(AdoptFailure.classify(ApiError.badResponse) == .keyNotDelivered)
+        let m = AdoptFailure.keyNotDelivered.message
+        #expect(m.contains("moved to this phone"))
+        #expect(m.contains("Adopt again"))
+        // The one thing that provably worked must not be the thing blamed.
+        #expect(!m.lowercased().contains("connection"))
+    }
+
+    @Test("a server that explained itself keeps the floor")
+    func theRefusedCase() {
+        // 424 carries the worker's own reason for the rotation failing.
+        let worker = ApiError.http(424, "rotate failed: registry write rejected")
+        guard case .refused(let why) = AdoptFailure.classify(worker) else {
+            #expect(Bool(false), "a 424 stopped being reported as a refusal"); return
+        }
+        #expect(why.contains("rotate failed: registry write rejected"))
+        // A 400 is the route's own validation; the status table's best would be
+        // the bare number, so the body wins there too.
+        #expect(AdoptFailure.classify(ApiError.http(400, "deviceId required"))
+                    .message.contains("deviceId required"))
+    }
+
+    @Test("no failure sends the reader to look at their WiFi")
+    func nothingBlamesTheConnection() {
+        let all: [AdoptFailure] = [.signedOut, .notInFleet, .uncertain, .keyNotDelivered,
+                                   .refused("the server's own words")]
+        for f in all {
+            #expect(!f.message.contains("Check your connection"),
+                    "\(f) still blames the connection")
+        }
+        // Five causes, five distinct sentences — the defect was one sentence for
+        // all of them, so distinctness is the property under test.
+        #expect(Set(all.map(\.message)).count == all.count)
+    }
+
+    @Test("a transport failure is classified before any status is looked for")
+    func urlErrorOutranksTheCast() {
+        // URLError never produced a status. Reaching the ApiError cast first
+        // would print "Unexpected response from the server" for a request that
+        // got no response at all.
+        for code: URLError.Code in [.notConnectedToInternet, .timedOut, .cannotFindHost] {
+            #expect(AdoptFailure.classify(URLError(code)) == .uncertain)
+        }
+        #expect(AdoptFailure.classify(URLError(.timedOut)).message
+                    != ApiError.badResponse.localizedDescription)
+    }
+}
+
 @Suite struct ProfileToolParamsTests {
     // Mirrors web ProfileToolCard: params arrive as a JSON object OR a
     // stringified JSON blob — both must normalize to [String:String].
@@ -2357,138 +2864,6 @@ import Foundation
     }
 }
 
-@Suite struct MemoryForgetVerdictTests {
-
-    private let listed = ["100", "101", "102"]
-
-    // ── the list can see ──────────────────────────────────────────────────
-
-    @Test("a memory that is gone says nothing — even when the DELETE 404'd")
-    func goneIsGone() {
-        // The headline defect. 404 = "no memory with id 100": already closed
-        // elsewhere, or superseded by the agent. The list agrees it is gone.
-        let v = ForgetVerdict.message(
-            id: "100",
-            serverSaid: Api.httpMessage(404, "no memory with id 100"),
-            reloaded: .loaded,
-            listed: ["101", "102"])
-        #expect(v == nil, "a memory the list no longer holds must not carry a red caption")
-    }
-
-    @Test("a memory still listed after the reload is reported as still there")
-    func stillListedIsHonest() {
-        let v = ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loaded, listed: listed)
-        #expect(v == ForgetVerdict.stillThere)
-        // Even a 2xx does not get to claim success over a list that disagrees.
-        #expect(v != nil)
-    }
-
-    @Test("when it is still there, the server's own sentence is the better one")
-    func theServerExplainsWhenItCan() {
-        // inc 29 put copy written for a HUMAN in the 400 body precisely so a
-        // client could show it; iOS was reading only the status code.
-        let human = "That memory's id didn't come through, so nothing was deleted. Reload Memory and try the swipe again."
-        let v = ForgetVerdict.message(
-            id: "100", serverSaid: Api.httpMessage(400, human), reloaded: .loaded, listed: listed)
-        #expect(v?.contains("nothing was deleted") == true)
-        #expect(v != ForgetVerdict.stillThere, "the generic retry buried an actionable refusal")
-    }
-
-    @Test("with the list readable, the status code gets no vote")
-    func theListOutranksTheCode() {
-        // The whole increment, as one assertion: hold the observation fixed and
-        // vary the transport answer — the verdict must not move.
-        for said in [nil, Api.httpMessage(404, "no memory with id 999"),
-                     Api.httpMessage(500, "boom"), "The Internet connection appears to be offline."] {
-            #expect(ForgetVerdict.message(id: "999", serverSaid: said, reloaded: .loaded,
-                                          listed: listed) == nil,
-                    "absent from the list is absent, whatever the DELETE reported")
-        }
-    }
-
-    @Test("an id is matched exactly, so 10 is not 100")
-    func idsMatchWhole() {
-        // Guards against the classic slip of asking a joined string whether it
-        // "contains" the id: "10" is a substring of "100" and of "102".
-        #expect(ForgetVerdict.message(id: "10", serverSaid: nil, reloaded: .loaded,
-                                      listed: listed) == nil)
-        #expect(ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loaded,
-                                      listed: listed) == ForgetVerdict.stillThere)
-    }
-
-    // ── the list cannot see ───────────────────────────────────────────────
-
-    @Test("a failed reload after a SUCCESSFUL delete does not invent doubt")
-    func aConfirmedDeleteIsNotUnconfirmed() {
-        // The server said 2xx. The `.failed` branch already shows why the list is
-        // stale and offers Retry; a second, contradictory caption is noise.
-        #expect(ForgetVerdict.message(id: "100", serverSaid: nil,
-                                      reloaded: .failed("memories unavailable"),
-                                      listed: listed) == nil)
-    }
-
-    @Test("a failed delete with no list to check is UNKNOWN, not a failure")
-    func noEvidenceMeansNoClaim() {
-        let v = ForgetVerdict.message(id: "100", serverSaid: "The request timed out.",
-                                      reloaded: .failed("memories unavailable"), listed: listed)
-        #expect(v != nil)
-        // It may not assert the memory survived — we did not look.
-        #expect(v?.contains("Still in your memories") == false)
-    }
-
-    @Test("a reason survives an unreadable list")
-    func theReasonIsNotLostWithTheList() {
-        let human = "That memory's id didn't come through, so nothing was deleted. Reload Memory."
-        let v = ForgetVerdict.message(id: "100", serverSaid: Api.httpMessage(400, human),
-                                      reloaded: .failed("memories unavailable"), listed: listed)
-        #expect(v?.contains("nothing was deleted") == true)
-    }
-
-    @Test("still loading is not evidence either")
-    func loadingIsNotAnObservation() {
-        // `.loading` is not a list. `listed` deliberately HOLDS the id here, so
-        // reading `.loading` as `.loaded` would answer "still there" — this is
-        // the assertion that a mid-flight state cannot answer the question the
-        // reload exists to answer.
-        #expect(ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loading,
-                                      listed: listed) == nil)
-        // A reason still gets through, exactly as with a failed reload.
-        #expect(ForgetVerdict.message(id: "100", serverSaid: "The request timed out.",
-                                      reloaded: .loading, listed: listed) == "The request timed out.")
-        // …and a blank one falls back to the honest unknown.
-        #expect(ForgetVerdict.message(id: "100", serverSaid: " ", reloaded: .loading,
-                                      listed: listed) == ForgetVerdict.unconfirmed)
-    }
-
-    @Test("a blank reason never renders as an empty label")
-    func blankIsNotAReason() {
-        // Same rule Api.serverError applies to a blank `error` field: nothing to
-        // say is not a sentence. An empty red caption is a bug with no words.
-        for blank in ["", "   ", "\n"] {
-            #expect(ForgetVerdict.message(id: "100", serverSaid: blank, reloaded: .loaded,
-                                          listed: listed) == ForgetVerdict.stillThere)
-            #expect(ForgetVerdict.message(id: "100", serverSaid: blank,
-                                          reloaded: .failed("x"),
-                                          listed: listed) == ForgetVerdict.unconfirmed)
-        }
-    }
-
-    @Test("no verdict ever reads as a confirmation")
-    func nothingClaimsSuccess() {
-        // A caption that sounds like the memory went away is the same lie the
-        // route's refusal copy is careful to avoid — silence is how success is
-        // reported here, because the row leaving the list already says it.
-        for copy in [ForgetVerdict.stillThere, ForgetVerdict.unconfirmed] {
-            #expect(!copy.lowercased().contains("forgotten"))
-            #expect(!copy.lowercased().contains("deleted"))
-            #expect(!copy.lowercased().contains("removed"))
-        }
-        // …and the one that DOES invite a retry only appears with evidence for it.
-        #expect(ForgetVerdict.stillThere.contains("try again"))
-        #expect(!ForgetVerdict.unconfirmed.contains("try again"))
-    }
-}
-
 /// The DM length cap — the client half of the fix in
 /// `tests/dm-length-parity.test.ts`.
 ///
@@ -2601,6 +2976,368 @@ import Foundation
             tag: "tiny-visit-luna", url: "/luna", title: "👀 someone visited", body: "luna") == .banner)
     }
 
+    // ── Loudness: the iOS half of the ladder ─────────────────────────────
+    //
+    // ⚠️ classifyNotify decides WHETHER to show; these decide HOW LOUDLY, and
+    // that second question had no answer here at all. `Notify.post` set
+    // `.sound = .default` for every caller, so the visit above — a nicety the
+    // worker throttles to one per 5 min per tiny precisely because it repeats —
+    // interrupted this phone exactly as hard as a refund. Android had the
+    // mirror defect with the polarity reversed (it defaulted new kinds to its
+    // SILENT channel, which is how `task-result-` arrived soundless there), so
+    // no iOS↔Android parity assertion could ever see either one: they compare
+    // the phones to each other, and both were wrong in opposite directions.
+
+    @Test func aTinyVisitIsAmbient_theOneKindThatMayBeQuiet() {
+        #expect(Notify.isAmbient(tag: "tiny-visit-luna"))
+        #expect(Notify.isAmbient(tag: "tiny-visit-"))
+    }
+
+    @Test func theKindsThisFeatureShipsAreLoud() {
+        // task-result- IS fire-and-forget use_device's delivery half: the user
+        // fires a task at the Mac, walks away, and this is the thing that tells
+        // them. It must never be the quiet one.
+        #expect(!Notify.isAmbient(tag: "task-result-task_2b7f3e0f_t123"))
+        #expect(!Notify.isAmbient(tag: "device-result-env42"))
+        #expect(!Notify.isAmbient(tag: "tiny-job-42"))
+        #expect(!Notify.isAmbient(tag: "batch-batch_abc12345"))
+        // "Silence here reads as loss" — money-events.ts, about this exact tag.
+        for kind in ["earned", "received", "withdrawn", "refunded"] {
+            #expect(!Notify.isAmbient(tag: "money-\(kind)"))
+        }
+    }
+
+    @Test func anUnknownTagIsLoud_theDefaultEveryFuturePushKindInherits() {
+        // The polarity, stated directly. A push kind added next year is born
+        // audible; the alternative is born silent, which is the bug Android had.
+        #expect(!Notify.isAmbient(tag: "tiny-notification")) // buildNotifyEnvelope's own default
+        #expect(!Notify.isAmbient(tag: "some-kind-invented-in-2027"))
+        #expect(!Notify.isAmbient(tag: ""))
+    }
+
+    @Test func theAmbientMatchIsAnchoredAtTheStart() {
+        // hasPrefix, not contains: a device result whose ticket happens to spell
+        // the nicety is still a device result.
+        #expect(!Notify.isAmbient(tag: "device-result-tiny-visit-x"))
+        #expect(!Notify.isAmbient(tag: "x-tiny-visit-luna"))
+    }
+
+    @Test func theAmbientSetIsExactlyTheOneGenuinelyAmbientKind() {
+        // Pins the SET, not just its behaviour: every prefix added here goes
+        // permanently silent on this phone, so growing the list should have to
+        // break a test and argue for itself.
+        #expect(Notify.ambientTagPrefixes == ["tiny-visit-"])
+    }
+}
+
+/// 📋 The clipboard rule — RUN, not read off source text.
+///
+/// The defect this suite exists for: `copy_to_clipboard`'s arm was
+/// `if let text = args["text"] as? String, !text.isEmpty`, so a `text` of `" "`
+/// passed the guard and a single space was written over whatever the user had
+/// (a wallet address mid-paste, a password out of a manager). Emptiness was the
+/// wrong test; blankness is the test. And because the switch then fell through
+/// to `.ran`, BOTH reporting rails vouched for it — the relay audit said "ran on
+/// the phone" and the live-voice rail answered `ok: true`, so the tiny SAID the
+/// text was copied. The clipboard is the one sink whose value the user then
+/// pastes into another program, so a wrong value is spent where this code will
+/// never see it.
+///
+/// Web solved it in `lib/chat/clipboard-write.ts` and Android ported it; these
+/// are the properties no source scan can reach — the actual verdicts, the actual
+/// truncation boundary, and that the two rails report the same decision the
+/// write made. `tests/clipboard-write-parity.test.ts` owns the cross-client
+/// wiring; this owns the arithmetic.
+@Suite struct ClipboardWriteTests {
+    // ── the destructive case, the whole reason for the port ──
+
+    @Test("a blank text is refused, because writing it would ERASE the clipboard")
+    func blankIsRefused() {
+        // ⚠️ " " is the one the old `!text.isEmpty` guard let through. It is
+        // exactly as destructive as "" — the user's clipboard is gone either way.
+        for blank in ["", " ", "   ", "\n", "\t", " \n\t "] {
+            let write = Clipboard.decide(blank)
+            #expect(write.note == nil, "a blank write was allowed: \(blank.debugDescription)")
+            guard case .refused(let error) = write else {
+                Issue.record("blank \(blank.debugDescription) was not refused")
+                continue
+            }
+            // The model reads this, so it has to say the clipboard is intact —
+            // otherwise the agent's next move is to apologise for erasing it.
+            #expect(error.contains("ERASED"))
+            #expect(error.contains("call this again with the actual text"))
+        }
+    }
+
+    @Test("the pasteboard is never handed a blank value — the arm consults the rule")
+    func blankNeverReachesTheWrite() {
+        // The property the guard got wrong, stated as the write itself: there is
+        // no input for which `decide` yields an allowed EMPTY string.
+        for raw in ["", " ", "\n", nil as Any?, NSNull(), 42, ["a": 1] as [String: Any]] {
+            if case .allowed(let text, _) = Clipboard.decide(raw) {
+                Issue.record("\(String(describing: raw)) produced an allowed write of \(text.debugDescription)")
+            }
+        }
+    }
+
+    // ── the type cases: iOS was already right, but SILENTLY right ──
+
+    @Test("a non-string is refused rather than coerced, and says the clipboard is intact")
+    func nonStringIsRefused() {
+        // The three clients each had a different wrong answer to {"text":{"a":1}}:
+        // web coerced to "[object Object]", Android's optString wrote the literal
+        // {"a":1}, iOS refused. iOS's verdict was right; what it lacked was
+        // telling anyone, which is what made it audit as a copy.
+        for bad in [42 as Any, 3.5, true, ["a", "b"], ["a": 1]] {
+            guard case .refused(let error) = Clipboard.decide(bad) else {
+                Issue.record("\(bad) was not refused")
+                continue
+            }
+            #expect(error.contains("must be a string"))
+            #expect(error.contains("the clipboard still holds what the user had"))
+        }
+    }
+
+    @Test("a JSON null is refused, not copied as the word 'null'")
+    func jsonNullIsRefused() {
+        // JSONSerialization yields NSNull for a JSON `null`, and its description
+        // is the four characters "null" — the shape that otherwise reaches a
+        // user's clipboard as a word.
+        guard case .refused(let error) = Clipboard.decide(NSNull()) else {
+            Issue.record("NSNull was not refused")
+            return
+        }
+        #expect(error.contains("no text was given"))
+        // And an absent key, which arrives as nil rather than NSNull.
+        guard case .refused = Clipboard.decide(nil) else {
+            Issue.record("a missing text argument was not refused")
+            return
+        }
+    }
+
+    // ── the cap: enforcement, and the boundary ──
+
+    @Test("the cap truncates at exactly max, and only above it")
+    func capBoundary() {
+        // Off-by-one here is the difference between a silent truncation the model
+        // describes as a whole string and a note it passes on.
+        if case .allowed(let text, let truncated) = Clipboard.decide(String(repeating: "x", count: Clipboard.max)) {
+            #expect(text.count == Clipboard.max)
+            #expect(truncated == false, "a string exactly at the cap was reported as truncated")
+        } else {
+            Issue.record("a string at the cap was refused")
+        }
+        if case .allowed(let text, let truncated) = Clipboard.decide(String(repeating: "x", count: Clipboard.max + 1)) {
+            #expect(text.count == Clipboard.max, "the cap was not enforced — the raw string was written")
+            #expect(truncated, "an over-long write was not reported as truncated")
+        } else {
+            Issue.record("an over-long string was refused instead of truncated")
+        }
+    }
+
+    @Test("a truncated write TELLS the model, in the sentence the other clients use")
+    func truncationNote() {
+        let write = Clipboard.decide(String(repeating: "x", count: Clipboard.max + 500))
+        // Word-for-word with web and Android: the model reads this, and a
+        // per-client paraphrase is how two agents come to describe the same
+        // write differently.
+        #expect(write.note == "copied, but truncated to the first 10000 characters — tell the user the rest was not copied")
+        #expect(Clipboard.decide("hello").note == "copied to the user's clipboard")
+    }
+
+    @Test("accepted text keeps its whitespace — trimming is only how blankness is DETECTED")
+    func whitespaceIsPreserved() {
+        // An indented code block and the trailing newline before a terminal paste
+        // are both meaningful. Blankness is a test, not a transformation.
+        let indented = "    let x = 1\n"
+        guard case .allowed(let text, _) = Clipboard.decide(indented) else {
+            Issue.record("indented code was refused")
+            return
+        }
+        #expect(text == indented)
+    }
+
+    // ── both reporting rails, which is where the audit lied ──
+
+    @Test("the relay audit reports the decision the WRITE made, not that the arm ran")
+    func relayAuditFollowsTheDecision() {
+        // ⚠️ THE REGRESSION THIS PINS. `Outcome` is .ran either way, so the only
+        // honest line is one that re-runs the decision — the pattern openURLLine
+        // already uses. A blank text used to read "copy_to_clipboard: ran on the
+        // phone", which the web agent relayed as a successful copy.
+        let blank = DeviceActionAudit.clipboardLine(argsJson: #"{"text":" "}"#)
+        #expect(blank.contains("NOT copied"))
+        #expect(blank.contains("ERASED"))
+        #expect(!blank.contains("ran on the phone"))
+
+        let ok = DeviceActionAudit.clipboardLine(argsJson: #"{"text":"hello"}"#)
+        #expect(ok == "copy_to_clipboard: copied to the user's clipboard")
+
+        // ⚠️ A TRUNCATED write is a SUCCESS that must carry its caveat on this
+        // rail too. Without this the line hardcodes the plain sentence, the web
+        // agent reads a clean "copied", and it describes the whole string as
+        // being on the clipboard when the last N characters are not. Found by a
+        // surviving mutant: the voice rail had this pinned and the relay rail
+        // did not, so one reader got the caveat and the other didn't.
+        let long = DeviceActionAudit.clipboardLine(
+            argsJson: "{\"text\":\"\(String(repeating: "x", count: Clipboard.max + 1))\"}")
+        #expect(long.contains("truncated to the first 10000 characters"))
+        #expect(long.contains("the rest was not copied"))
+        #expect(!long.contains("NOT copied"), "a truncated write is not a refusal")
+
+        // A wrong type and an absent key are refusals too, and the line has to
+        // name which — the model's next sentence depends on it.
+        #expect(DeviceActionAudit.clipboardLine(argsJson: #"{"text":42}"#).contains("must be a string"))
+        #expect(DeviceActionAudit.clipboardLine(argsJson: "{}").contains("no text was given"))
+        #expect(DeviceActionAudit.clipboardLine(argsJson: #"{"text":null}"#).contains("no text was given"))
+        // Unparseable args must not read as a successful copy either.
+        #expect(DeviceActionAudit.clipboardLine(argsJson: "not json").contains("NOT copied"))
+    }
+
+    @Test("the live-voice rail answers ok:false for a refusal, because the tiny SPEAKS it")
+    func voiceRailFailsARefusal() {
+        // ⚠️ Unlike a quiet-hours mute, which is the phone obeying the user, a
+        // clipboard write that never happened is the model's request UNMET. ok:true
+        // here is how a tiny comes to tell a person, out loud, that their text is
+        // ready to paste while the clipboard holds what it always held.
+        let blank = DeviceActionAudit.clipboardResult(argsJson: #"{"text":"  "}"#)
+        #expect(blank["ok"] as? Bool == false)
+        #expect((blank["error"] as? String ?? "").contains("ERASED"))
+        #expect(blank["note"] == nil, "a refusal carried a note, which reads as a copy")
+
+        let ok = DeviceActionAudit.clipboardResult(argsJson: #"{"text":"hello"}"#)
+        #expect(ok["ok"] as? Bool == true)
+        #expect(ok["note"] as? String == "copied to the user's clipboard")
+        #expect(ok["error"] == nil)
+
+        // A truncated write is a SUCCESS that must carry the caveat: the tiny
+        // says this aloud, and "copied" alone would describe the whole string.
+        let long = DeviceActionAudit.clipboardResult(
+            argsJson: "{\"text\":\"\(String(repeating: "x", count: Clipboard.max + 1))\"}")
+        #expect(long["ok"] as? Bool == true)
+        #expect((long["note"] as? String ?? "").contains("truncated"))
+    }
+
+    @Test("the two rails never disagree about the same input")
+    func railsAgree() {
+        // One decision, two readers. A second copy of the rule is how the audit
+        // comes to describe something the write didn't do.
+        for args in [#"{"text":"hello"}"#, #"{"text":" "}"#, #"{"text":42}"#, "{}",
+                     "{\"text\":\"\(String(repeating: "y", count: Clipboard.max + 9))\"}"] {
+            let line = DeviceActionAudit.clipboardLine(argsJson: args)
+            let result = DeviceActionAudit.clipboardResult(argsJson: args)
+            let copied = result["ok"] as? Bool == true
+            #expect(copied == !line.contains("NOT copied"),
+                    "the rails disagree about \(args): line=\(line) ok=\(copied)")
+            // ⚠️ And not merely the VERDICT — the SENTENCE. A boolean-only check
+            // let a mutant hardcode the plain note on one rail while the other
+            // carried the truncation caveat, so the two readers of one write were
+            // told different things about it.
+            let carried = (result["note"] as? String) ?? (result["error"] as? String) ?? ""
+            let stem = carried.hasPrefix("refused: ") ? String(carried.dropFirst(9)) : carried
+            #expect(line.hasSuffix(stem),
+                    "the rails word \(args) differently: line=\(line) carried=\(carried)")
+        }
+    }
+
+    // ── the user-facing line: the substitution risk ──
+
+    @Test("the chat line QUOTES what landed, so a substituted value is visible")
+    func chatNoteQuotesTheValue() {
+        // "Copied!" cannot surface a tiny swapping its own wallet address over the
+        // one the user meant. The value can.
+        let note = Clipboard.chatNote(argsJson: #"{"text":"0xdeadbeef"}"#)
+        #expect(note.contains("0xdeadbeef"))
+        #expect(note.hasPrefix("📋 Copied"))
+        // A refusal is shown too — the user watched a copy be asked for.
+        let refused = Clipboard.chatNote(argsJson: #"{"text":""}"#)
+        #expect(refused.contains("Nothing copied"))
+        #expect(refused.contains("unchanged"))
+    }
+
+    @Test("the preview is one line, bounded, and marks its own truncation")
+    func previewIsSingleLineAndBounded() {
+        // A multi-line preview would push the rest of the reply around; an
+        // unmarked cut is indistinguishable from the real end of a short string.
+        #expect(Clipboard.preview("a\nb\tc   d") == "a b c d")
+        let long = String(repeating: "z", count: 200)
+        let p = Clipboard.preview(long)
+        #expect(p.count == 49, "48 characters plus the ellipsis")
+        #expect(p.hasSuffix("…"))
+        #expect(Clipboard.preview("short") == "short", "a short preview must not be marked")
+    }
+
+    @Test("the truncation toast names the cap with grouped thousands, locale-pinned")
+    func toastGroupsThousands() {
+        // "10000 characters" reads as a machine's number in a sentence meant for a
+        // person; and an unpinned locale would make this sentence differ per phone
+        // (and this assertion pass or fail by region).
+        let toast = Clipboard.confirmToast(text: "hello", truncated: true)
+        #expect(toast.contains("10,000 characters"))
+        #expect(toast.contains("trimmed"))
+        #expect(!Clipboard.confirmToast(text: "hello", truncated: false).contains("trimmed"))
+    }
+
+    @Test("the cap is the number the model was promised")
+    func capIsTheSharedNumber() {
+        // Four copies of one number: this, the zod .max(10_000) the tool schema
+        // describes to the model, Android's CLIPBOARD_MAX, and web's. The parity
+        // suite keeps them equal; this pins iOS's.
+        #expect(Clipboard.max == 10_000)
+    }
+}
+
+/// 🔔 The fleet traces — the three notifications the phone posts about things it
+/// did while nobody was watching (a re-enrollment it healed on its own, a web
+/// agent that reached it in the background, a recording that agent took).
+///
+/// ⚠️ ANDROID'S OWN DOCSTRING DESCRIBED THESE AS SILENT, CITING IOS AS THE
+/// MODEL: `RelayNotifier.notifyFleetTrace` says "Silent by design (activity
+/// channel is LOW) — a record, not an interruption", and routes all three to
+/// `CHANNEL_ACTIVITY`. iOS, the surface it claims to mirror, dinged every one
+/// of them — because it had no way not to. The defect was findable only by
+/// reading what the OTHER phone said about this one.
+@Suite struct FleetTraceLoudnessTests {
+    private let source: String = {
+        // Read from source: these are `Notify.post` CALL SITES, and the thing
+        // being asserted is which argument they pass — not a return value any
+        // unit test can observe without a live notification centre.
+        let here = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+        let path = here.appendingPathComponent("Tiny/Sources/Session.swift")
+        return (try? String(contentsOf: path, encoding: .utf8)) ?? ""
+    }()
+
+    @Test func theSourceWasActuallyRead() {
+        // A slicer that returns "" passes every `contains` check below forever.
+        #expect(source.count > 10_000)
+        #expect(source.contains("func handleNotifyEnvelope"))
+    }
+
+    @Test func allThreeFleetTracesArePostedAmbient() {
+        // Each is the phone reporting on itself, hours after the fact. A sound
+        // for these is a phone that chirps in a pocket about nothing the user
+        // is waiting on — and Android already treats all three this way.
+        for marker in ["Device re-enrolled", "Web agent reached your phone", "Recorded for your tiny"] {
+            guard let at = source.range(of: marker) else {
+                #expect(Bool(false), "fleet trace \(marker) not found in Session.swift")
+                continue
+            }
+            // The `ambient:` argument sits within a few lines of the title.
+            let window = source[at.lowerBound...].prefix(400)
+            #expect(window.contains("ambient: true"), "\(marker) posts loud")
+        }
+    }
+
+    @Test func theRelayPushBannerStaysTagDriven_notHardcodedEitherWay() {
+        // The notify-envelope banner is the one caller whose loudness is a
+        // FUNCTION of the tag — it carries every kind the worker can push, so
+        // hardcoding it (either way) would re-break exactly what this fixes.
+        let handler = source[source.range(of: "func handleNotifyEnvelope")!.lowerBound...]
+        let branch = handler.prefix(2_000)
+        #expect(branch.contains("Notify.isAmbient(tag: tag)"))
+    }
+
     @Test func anUnknownTagStillBanners_becauseSilenceIsTheBugBeingFixed() {
         // Future push kinds must default to VISIBLE. Defaulting to silent is
         // exactly how this defect existed: an unhandled type meant nothing at
@@ -2676,8 +3413,8 @@ import Foundation
         // The exact inversion that made the list unreadable: the phone in your
         // hand heartbeated 20s ago, the laptop 5s ago, so last_seen DESC put the
         // laptop first — in a list whose whole subject is "your devices".
-        let phone = row("me", "my-iphone", online: true, seen: 1_000)
-        let laptop = row("mac", "studio-mac", online: true, seen: 2_000)
+        let phone = row("me", "owner-phone", online: true, seen: 1_000)
+        let laptop = row("mac", "cagatay-mac", online: true, seen: 2_000)
         let out = DeviceOrder.sorted([laptop, phone], myDeviceId: "me")
         #expect(out.map(\.id) == ["me", "mac"])
     }
@@ -2710,7 +3447,7 @@ import Foundation
     }
 
     @Test func groupsAreLabelledAndEmptyOnesAreDropped() {
-        let phone = row("me", "my-iphone", online: true, seen: 900, platform: "ios-arm64")
+        let phone = row("me", "owner-phone", online: true, seen: 900, platform: "ios-arm64")
         let printer = row("p1", "bambu", online: nil, seen: nil, kind: "endpoint", platform: "")
         let groups = DeviceOrder.grouped([printer, phone], myDeviceId: "me")
         #expect(groups.map(\.title) == ["This phone", "Reachable when called"])
@@ -2759,8 +3496,8 @@ import Foundation
     /// truncated the address that row exists to show.
     @Test func noRowRepeatsTheSectionHeaderAboveIt() {
         let rows = [
-            row("me", "my-iphone", online: true, seen: 5, platform: "ios-arm64"),
-            row("on", "studio-mac", online: true, seen: 4),
+            row("me", "owner-phone", online: true, seen: 5, platform: "ios-arm64"),
+            row("on", "cagatay-mac", online: true, seen: 4),
             row("un", "bambu-p1s", online: nil, seen: nil, kind: "endpoint", platform: ""),
             row("off", "necklace", online: false, seen: 3, platform: "nicla-voice"),
         ]
@@ -2781,7 +3518,7 @@ import Foundation
                                 online: nil, lastSeen: nil,
                                 url: "https://p1s.ada.tiny.technology")
         #expect(DeviceOrder.rowLine(printer, isThisPhone: false) == "p1s.ada.tiny.technology")
-        let mac = row("m", "studio-mac", online: true, seen: 4)
+        let mac = row("m", "cagatay-mac", online: true, seen: 4)
         #expect(DeviceOrder.rowLine(mac, isThisPhone: false) == "Mac")
     }
 
@@ -2800,9 +3537,9 @@ import Foundation
     @Test func thisPhoneKeepsItsWordBecauseItsHeaderSaysNothingAboutPresence() {
         // "This phone" is an identity, not a state — and the state is not always
         // "online": stop heartbeating and this row is the one place that shows it.
-        let mine = row("me", "my-iphone", online: true, seen: 5, platform: "ios-arm64")
+        let mine = row("me", "owner-phone", online: true, seen: 5, platform: "ios-arm64")
         #expect(DeviceOrder.rowLine(mine, isThisPhone: true) == "online · iOS")
-        let stale = row("me", "my-iphone", online: false, seen: 5, platform: "ios-arm64")
+        let stale = row("me", "owner-phone", online: false, seen: 5, platform: "ios-arm64")
         #expect(DeviceOrder.rowLine(stale, isThisPhone: true).hasPrefix("seen "))
     }
 
@@ -3077,10 +3814,10 @@ import Foundation
     @Test func anOfflineRowSpeaksItsLastSeenNotTheWordOffline() {
         // The whole reason `DevicePresence.label` takes a date: "3 minutes ago"
         // and "in March" are both "offline" otherwise.
-        let old = row("studio-mac", "darwin-arm64", online: false, seen: 1_000,
+        let old = row("cagatay-mac", "darwin-arm64", online: false, seen: 1_000,
                       caps: ["flipper"])
         let spoken = DeviceOrder.spokenLabel(old, isThisPhone: false)
-        #expect(spoken.hasPrefix("studio-mac, Mac, seen "))
+        #expect(spoken.hasPrefix("cagatay-mac, Mac, seen "))
         #expect(spoken.hasSuffix(", can Flipper Zero"))
         #expect(!spoken.contains("offline"))
     }
@@ -3090,7 +3827,7 @@ import Foundation
         // a spoken row has no width, so all of them are read; and the raw tokens
         // must not be, or VoiceOver is the surface saying "bluetooth underscore
         // scan" out loud.
-        let node = row("studio-mac", "darwin-arm64",
+        let node = row("cagatay-mac", "darwin-arm64",
                        caps: ["mcp", "files", "shell", "flipper", "adb", "browse",
                               "bluetooth_scan"])
         let spoken = DeviceOrder.spokenLabel(node, isThisPhone: false)
@@ -3178,7 +3915,7 @@ import Foundation
     }
 
     @Test func theCapIsTheWorkersCap() {
-        // MAX_DEVICES_PER_USER in worker/src/devices.ts. A number
+        // MAX_DEVICES_PER_USER in chatgpt-plugin-tinyai/src/devices.ts. A number
         // this screen invented would be a promise no server keeps.
         #expect(DevicesFooter.cap == 20)
     }
@@ -3270,6 +4007,16 @@ import Foundation
 /// The claim this suite really owns: **a failed revoke says the token is still
 /// working.** That is the fact a person revoking a phone they just lost needs, and
 /// "try again" implies the opposite — that nothing has been decided yet.
+///
+/// ⚠️ …and then that sentence was said about answers that never came. A dropped
+/// connection, a worker 5xx and a 200 that isn't this route's body are not
+/// decisions: `DEVICE_REVOKE_SQL` may have run and only the reply been lost. The
+/// old rule claimed a live token for all three — the same error as the sentence it
+/// replaced, pointing the reader the same wrong way, and this time in the
+/// expensive direction (a lost phone reported as still having access). See
+/// `RevokeFailure.decided`; the rule and both leads are byte-shared with
+/// lib/devices/revoke-message.ts and Android's `RevokeFailure` (pinned in
+/// tests/revoke-message.test.ts).
 @Suite struct RevokeFailureTests {
 
     @Test("a real revoke says nothing — the row disappearing is the message")
@@ -3296,14 +4043,18 @@ import Foundation
         #expect(RevokeFailure.message(status: 401, body: ["ok": true]) != nil)
     }
 
-    @Test("every failure leads with the token, not with the request")
+    @Test("a DECIDED failure leads with the token, not with the request")
     func failureNamesTheLiveToken() {
         // ⚠️ The whole point. Someone revoking a lost phone is told what is still
         // true of that phone, before any diagnosis of the HTTP call.
+        //
+        // 4xx only, and every one of these refuses before anything is written: the
+        // route answers 401 with no session and 400 with no deviceId before it calls
+        // the worker, the worker answers 401/400 before `DEVICE_REVOKE_SQL`, and the
+        // route's 424 arm now fires only for a worker 4xx.
         for (status, body) in [(401, ["error": "login required"]),
                               (400, ["error": "deviceId required"]),
-                              (424, ["error": "revoke failed"]),
-                              (503, ["error": "aborted", "retryable": true] as [String: Any])] {
+                              (424, ["error": "revoke failed"])] {
             let msg = RevokeFailure.message(status: status, body: body)
             #expect(msg?.hasPrefix(RevokeFailure.lead) == true,
                     "status \(status) buried the outcome")
@@ -3311,12 +4062,42 @@ import Foundation
         }
     }
 
+    @Test("only a decision may claim the token survived")
+    func onlyADecisionClaimsTheTokenSurvived() {
+        // ⚠️ The other half of the same sentence, and the one that was wrong: for
+        // these the DELETE may have been received and executed — what was lost is
+        // the answer. Claiming a live token here tells someone their lost phone
+        // still has access when it may already be locked out.
+        let unknown: [(Int?, [String: Any]?)] = [
+            (nil, nil),                                              // the fetch threw
+            (0, nil),
+            (503, ["error": "aborted", "retryable": true]),          // the route's degraded arm
+            (500, ["error": "worker 500", "retryable": true]),
+            (502, nil),                                              // an HTML error page
+            (200, nil),                                              // a 200 that isn't this route
+            (200, ["ok": false, "error": "revoke failed"]),
+        ]
+        for (status, body) in unknown {
+            let msg = RevokeFailure.message(status: status, body: body) ?? ""
+            #expect(msg.hasPrefix(RevokeFailure.unconfirmedLead),
+                    "status \(String(describing: status)) claims a settled outcome")
+            #expect(!msg.localizedCaseInsensitiveContains("still works"))
+            #expect(!msg.localizedCaseInsensitiveContains("not revoked"))
+        }
+        // The rule itself, at its edges — 399 and 500 are not decisions.
+        #expect(!RevokeFailure.decided(399))
+        #expect(RevokeFailure.decided(400))
+        #expect(RevokeFailure.decided(499))
+        #expect(!RevokeFailure.decided(500))
+        #expect(!RevokeFailure.decided(0))
+    }
+
     @Test("no response is status 0, not a retry instruction")
     func noResponseUsesTheHouseCode() {
         // `try? URLSession.data` returning nil means nothing arrived — there is no
         // body to prefer, and the house table already has the words for it.
         let msg = RevokeFailure.message(status: nil, body: nil)
-        #expect(msg == RevokeFailure.lead + " " + Api.friendlyHTTPError(0))
+        #expect(msg == RevokeFailure.unconfirmedLead + " " + Api.friendlyHTTPError(0))
         #expect(msg?.localizedCaseInsensitiveContains("no response") == true)
     }
 
@@ -3328,8 +4109,10 @@ import Foundation
         // request (a 400 naming the missing field, a 424 naming the refusal).
         for (status, server) in [(401, "login required"), (400, "deviceId required"),
                                  (424, "revoke failed"), (503, "boom")] {
+            let opening = RevokeFailure.decided(status) ? RevokeFailure.lead
+                                                       : RevokeFailure.unconfirmedLead
             #expect(RevokeFailure.message(status: status, body: ["error": server])
-                    == RevokeFailure.lead + " " + Api.httpMessage(status, server))
+                    == opening + " " + Api.httpMessage(status, server))
         }
         // And a 401 does NOT tell the user to repeat an action that can only fail
         // again — it tells them what would actually fix it.
@@ -3338,16 +4121,27 @@ import Foundation
         #expect(!expired.localizedCaseInsensitiveContains("login required"))
     }
 
-    @Test("the lead is one sentence, terminated, and never diagnoses")
+    @Test("both leads are one sentence, terminated, and never diagnose")
     func leadIsWellFormed() {
         // It gets a reason appended, so it must end cleanly — this is the `· tap to
         // retry` bug from inc 9, where a fragment with no terminator was joined to
         // the board's own words.
-        #expect(RevokeFailure.lead.hasSuffix("."))
-        #expect(!RevokeFailure.lead.localizedCaseInsensitiveContains("try again"))
-        // Two spaces would mean the lead already carried its own separator.
+        for lead in [RevokeFailure.lead, RevokeFailure.unconfirmedLead] {
+            #expect(lead.hasSuffix("."))
+            #expect(!lead.localizedCaseInsensitiveContains("try again"))
+            #expect(!lead.localizedCaseInsensitiveContains("http"))
+        }
+        // Two different outcomes must not read as the same sentence.
+        #expect(RevokeFailure.lead != RevokeFailure.unconfirmedLead)
+        // Two spaces would mean a lead already carried its own separator.
         #expect(RevokeFailure.message(status: 424, body: ["error": "revoke failed"])?
                 .contains("  ") != true)
+        #expect(RevokeFailure.message(status: 503, body: ["error": "boom"])?
+                .contains("  ") != true)
+        // The hedge offers the only action that is actually safe here, and it is safe
+        // because `DEVICE_REVOKE_SQL` is an unguarded idempotent UPDATE (licensed in
+        // tests/revoke-message.test.ts, which reads the worker's SQL).
+        #expect(RevokeFailure.unconfirmedLead.localizedCaseInsensitiveContains("again is safe"))
     }
 }
 
@@ -4230,6 +5024,28 @@ import Foundation
         #expect(TinyLive.readFrameAnswer(#"{"images":[{"url":"just-a-name.jpg"}]}"#)
                 == .words(#"{"images":[{"url":"just-a-name.jpg"}]}"#))
     }
+
+    /// The Sticky (grammar ≤8) answers `screenshot` in PROSE — `{"result":
+    /// "screenshot: https://…"}` — an image answer in words' clothing. Until
+    /// the firmware ships images[] alongside result (filed, docs/ANSWERS.md
+    /// 2026-08-26), the documented prose shape renders as the picture it is.
+    @Test func stickyScreenshotProseRendersAsAnImage() {
+        let a = TinyLive.readFrameAnswer(
+            #"{"result":"screenshot: https://plugin.tiny.technology/media/abc.png"}"#)
+        #expect(a == .imageURL(URL(string: "https://plugin.tiny.technology/media/abc.png")!))
+    }
+
+    /// The prose recognizer is NARROW on purpose: only `screenshot:` + one
+    /// https URL and nothing after it. Free text that merely mentions a link,
+    /// other prefixes, http, and trailing words all stay words.
+    @Test func screenshotProseRecognizerStaysNarrow() {
+        #expect(TinyLive.screenshotProseURL("see https://x.example/a.png") == nil)
+        #expect(TinyLive.screenshotProseURL("screenshot: http://x.example/a.png") == nil)
+        #expect(TinyLive.screenshotProseURL("screenshot: https://x.example/a.png (stale)") == nil)
+        #expect(TinyLive.screenshotProseURL("screenshot failed: ESP_ERR_TIMEOUT") == nil)
+        #expect(TinyLive.screenshotProseURL("  screenshot:  https://x.example/a.png  ")
+                == URL(string: "https://x.example/a.png"))
+    }
 }
 
 // ── Remote ears: the rule the camera learned and the microphone didn't ──────
@@ -4593,6 +5409,133 @@ import Foundation
                    msg(completedScan: true), msg(completedScan: false)]
         #expect(Set(all).count == all.count)
         #expect(all.allSatisfy { !$0.isEmpty })
+    }
+}
+
+/// 💎 The two surfaces that never asked, and the sentence a model repeats as fact.
+///
+/// `BleEmptyState` was extracted for the panel caption, and three other places
+/// went on deciding for themselves: `NearbyView`'s ternary (the original bug,
+/// preserved), `adopt()`'s "Couldn't see the necklace nearby", and — worst —
+/// `scanSummary`, whose text is appended to the agent's prompt, so "No BLE
+/// devices discovered nearby." leaves the phone as a claim about the user's room.
+/// None of the three had an arm for a phone with no radio, and none knew whether
+/// a scan had ever run.
+///
+/// `obstacle` is the shared half: **nil means the phone really looked**, and only
+/// then may a caller say the room is empty in its own words.
+@Suite struct BleObstacleTests {
+    private func why(scanning: Bool = false, state: String = "poweredOn",
+                     completedScan: Bool = false) -> String? {
+        BleEmptyState.obstacle(scanning: scanning, state: state, completedScan: completedScan)
+    }
+
+    private func sit(scanning: Bool = false, state: String = "poweredOn",
+                     completedScan: Bool = false) -> BleEmptyState.Situation {
+        BleEmptyState.situation(scanning: scanning, state: state, completedScan: completedScan)
+    }
+
+    /// The whole rule in one test. A finished scan is the ONLY thing that earns
+    /// the right to be answered with "nothing is out there".
+    @Test func onlyAFinishedScanIsAllowedToReportAnEmptyRoom() {
+        #expect(why(completedScan: true) == nil)
+        // Everything else names an obstacle instead — including the two the old
+        // ternaries fell through: no radio, and a scan that never ran.
+        #expect(why(state: "unsupported") != nil)
+        #expect(why(completedScan: false) != nil)
+        #expect(why(state: "idle") != nil)
+        #expect(why(scanning: true) != nil)
+        #expect(why(state: "unauthorized") != nil)
+        #expect(why(state: "poweredOff") != nil)
+    }
+
+    /// An obstacle explains the INSTRUMENT; it must never pose as a result. The
+    /// caller's own found-nothing sentence is the only report of the room.
+    @Test func noObstacleSentencePosesAsAnAnswerAboutTheRoom() throws {
+        let all = [why(state: "unauthorized"), why(state: "poweredOff"),
+                   why(state: "unsupported"), why(scanning: true), why(state: "idle")]
+        for line in all {
+            let s = try #require(line)
+            #expect(s.lowercased().contains("phone"), "“\(s)” doesn't say whose radio")
+            // "discovered" is the found-nothing register — the agent's own word
+            // for a completed search, which an obstacle has not performed.
+            #expect(!s.lowercased().contains("discovered"), "“\(s)” reads as a search result")
+            #expect(!s.lowercased().contains("no ble devices"), "“\(s)” claims the room is empty")
+        }
+        #expect(Set(all.map { $0 ?? "" }).count == all.count, "two obstacles share a sentence")
+    }
+
+    /// Radio trouble still outranks a claimed scan on THIS side too. `scanning`
+    /// was what the old ternaries checked first, and it is the one input that can
+    /// be true while the radio is doing nothing.
+    @Test func theObstacleRanksRadioTroubleAboveAClaimedScan() {
+        #expect(why(scanning: true, state: "poweredOff")?.contains("turned off") == true)
+        #expect(why(scanning: true, state: "unauthorized")?.contains("denied") == true)
+        #expect(why(scanning: true, state: "unsupported")?.contains("no Bluetooth radio") == true)
+        // …and a claimed scan on a healthy radio is not an obstacle-free answer:
+        // it is "still scanning", never an empty room.
+        #expect(why(scanning: true, completedScan: true) != nil)
+    }
+
+    /// The two registers may differ in WORDS and never in what they claim. The
+    /// caption saying "nothing nearby" and `obstacle` returning nil are the same
+    /// verdict; if they can disagree, one surface is lying while the other is not.
+    @Test func theCaptionAndTheAgentAgreeOnWhatIsTrue() {
+        let inputs: [(Bool, String, Bool)] = [
+            (false, "poweredOn", true), (false, "poweredOn", false), (true, "poweredOn", false),
+            (false, "poweredOff", false), (false, "unauthorized", false),
+            (false, "unsupported", false), (false, "idle", false),
+            (true, "poweredOff", true), (true, "unsupported", true),
+        ]
+        for (scanning, state, done) in inputs {
+            let caption = BleEmptyState.message(scanning: scanning, state: state, completedScan: done)
+            let obstacle = BleEmptyState.obstacle(scanning: scanning, state: state, completedScan: done)
+            let captionClaimsEmpty = caption.lowercased().contains("nothing nearby")
+            #expect(captionClaimsEmpty == (obstacle == nil),
+                    "\(state)/scanning:\(scanning)/done:\(done) — caption “\(caption)” vs obstacle “\(obstacle ?? "nil")”")
+        }
+    }
+
+    /// Six situations, and an unrecognised state is doubt rather than a default
+    /// answer: `idle` is what CoreBluetooth's `.unknown` and `.resetting` become,
+    /// and both mean the verdict has not arrived.
+    @Test func anUnknownRadioStateIsNotAnAnswer() {
+        #expect(sit(state: "idle") == .neverLooked)
+        #expect(sit(state: "idle", completedScan: true) == .lookedAndFoundNothing)
+        #expect(sit(state: "poweredOff", completedScan: true) == .radioOff)
+        #expect(sit(scanning: true) == .looking)
+        #expect(sit(state: "unsupported") == .noRadio)
+        #expect(sit(state: "unauthorized") == .noPermission)
+        #expect(sit(completedScan: true) == .lookedAndFoundNothing)
+        #expect(sit() == .neverLooked)
+    }
+}
+
+/// Which name a discovered peripheral is listed under.
+@Suite struct BleNameTests {
+    /// The regression, in the order that matters: the ADVERTISED name wins over
+    /// the cached one. CoreBluetooth's own precedence is the opposite, and it put
+    /// a provisioned necklace in the Nearby list as 'MPY NIMBLE' — measured on
+    /// air, on the one board of three that a central had ever connected to.
+    @Test func theAdvertisedNameWinsOverTheCachedOne() {
+        #expect(BleName.pick(advertised: "tiny-b3d3", cached: "MPY NIMBLE") == "tiny-b3d3")
+        #expect(BleName.pick(advertised: "tiny-b3d3", cached: nil) == "tiny-b3d3")
+    }
+
+    /// ...but the cache is not worthless. Plenty of peripherals put no local name
+    /// in the packet, and dropping to "Unnamed device" while iOS knows the name
+    /// would be a new bug in the other direction.
+    @Test func theCacheIsStillTheFallback() {
+        #expect(BleName.pick(advertised: nil, cached: "Flipper Zero") == "Flipper Zero")
+        #expect(BleName.pick(advertised: nil, cached: nil) == "Unnamed device")
+    }
+
+    /// An empty or blank local name is present-but-useless, and `??` would take
+    /// it: a board advertising "" would be listed as nothing at all.
+    @Test func aBlankNameIsNotAName() {
+        #expect(BleName.pick(advertised: "", cached: "tiny-b3d3") == "tiny-b3d3")
+        #expect(BleName.pick(advertised: "  ", cached: "tiny-b3d3") == "tiny-b3d3")
+        #expect(BleName.pick(advertised: "", cached: "") == "Unnamed device")
     }
 }
 
@@ -5136,6 +6079,154 @@ import Foundation
         ]}
         """#))
         #expect(rows.map(\.id) == ["keep"])
+    }
+
+    // ── Why the call ended ───────────────────────────────────────────────────
+    // 🔴 `voice_sessions.error` carries a reason for every abnormal end, and the
+    // worker's own docstring says what for: "the row is what the person still
+    // has tomorrow when they ask why." `CallSession` had no such field, so the
+    // reason arrived and was dropped one line before the render — and because
+    // `rows(from:)` deliberately ADMITS `status == "error"` rows, a call the
+    // voice service killed 20 seconds in drew `ada · 0:20`, identical to a
+    // 20-second call the person ended themselves. The duration is what makes
+    // them indistinguishable: a short call and a call cut short look the same
+    // when the only thing shown is how long it lasted.
+
+    @Test func aDroppedCallNoLongerReadsLikeAShortOne() throws {
+        let rows = try CallRecordingsView.rows(from: data(#"""
+        {"ok":true,"sessions":[
+          {"id":"dropped","status":"ended","duration_ms":20000,"segment_count":2,
+           "error":"upstream closed: 1011 going away"},
+          {"id":"clean","status":"ended","duration_ms":20000,"segment_count":2}
+        ]}
+        """#))
+        #expect(rows.count == 2, "the badge must not become a filter — both calls are the person's")
+        let dropped = try #require(rows.first { $0.id == "dropped" })
+        let clean = try #require(rows.first { $0.id == "clean" })
+        #expect(CallOutcome.text(status: dropped.status, error: dropped.error)
+            == "the voice service closed the connection")
+        // The ordinary hangup gets nothing: a badge on every row says nothing.
+        #expect(CallOutcome.text(status: clean.status, error: clean.error) == nil)
+    }
+
+    @Test func theWorkerTailDiagnosticNeverReachesThePerson() {
+        // ⚠️ The recorded reason is written for the worker tail — a close code,
+        // or an arbitrary upstream exception message. Keeping the column
+        // diagnostic is right; painting it onto someone's call list would be the
+        // same wrong-surface mistake pointing the other way.
+        let closed = try? #require(CallOutcome.text(status: "ended", error: "upstream closed: 1011 going away"))
+        #expect(closed?.contains("1011") == false)
+        #expect(closed?.contains("going away") == false)
+        let errored = CallOutcome.text(status: "error", error: "upstream error: TypeError: x is not a function")
+        #expect(errored == "the voice service dropped")
+        #expect(errored?.contains("TypeError") == false)
+    }
+
+    @Test func theArmsThatMeasuredTheirOwnCauseSayWhatTheyMeasured() {
+        #expect(CallOutcome.text(status: "ended", error: "the client went silent")
+            == "we stopped hearing this device")
+        #expect(CallOutcome.text(status: "ended", error: "the call hit the maximum length")
+            == "the call hit the maximum length")
+        #expect(CallOutcome.text(status: "error", error: "the client socket errored")
+            == "this device's connection dropped")
+    }
+
+    @Test func anUnrecognisedReasonStillSaysTheCallBrokeAndNamesNoCause() {
+        // A teardown arm added upstream, or a row from a build this map predates.
+        // ⚠️ Falling back to SILENCE here is the original defect returning: the
+        // reason would once again have no reader. `unknown` is the honest middle.
+        let out = CallOutcome.text(status: "ended", error: "the flux capacitor desynced")
+        #expect(out == CallOutcome.unknown)
+        #expect(out?.contains("flux") == false, "it echoed the diagnostic it did not understand")
+        // Every error row written before the reason was wired looks like this,
+        // and the status alone is more than the row said yesterday.
+        #expect(CallOutcome.text(status: "error", error: nil) == CallOutcome.unknown)
+    }
+
+    @Test func anOrdinaryCallIsNotBadged() {
+        #expect(CallOutcome.text(status: "ended", error: nil) == nil)
+        #expect(CallOutcome.text(status: "ended", error: "") == nil)
+        // ⚠️ Whitespace is not a reason: `"upstream closed: "` with an empty
+        // code and reason trims to a bare prefix, and a row of blanks must not
+        // raise a warning on a call that ended fine.
+        #expect(CallOutcome.text(status: "ended", error: "   ") == nil)
+    }
+
+    // ── 🔇 Why a recording won't play (lib/voice/playback.ts's Swift twin) ──
+    // `/voice/recording/:id` STITCHES on first listen and can decline. AVPlayer
+    // handed a 413-with-JSON sets `currentItem.status = .failed`, which nothing
+    // here read — so `playingId` stayed set: a pause glyph over a transport
+    // frozen at 0:00, with the reason unread in `currentItem.error`.
+
+    @Test func aRefusalAlwaysSaysSomething() {
+        // The difference from CallOutcome.text, which returns nil for a clean
+        // call: this is called ONLY when a play failed, so silence here is the
+        // dead play button all over again.
+        for input in [nil, "", "   ", "who knows"] as [String?] {
+            #expect(CallRecordingRefusal.text(input).isEmpty == false,
+                    "a failed play said nothing")
+        }
+    }
+
+    @Test func eachRefusalTheRouteGivesHasItsOwnSentence() {
+        #expect(CallRecordingRefusal.text("call still in progress").contains("still going"))
+        #expect(CallRecordingRefusal.text("call too long to stitch").contains("too long"))
+        #expect(CallRecordingRefusal.text("no replay journaled for this session")
+                    .contains("wasn't recorded"))
+        #expect(CallRecordingRefusal.text("no audio journaled").contains("audio wasn't saved"))
+        #expect(CallRecordingRefusal.text("media store not provisioned")
+                    .contains("unavailable right now"))
+        // None of the five falls back to the generic line — that would be a
+        // covered refusal rendered as an unknown one.
+        for r in ["call still in progress", "call too long to stitch",
+                  "no replay journaled for this session", "no audio journaled",
+                  "media store not provisioned"] {
+            #expect(CallRecordingRefusal.text(r) != CallRecordingRefusal.unknown,
+                    "\(r) rendered as the generic sentence")
+        }
+    }
+
+    @Test func aWrappedReasonIsStillRecognised() {
+        // ⚠️ AVFoundation wraps the origin's body in its own description, so the
+        // reason arrives EMBEDDED rather than bare. An equality match would drop
+        // every real refusal while passing every unit test written with bare
+        // strings — which is why this test exists and why `text` uses `contains`.
+        let wrapped = "The operation couldn't be completed. (server said: call too long to stitch)"
+        #expect(CallRecordingRefusal.text(wrapped).contains("too long"))
+    }
+
+    @Test func anUnreadableRefusalNamesNoCause() {
+        #expect(CallRecordingRefusal.text("the flux capacitor desynced")
+                    == CallRecordingRefusal.unknown)
+        #expect(CallRecordingRefusal.text("the flux capacitor desynced").contains("flux") == false,
+                "the raw diagnostic reached the person")
+    }
+
+    @Test func theSegmentCountSurvivesTheDecodeAsANumber() throws {
+        // ⚠️ All three clients decoded `segment_count` and used it ONLY as `> 0`,
+        // so the number that predicts the 413 was on the row and thrown away at
+        // the filter. A `hasAudio: Bool` here would pass every other test above.
+        let rows = try CallRecordingsView.rows(from: data(#"""
+        {"ok":true,"sessions":[
+          {"id":"long","tiny_name":"tiny","status":"ended","started_at":1,"duration_ms":900000,"segment_count":30}
+        ]}
+        """#))
+        #expect(rows.count == 1)
+        #expect(rows.first?.segment_count == 30)
+        #expect(CallRecordingRefusal.tooLong(segmentCount: rows.first?.segment_count))
+    }
+
+    @Test func theSizeRefusalIsKnowableBeforeTheTap() {
+        // (n - 2) * 1_440_000 > 40_000_000 — two segments exempt because
+        // segment_count sums both directions and only the final segment per
+        // direction may be short.
+        #expect(CallRecordingRefusal.tooLong(segmentCount: 30), "30 segments cannot stitch")
+        #expect(CallRecordingRefusal.tooLong(segmentCount: 29) == false, "29 may still stitch")
+        // One-sided: a small count is never a promise the call WILL play.
+        for n in [nil, 0, 1, 2, 4] as [Int?] {
+            #expect(CallRecordingRefusal.tooLong(segmentCount: n) == false,
+                    "count \(String(describing: n)) read as too long")
+        }
     }
 }
 
@@ -5689,6 +6780,176 @@ import Foundation
     }
 }
 
+/// 📡 Finding the necklace's OWN address in whatever it said back.
+///
+/// `discoverViaRelay` asks the board `stream` and reads a LAN base out of the
+/// reply. When it comes back nil the session stays on ~2fps cloud polling for
+/// good — so every shape this fails to read is a session that streamed at 2fps
+/// with a 16fps board one hop away. The old reader required a JSON *object* with
+/// a `result` key; `lib/chat/tools/nicla.ts` proves a bare string is a real
+/// payload on this same wire, and it was being dropped with the address in it.
+@Suite struct StreamAddressTests {
+    /// What the board actually replies to `stream`.
+    @Test("the address is lifted out of the sentence around it")
+    func theRealReply() {
+        #expect(TinyLive.lanBase(in: "video http://192.168.1.207:8080/stream")
+                == "http://192.168.1.207:8080")
+    }
+
+    /// ⚠️ The shape the old reader dropped. Both spellings reach the same address,
+    /// because `RelayReply.text` is the one reader for this wire.
+    @Test("a bare-string payload carries the address just as well as an envelope")
+    func bothPayloadShapes() {
+        let said = "video http://10.0.0.5:8080/stream"
+        for payload in [said, #"{"result":"video http://10.0.0.5:8080/stream"}"#,
+                        #""video http://10.0.0.5:8080/stream""#] {
+            #expect(TinyLive.lanBase(in: RelayReply.text(payload)) == "http://10.0.0.5:8080",
+                    "\(payload) lost the address")
+        }
+    }
+
+    /// A board that answered something else is not a board with a hidden address.
+    @Test("a reply with no address is nil, not a guess")
+    func nothingToFind() {
+        for text in ["camera busy", "", "stream off", "no such command"] {
+            #expect(TinyLive.lanBase(in: text) == nil, "\(text) produced an address")
+        }
+    }
+
+    /// ⚠️ The port is required, and this is the reason: `open(base:)` appends
+    /// `/stream` to whatever it is handed, so a portless match would dial :80 —
+    /// a probe that fails after a timeout, which is worse than not trying.
+    @Test("an address without a port is not an address")
+    func thePortIsRequired() {
+        #expect(TinyLive.lanBase(in: "video http://192.168.1.207/stream") == nil)
+    }
+
+    /// It stops at the port. `open(base:)` and the UserDefaults cache both expect
+    /// a BASE, so trailing path would be re-appended to.
+    @Test("the match ends at the port, never at the path")
+    func justTheBase() {
+        #expect(TinyLive.lanBase(in: "http://192.168.1.207:8080/stream?x=1")
+                == "http://192.168.1.207:8080")
+        #expect(TinyLive.lanBase(in: "first http://1.2.3.4:81 then http://5.6.7.8:82")
+                == "http://1.2.3.4:81")
+    }
+
+    /// Numeric only, and https is not a LAN board — both are the Android twin's
+    /// behaviour too (`TinyLive.kt`'s `discoverBase` shares the regex verbatim),
+    /// and the board reports its DHCP address, never an mDNS name.
+    @Test("a hostname and a TLS URL are both declined")
+    func numericHttpOnly() {
+        #expect(TinyLive.lanBase(in: "video http://necklace.local:8080/stream") == nil)
+        #expect(TinyLive.lanBase(in: "video https://192.168.1.207:8080/stream") == nil)
+    }
+}
+
+/// 💎 Enrolling the necklace: what the sheet may claim, and when it must not.
+///
+/// The one irreversible step in setup mints a token returned exactly once. The
+/// sheet used to answer every ending — a lapsed session, the account cap, and a
+/// worker that timed out AFTER inserting the row — with "Could not enroll the
+/// device — check your connection and login". The third one is the expensive
+/// case: told nothing was created, the user presses Set up again and one necklace
+/// becomes two rows, the first unprovisionable forever.
+///
+/// The rule these tests hold: **a 4xx is a decision, a 5xx or a dead connection
+/// is the absence of one.**
+@Suite struct EnrollOutcomeTests {
+    /// The happy path is the ONLY one setup may continue from.
+    @Test("a reply with both fields is the one outcome that can be provisioned")
+    func theRealReply() {
+        #expect(EnrollOutcome.read(["ok": true, "device_id": "d-1", "device_token": "tind_abc"])
+                == .enrolled(id: "d-1", token: "tind_abc"))
+    }
+
+    /// ⚠️ An empty-or-blank token passes `as? String` and would be written into
+    /// the board's flash, where everything it authenticates 401s forever. A row
+    /// exists either way, so this is `unknown`, never `refused`.
+    @Test("a 2xx without a usable token is doubt, not a refusal")
+    func acceptedButUnusable() {
+        for body: [String: Any] in [["ok": true, "device_id": "d-1"],
+                                    ["ok": true, "device_id": "d-1", "device_token": ""],
+                                    ["ok": true, "device_id": "d-1", "device_token": "   "],
+                                    ["ok": true, "device_token": "tind_abc"],
+                                    [:]] {
+            #expect(EnrollOutcome.read(body) == .unknown(EnrollOutcome.unreadable),
+                    "\(body) was read as something provisionable")
+        }
+    }
+
+    /// The account cap is the refusal a real user actually meets, and the words
+    /// are the worker's own — the devices footer quotes the same sentence.
+    @Test("the cap arrives in the server's own words, not as a network problem")
+    func theCapSpeaksForItself() {
+        let why = EnrollOutcome.read(error: ApiError.http(424, "device limit reached (20) — revoke one first")).message
+        #expect(why?.contains("device limit reached (20) — revoke one first") == true)
+        #expect(why?.hasPrefix(EnrollOutcome.refusedLead) == true)
+        #expect(why?.contains("connection") == false)
+    }
+
+    /// A 401 is a decision: nothing was created, and the remedy is not a retry.
+    @Test("a lapsed session is a refusal with the house sentence")
+    func theLapsedSession() {
+        let out = EnrollOutcome.read(error: ApiError.http(401, "login required"))
+        #expect(out == .refused(Api.friendlyHTTPError(401)))
+        #expect(out.message?.contains("sign out and back in") == true)
+    }
+
+    /// ⚠️⚠️ The expensive case. Our own route answers 503 when the worker took
+    /// longer than its 10s budget — and that worker may have inserted the row.
+    @Test("a 5xx and a dead connection both leave the enrolment in doubt")
+    func theUnreportedEnrolment() {
+        let ends: [Error] = [ApiError.http(503, "upstream timeout"),
+                             ApiError.http(500, nil),
+                             URLError(.timedOut),
+                             URLError(.networkConnectionLost),
+                             ApiError.badResponse]
+        for end in ends {
+            let out = EnrollOutcome.read(error: end)
+            #expect(out.message?.hasPrefix(EnrollOutcome.unknownLead) == true,
+                    "\(end) was reported as a settled outcome")
+            #expect(out.message?.contains(EnrollOutcome.checkFleet) == true,
+                    "\(end) never told the user to look before retrying")
+        }
+    }
+
+    /// Only the doubtful case may send the user to revoke something: after a real
+    /// refusal there is nothing there, and the errand would be wasted.
+    @Test("a refusal never sends the user hunting for a row that isn't there")
+    func noWastedErrand() {
+        for status in [400, 401, 403, 404, 424, 429, 499] {
+            let out = EnrollOutcome.read(error: ApiError.http(status, nil))
+            #expect(out.message?.contains(EnrollOutcome.checkFleet) == false,
+                    "HTTP \(status) sent the user to My devices for nothing")
+        }
+    }
+
+    /// The property, not the examples: no failure is silent, and none of them is
+    /// the sentence this increment removed. (`readFleet`'s `"error": ""` shipped a
+    /// blank line past three example tests — see FleetLookupTests.)
+    @Test("every outcome that can fail says something, and none of them guesses twice")
+    func noSilentAndNoDoubleCause() {
+        var outcomes: [EnrollOutcome] = [EnrollOutcome.read([:]),
+                                         EnrollOutcome.read(error: URLError(.notConnectedToInternet))]
+        for status in [400, 401, 403, 424, 429, 500, 503] {
+            outcomes.append(EnrollOutcome.read(error: ApiError.http(status, nil)))
+            outcomes.append(EnrollOutcome.read(error: ApiError.http(status, "")))
+        }
+        for out in outcomes {
+            let why = out.message ?? ""
+            #expect(!why.isEmpty, "\(out) had nothing to say")
+            // An empty `why` would leave a dangling space where the reason goes —
+            // the tell that a sentence was assembled around nothing.
+            #expect(why == why.trimmingCharacters(in: .whitespacesAndNewlines),
+                    "\(out) padded a missing reason: “\(why)”")
+            #expect(!why.contains("  "), "\(out) joined an empty clause: “\(why)”")
+            #expect(!why.contains("connection and login"), "\(out) still names both causes")
+        }
+        #expect(EnrollOutcome.enrolled(id: "d", token: "t").message == nil)
+    }
+}
+
 /// 🎙️ A take ends when the SPEAKER stops, not when the caller's guess runs out.
 ///
 /// The wake word is the record button and handleWake asks for 10 seconds. Say the
@@ -5793,17 +7054,28 @@ import Foundation
     }
 }
 
-/// 💾 Live segment audio is bounded; a hand-made take is not.
+/// 💾 Automatic audio is bounded; a take somebody asked for is not.
 ///
-/// The necklace files a segment every ~45s for as long as its card is open, so the
-/// old rule ("never evict a row that owns a local audio file") meant unbounded disk
-/// growth on someone's phone. The bound applies to AUTOMATIC audio only, and it
-/// takes the file, never the words.
+/// Two producers file audio with nobody touching the phone: TinyLive writes a
+/// segment every ~45s while the necklace's card is open, and a wake word records up
+/// to 120s (`Config.recordOnWake` is on by default). The old rule ("never evict a
+/// row that owns a local audio file") meant unbounded disk growth from either. The
+/// bound applies to both, and it takes the file, never the words.
 @Suite struct NiclaAudioEvictionTests {
     typealias Row = (id: String, label: String, bytes: Int)
 
     func live(_ id: String, _ bytes: Int) -> Row { (id, NiclaRecorder.liveLabel, bytes) }
-    func manual(_ id: String, _ bytes: Int) -> Row { (id, "wake: hey tiny", bytes) }
+    /// A take the USER made by hand — the memo button and the panel's Record.
+    ///
+    /// ⚠️ This helper used to return `"wake: hey tiny"`, which is not a manual take
+    /// at all: `Config.recordOnWake` defaults to true, so a wake take is recorded
+    /// with nobody touching the phone. Every "a manual take is exempt" test below
+    /// was therefore asserting that AUTOMATIC audio is exempt, under a name that
+    /// said the opposite — the suite was green and pinning the bug in place.
+    func manual(_ id: String, _ bytes: Int) -> Row { (id, "memo", bytes) }
+    func wake(_ id: String, _ bytes: Int) -> Row {
+        (id, "\(NiclaRecorder.wakeLabelPrefix)hey tiny", bytes)
+    }
 
     @Test("under budget nothing is evicted")
     func underBudget() {
@@ -5874,6 +7146,53 @@ import Foundation
         #expect(evict == ["x"])
     }
 
+    @Test("a wake take is automatic audio, so the budget bounds it too")
+    func wakeIsBounded() {
+        // The defect this suite shipped with. Config.recordOnWake defaults to TRUE
+        // and a wake take extends to maxSeconds (120s), so a necklace worn all day
+        // mints minutes of audio nobody asked for — and the rule matched only
+        // `necklace-live`, leaving every one of them permanent. The budget's own
+        // doc comment said it bounded "AUTOMATIC audio" the whole time.
+        let evict = NiclaRecorder.audioEvictions(
+            rows: [wake("new", 90), wake("old", 90)], budget: 100)
+        #expect(evict == ["old"], "wake takes are exempt from the automatic-audio budget")
+    }
+
+    @Test("wake and live audio share ONE budget, rather than a budget each")
+    func wakeAndLiveShareTheBudget() {
+        // Two separately-bounded pools would each be enforced correctly and still
+        // let the total reach 2x the limit — the thing the user actually feels is
+        // the disk, which does not care which producer filled it.
+        let evict = NiclaRecorder.audioEvictions(
+            rows: [live("seg", 60), wake("take", 60)], budget: 100)
+        #expect(evict == ["take"], "the two automatic sources were charged separately")
+    }
+
+    @Test("classification is by producer, not by whether the label is known")
+    func unknownLabelsAreExempt() {
+        // A relay take's label is the agent's arbitrary `reason` string
+        // (Session.swift passes `label: reason`), so it cannot be classified from
+        // text. Defaulting an unrecognized label to EXEMPT is the safe direction:
+        // something was awaiting that recording, and the cost of being wrong is a
+        // file kept, not a file destroyed.
+        #expect(NiclaRecorder.isAutomaticAudio(label: "check the oven") == false)
+        #expect(NiclaRecorder.isAutomaticAudio(label: "memo") == false)
+        #expect(NiclaRecorder.isAutomaticAudio(label: "manual") == false)
+        #expect(NiclaRecorder.isAutomaticAudio(label: NiclaRecorder.liveLabel))
+        #expect(NiclaRecorder.isAutomaticAudio(label: "wake: alexa"))
+    }
+
+    @Test("the wake writer's prefix is the rule's prefix")
+    func wakePrefixCannotDrift() {
+        // Same drift guard as liveLabel: NiclaVoiceGateway.handleWake builds its
+        // label from wakeLabelPrefix. If the two disagreed, wake audio would be
+        // exempt from its own budget again and nothing would look broken.
+        #expect(NiclaRecorder.wakeLabelPrefix == "wake: ")
+        let evict = NiclaRecorder.audioEvictions(
+            rows: [(id: "x", label: "wake: alexa", bytes: 200)], budget: 100)
+        #expect(evict == ["x"])
+    }
+
     @Test("the budget is large enough to be worth having")
     func budgetIsHoursNotMinutes() {
         // A 45s segment measures 197KB written exactly the way SegmentAudio writes
@@ -5882,6 +7201,172 @@ import Foundation
         let segmentBytes = 197 * 1024
         let hours = Double(NiclaRecorder.liveAudioBudget / segmentBytes) * 45 / 3600
         #expect(hours >= 4, "the budget holds only \(hours)h of listening")
+    }
+}
+
+/// 🪞 One take, one row — even though it has two ids.
+///
+/// The phone mints a UUID per take; the worker's insert does its own
+/// `crypto.randomUUID()` and returns it. `postToServer` checked only `ok` and threw
+/// that id away, so `refreshFromServer`'s `Set(transcripts.map(\.id))` could never
+/// match a row against its own server copy. Every synced take came back as a SECOND
+/// row — and the twin is the worse copy (server rows carry `audioFile: nil` and a
+/// 200-char preview), so the list showed the same memo twice, once unplayable and
+/// truncated. `.task` runs the refresh on every open of the view, so this was the
+/// normal path, not an edge case.
+///
+/// Same root cause reached further: `fetchFullText` and the relay's `transcriptId`
+/// both address the server by `t.id`, which under a local UUID matched no row at all.
+@Suite struct NiclaTranscriptMergeTests {
+    func at(_ s: Double) -> Date { Date(timeIntervalSince1970: 1_700_000_000 + s) }
+
+    func row(_ id: String, _ t: Double, _ label: String = "memo", _ text: String = "buy milk",
+             seconds: Int = 10, audioFile: String? = nil, isPreview: Bool = false)
+        -> NiclaTranscript {
+        NiclaTranscript(id: id, at: at(t), seconds: seconds, label: label, text: text,
+                        audioFile: audioFile, audioUrl: nil, isPreview: isPreview)
+    }
+
+    // ── adoptServerId: the fast path, taken at POST time ──────────────────
+
+    @Test("the row takes the id the server filed it under")
+    func adopts() {
+        let rows = [row("local-uuid", 0)]
+        let out = NiclaRecorder.adoptServerId(rows: rows, local: "local-uuid", server: "srv-1")
+        #expect(out?.first?.id == "srv-1")
+    }
+
+    @Test("adoption keeps everything except the id")
+    func adoptionPreservesTheRow() {
+        // Notably the audio file: swapping the id must not cost the Play button.
+        // audioURL(for:) resolves `audioFile`, which is stored, not derived from
+        // the id — but only because it is stored, so pin it.
+        let rows = [row("local", 0, "memo", "the whole take", audioFile: "local.m4a")]
+        let out = NiclaRecorder.adoptServerId(rows: rows, local: "local", server: "srv")
+        #expect(out?.first?.audioFile == "local.m4a", "adopting the server id lost the local audio")
+        #expect(out?.first?.text == "the whole take")
+        #expect(out?.first?.at == at(0))
+    }
+
+    @Test("nothing to adopt returns nil, so the caller skips a needless save")
+    func adoptionNoOps() {
+        let rows = [row("a", 0)]
+        #expect(NiclaRecorder.adoptServerId(rows: rows, local: "a", server: "") == nil,
+                "an empty server id must never be written onto a row")
+        #expect(NiclaRecorder.adoptServerId(rows: rows, local: "a", server: "a") == nil)
+        #expect(NiclaRecorder.adoptServerId(rows: rows, local: "gone", server: "srv") == nil,
+                "a row evicted between insert and reply must not resurrect")
+    }
+
+    @Test("adoption refuses to collapse two rows onto one id")
+    func adoptionRefusesCollision() {
+        // firstIndex(where:) addresses rows by id — fetchFullText writes through it.
+        // Two rows sharing an id makes one of them permanently unreachable.
+        let rows = [row("a", 0), row("srv", 1)]
+        #expect(NiclaRecorder.adoptServerId(rows: rows, local: "a", server: "srv") == nil)
+    }
+
+    // ── mergeFetched: the rows already on the phone ───────────────────────
+
+    @Test("a take the phone recorded is not listed twice after a refresh")
+    func noDuplicateAfterRefresh() {
+        // THE DEFECT. Local row under its UUID, the same take back from the list
+        // route under the worker's id and truncated to the preview.
+        let local = [row("local-uuid", 0, "memo", "buy milk and bread", audioFile: "local-uuid.m4a")]
+        let fetched = [row("srv-1", 3, "memo", "buy milk", isPreview: true)]
+        let out = NiclaRecorder.mergeFetched(local: local, fetched: fetched)
+        #expect(out.count == 1, "the refresh listed the same take twice")
+        #expect(out.first?.id == "srv-1", "the surviving row cannot be fetched or deduped by id")
+        #expect(out.first?.text == "buy milk and bread", "the server's preview overwrote the full text")
+        #expect(out.first?.audioFile == "local-uuid.m4a", "the merge cost the row its Play button")
+        #expect(out.first?.isPreview == false)
+    }
+
+    @Test("a transcript this phone has never seen is still added")
+    func genuinelyNewRowsArrive() {
+        // The whole point of refreshing: another device's takes, and this phone's
+        // own history after a reinstall. Deduping must not become dropping.
+        let out = NiclaRecorder.mergeFetched(
+            local: [row("a", 0, "memo", "mine")],
+            fetched: [row("srv-b", 500, "memo", "from the other phone")])
+        #expect(out.count == 2)
+        #expect(out.contains { $0.id == "srv-b" })
+    }
+
+    @Test("an id already known is skipped without a content check")
+    func idMatchStillWins() {
+        // Post-fix takes have adopted the server id at POST time, so this is the
+        // common case, and it must not depend on the text matching — a row whose
+        // full text was already fetched no longer looks like its own preview.
+        let out = NiclaRecorder.mergeFetched(
+            local: [row("srv-1", 0, "memo", "the full sixteen-kilobyte text")],
+            fetched: [row("srv-1", 0, "memo", "the full sixteen")])
+        #expect(out.count == 1)
+        #expect(out.first?.text == "the full sixteen-kilobyte text")
+    }
+
+    @Test("a different take with the same words is NOT merged away")
+    func differentTakesSurvive() {
+        // Saying "buy milk" twice on different days is two recordings. Merging them
+        // would silently destroy one, which is worse than listing one twice.
+        let out = NiclaRecorder.mergeFetched(
+            local: [row("a", 0, "memo", "buy milk")],
+            fetched: [row("srv-1", 86_400, "memo", "buy milk")])
+        #expect(out.count == 2, "a take from another day was absorbed into an unrelated row")
+    }
+
+    @Test("label and duration are part of identity, not just the text")
+    func labelAndDurationMatter() {
+        let local = [row("a", 0, "memo", "buy milk", seconds: 10)]
+        #expect(NiclaRecorder.mergeFetched(
+            local: local, fetched: [row("s", 2, "wake: hey tiny", "buy milk", seconds: 10)]).count == 2,
+            "two different producers' rows were merged")
+        #expect(NiclaRecorder.mergeFetched(
+            local: local, fetched: [row("s", 2, "memo", "buy milk", seconds: 45)]).count == 2,
+            "a 45s take was merged into a 10s one")
+    }
+
+    @Test("an empty server text matches nothing")
+    func emptyTextNeverMatches() {
+        // hasPrefix("") is true for every string, so without the guard one empty
+        // server row would absorb whichever local row happened to sit nearest.
+        let out = NiclaRecorder.mergeFetched(
+            local: [row("a", 0, "memo", "buy milk")],
+            fetched: [row("s", 1, "memo", "", seconds: 10)])
+        #expect(out.count == 2)
+    }
+
+    @Test("two look-alike takes pair off one-to-one, not many-to-one")
+    func eachLocalRowAbsorbsAtMostOne() {
+        // Two silent 10s memos a minute apart are identical in label, duration and
+        // text. Both server rows matching the same local row would drop one take.
+        let local = [row("a", 0, "memo", "(silence)"), row("b", 60, "memo", "(silence)")]
+        let fetched = [row("s-a", 2, "memo", "(silence)"), row("s-b", 62, "memo", "(silence)")]
+        let out = NiclaRecorder.mergeFetched(local: local, fetched: fetched)
+        #expect(out.count == 2, "two takes collapsed into one, or duplicated")
+        #expect(Set(out.map(\.id)) == ["s-a", "s-b"])
+    }
+
+    @Test("the time window covers the upload, and does not stretch to the next take")
+    func timeWindow() {
+        // `created` is stamped when the POST lands; `at` when the take ended. A 6MB
+        // clip uploads between them. Too narrow and the duplicate comes back; too
+        // wide and an unrelated later take gets absorbed.
+        let local = [row("a", 0, "memo", "hello")]
+        let m = { (t: Double) in
+            NiclaRecorder.mergeFetched(local: local, fetched: [self.row("s", t, "memo", "hello")]).count
+        }
+        #expect(m(120) == 1, "a slow audio upload made the row duplicate")
+        #expect(m(-30) == 1, "phone/worker clock skew made the row duplicate")
+        #expect(m(3_600) == 2, "an hour later is a different take")
+    }
+
+    @Test("an empty fetch and an empty phone both behave")
+    func degenerateInputs() {
+        #expect(NiclaRecorder.mergeFetched(local: [], fetched: []).isEmpty)
+        #expect(NiclaRecorder.mergeFetched(local: [row("a", 0)], fetched: []).count == 1)
+        #expect(NiclaRecorder.mergeFetched(local: [], fetched: [row("s", 0)]).count == 1,
+                "a fresh install must receive the server's history")
     }
 }
 
@@ -5937,5 +7422,1354 @@ import Foundation
     @Test("an empty directory collects nothing")
     func emptyDir() {
         #expect(NiclaRecorder.orphanAudio(files: [], rows: ["live-a.m4a"]).isEmpty)
+    }
+}
+
+/// The fallback rail's line has to fit the ring it is written to.
+///
+/// postToServer prefers /api/devices/transcript, which files a durable row and
+/// returns an id. When that fails it falls back to a `device_note` event — and
+/// that rail files NO row, so anything the worker truncates is gone: there is no
+/// id to fetch the rest with. It is the one path where a length mistake destroys
+/// data rather than just shortening a preview.
+///
+/// It made one: the line was `text.prefix(180)` plus the audio URL, against a cap
+/// the comment put at 240. The real cap is 300 (worker events.ts emitEvent), and
+/// the line reached 269 chars with a short label and 335 with the 80-char label
+/// TRANSCRIPT_LABEL_MAX allows. At 335 emitEvent cut the tail — which is the
+/// audio URL, the only part of the line that cannot be reconstructed.
+@Suite struct NiclaNoteDetailTests {
+    /// A real /api/media URL: 32-hex key + extension, ~70 chars.
+    let url = "https://tiny.technology/media/a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6.m4a"
+    let cap = NiclaRecorder.noteDetailMax
+
+    @Test("the line fits the ring even at the worst label and a full take")
+    func fitsAtWorstCase() {
+        // 80 chars is what the worker's own TRANSCRIPT_LABEL_MAX permits, and an
+        // agent-supplied `reason` is free text — this is not a synthetic input.
+        let d = NiclaRecorder.noteDetail(
+            label: String(repeating: "w", count: 80),
+            text: String(repeating: "x", count: 4000), audioUrl: url)
+        #expect(d.count <= cap, "emitEvent will cut \(d.count - cap) chars off the tail")
+    }
+
+    @Test("the audio URL survives — it is the part that cannot be reconstructed")
+    func urlSurvives() {
+        for label in ["memo", "wake: hey tiny", "necklace-live", String(repeating: "w", count: 80)] {
+            let d = NiclaRecorder.noteDetail(
+                label: label, text: String(repeating: "x", count: 4000), audioUrl: url)
+            #expect(d.hasSuffix(url), "a truncated media URL is a dead link, and this rail files no row")
+            #expect(d.count <= cap)
+        }
+    }
+
+    @Test("a long label is bounded rather than allowed to push the URL out")
+    func labelBounded() {
+        let d = NiclaRecorder.noteDetail(
+            label: String(repeating: "w", count: 500), text: "hello", audioUrl: url)
+        #expect(d.count <= cap)
+        #expect(d.hasSuffix(url))
+        #expect(!d.contains(String(repeating: "w", count: NiclaRecorder.notePreviewLabelMax + 1)))
+    }
+
+    @Test("speech always survives, even when label and URL are pathological")
+    func speechFloor() {
+        // The floor exists so a bad label/URL can never squeeze the actual words
+        // out entirely — a note with no speech in it tells the agent nothing.
+        let d = NiclaRecorder.noteDetail(
+            label: String(repeating: "w", count: 80),
+            text: "the roof guy comes tuesday", audioUrl: String(repeating: "u", count: 400))
+        #expect(d.contains("the roof guy comes tuesday"))
+    }
+
+    @Test("a take with no uploaded audio spends the whole budget on words")
+    func noAudioMoreWords() {
+        let withURL = NiclaRecorder.noteDetail(
+            label: "memo", text: String(repeating: "x", count: 4000), audioUrl: url)
+        let without = NiclaRecorder.noteDetail(
+            label: "memo", text: String(repeating: "x", count: 4000), audioUrl: nil)
+        #expect(without.count <= cap)
+        #expect(without.count > withURL.count - url.count,
+                "reserving the URL should not cost words on a row that has no URL")
+    }
+
+    @Test("a short take is not padded or altered")
+    func shortPassesThrough() {
+        let d = NiclaRecorder.noteDetail(label: "memo", text: "hello", audioUrl: nil)
+        #expect(d == "🎙️ memo: “hello”")
+    }
+
+    @Test("the emoji and curly quotes are counted as the worker counts them")
+    func multibyteCounted() {
+        // `detail` is capped in CHARACTERS worker-side (String.slice), and this
+        // line opens with a multi-byte emoji and wraps the speech in curly
+        // quotes — a budget computed in bytes would silently overshoot.
+        let d = NiclaRecorder.noteDetail(
+            label: "memo", text: String(repeating: "é", count: 4000), audioUrl: url)
+        #expect(d.count <= cap)
+        #expect(d.hasSuffix(url))
+    }
+}
+
+/// 🗑️ A freed recording and a recording that never existed were the same row.
+///
+/// `pruneAndSave` evicts automatic audio to stay under `liveAudioBudget` and set
+/// `audioFile = nil` — the value a text-only row already carried. So `playable()`
+/// went false, the Play button vanished, and nothing on the row said why. Meanwhile
+/// `nicla_voice_transcripts` tells the agent to say "open the tiny app to listen,
+/// never 'there is no audio'" — advice that, for an evicted segment, sends the user
+/// to a row with no button on it.
+///
+/// The same failure the `isPreview` ellipsis fixed for text, one field over:
+/// absence and loss rendered identically.
+@Suite struct NiclaAudioFreedTests {
+    func row(_ id: String, label: String = NiclaRecorder.liveLabel,
+             audioFile: String? = nil, audioUrl: String? = nil,
+             audioFreed: Bool = false) -> NiclaTranscript {
+        var t = NiclaTranscript(id: id, at: Date(timeIntervalSince1970: 1_700_000_000),
+                                seconds: 45, label: label, text: "the roof guy comes tuesday",
+                                audioFile: audioFile, audioUrl: audioUrl)
+        t.audioFreed = audioFreed
+        return t
+    }
+
+    // ── applyEvictions: the deletion and the reason are one step ──────────
+
+    @Test("an evicted row loses its file and remembers that it had one")
+    func marksTheEvicted() {
+        let out = NiclaRecorder.applyEvictions(rows: [row("a", audioFile: "a.m4a")], evict: ["a"])
+        #expect(out[0].audioFile == nil, "the file reference must be cleared — the file is gone")
+        #expect(out[0].audioFreed, "the row cannot tell the user what happened to its audio")
+    }
+
+    @Test("a row nobody evicted is untouched")
+    func leavesTheRest() {
+        let rows = [row("a", audioFile: "a.m4a"), row("b", audioFile: "b.m4a")]
+        let out = NiclaRecorder.applyEvictions(rows: rows, evict: ["b"])
+        #expect(out[0].audioFile == "a.m4a" && !out[0].audioFreed)
+        #expect(out[1].audioFile == nil && out[1].audioFreed)
+    }
+
+    @Test("a row that never had audio is not told it lost some")
+    func doesNotInventALoss() {
+        // A text-only row measures 0 bytes, so it can appear in the sized list the
+        // eviction set is chosen from. Claiming it was freed would tell the user a
+        // recording existed that never did.
+        let out = NiclaRecorder.applyEvictions(rows: [row("a", audioFile: nil)], evict: ["a"])
+        #expect(!out[0].audioFreed, "a row with no audio was marked as having lost audio")
+    }
+
+    @Test("evicting the same row twice does not change the second answer")
+    func idempotent() {
+        let once = NiclaRecorder.applyEvictions(rows: [row("a", audioFile: "a.m4a")], evict: ["a"])
+        let twice = NiclaRecorder.applyEvictions(rows: once, evict: ["a"])
+        #expect(twice == once, "pruneAndSave runs on every save — it must be stable")
+    }
+
+    @Test("the words survive eviction; only the audio goes")
+    func keepsTheText() {
+        let out = NiclaRecorder.applyEvictions(rows: [row("a", audioFile: "a.m4a")], evict: ["a"])
+        #expect(out[0].text == "the roof guy comes tuesday")
+        #expect(out[0].seconds == 45, "the duration is what the row still reports")
+    }
+
+    // ── showsAudioFreed: only where there is nothing left to play ─────────
+
+    @Test("an evicted local-only row says so")
+    func tellsTheUser() {
+        #expect(NiclaRecorder.showsAudioFreed(row("a", audioFreed: true), hasLocalAudio: false))
+    }
+
+    @Test("an uploaded row still plays, so it says nothing")
+    func silentWhenUploadedCopyRemains() {
+        // Eviction only deletes the LOCAL file. `playable()` falls back to audioUrl,
+        // so "freed for space" beside a working Play button would be a second wrong
+        // answer to the same question.
+        let t = row("a", audioUrl: "https://tiny.technology/media/abc.m4a", audioFreed: true)
+        #expect(!NiclaRecorder.showsAudioFreed(t, hasLocalAudio: false))
+    }
+
+    @Test("a row whose file is back does not claim it is gone")
+    func silentWhenLocalAudioExists() {
+        #expect(!NiclaRecorder.showsAudioFreed(row("a", audioFile: "a.m4a", audioFreed: true),
+                                               hasLocalAudio: true))
+    }
+
+    @Test("a row that never had audio stays quiet")
+    func silentForTextOnly() {
+        #expect(!NiclaRecorder.showsAudioFreed(row("a"), hasLocalAudio: false),
+                "a text-only row must not claim a recording was deleted")
+    }
+
+    // ── the decode path, where a new field has wiped the store before ─────
+
+    @Test("an index.json from before audioFreed existed still decodes")
+    func oldIndexStillDecodes() throws {
+        // `= false` on the property does NOT make the synthesized init tolerate a
+        // missing key, and loadIndex() turns any throw into [] — so a plain
+        // `decode` here is every transcript on the phone, gone. This has happened
+        // once already, when isPreview was added.
+        let old = """
+        [{"id":"local-1","at":747000000,"seconds":45,"label":"necklace-live",
+          "text":"the roof guy comes tuesday","isPreview":false}]
+        """
+        let rows = try JSONDecoder().decode([NiclaTranscript].self, from: Data(old.utf8))
+        #expect(rows.count == 1, "an older index.json no longer decodes — this is a data wipe")
+        #expect(!rows[0].audioFreed, "an old row must not claim its audio was freed")
+    }
+
+    @Test("the flag survives a save/load round trip")
+    func roundTrips() throws {
+        // pruneAndSave writes index.json immediately after applyEvictions. If the
+        // flag did not persist, the tell would last until the next launch and the
+        // row would go back to looking like it never had audio.
+        let marked = NiclaRecorder.applyEvictions(rows: [row("a", audioFile: "a.m4a")], evict: ["a"])
+        let data = try JSONEncoder().encode(marked)
+        let back = try JSONDecoder().decode([NiclaTranscript].self, from: data)
+        #expect(back[0].audioFreed, "the eviction was forgotten on reload")
+        #expect(back[0].audioFile == nil)
+    }
+
+    // ── end to end against the rule that picks the victims ────────────────
+
+    @Test("what audioEvictions chooses is what ends up marked")
+    func agreesWithTheBudgetRule() {
+        // The two halves in sequence, the way pruneAndSave runs them: a live segment
+        // over budget is freed and says so, and the hand-made memo beside it is
+        // exempt and keeps its button.
+        let rows = [row("live-new", audioFile: "1.m4a"),
+                    row("live-old", audioFile: "2.m4a"),
+                    row("memo", label: "memo", audioFile: "3.m4a")]
+        let sized = rows.map { (id: $0.id, label: $0.label, bytes: 700) }
+        let evict = NiclaRecorder.audioEvictions(rows: sized, budget: 1_000)
+        let out = NiclaRecorder.applyEvictions(rows: rows, evict: evict)
+        #expect(out[0].audioFile == "1.m4a", "the newest segment should still be playable")
+        #expect(NiclaRecorder.showsAudioFreed(out[1], hasLocalAudio: false),
+                "the over-budget segment was freed with no explanation")
+        #expect(out[2].audioFile == "3.m4a" && !out[2].audioFreed,
+                "a hand-made memo is exempt from the budget and must keep its audio")
+    }
+}
+
+// ── The forget verdict is the LIST's to give, not the status code's ────────
+//
+// `MemoryView.forget` reloaded server truth and then overwrote the conclusion
+// with a transport-derived guess (`forgetError = ok ? nil : "Couldn't forget
+// that — try again."`). The reachable case is dull: a memory already closed from
+// another device answers 404, the reload shows it GONE, and the user got a red
+// "try again" under a list the memory had already left — pointing at a row that
+// is no longer there to swipe.
+//
+// These drive the real decision, not a source scan: the point is that when the
+// reloaded list can see, the status code does not get a vote.
+
+@Suite struct MemoryForgetVerdictTests {
+
+    private let listed = ["100", "101", "102"]
+
+    // ── the list can see ──────────────────────────────────────────────────
+
+    @Test("a memory that is gone says nothing — even when the DELETE 404'd")
+    func goneIsGone() {
+        // The headline defect. 404 = "no memory with id 100": already closed
+        // elsewhere, or superseded by the agent. The list agrees it is gone.
+        let v = ForgetVerdict.message(
+            id: "100",
+            serverSaid: Api.httpMessage(404, "no memory with id 100"),
+            reloaded: .loaded,
+            listed: ["101", "102"])
+        #expect(v == nil, "a memory the list no longer holds must not carry a red caption")
+    }
+
+    @Test("a memory still listed after the reload is reported as still there")
+    func stillListedIsHonest() {
+        let v = ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loaded, listed: listed)
+        #expect(v == ForgetVerdict.stillThere)
+        // Even a 2xx does not get to claim success over a list that disagrees.
+        #expect(v != nil)
+    }
+
+    @Test("when it is still there, the server's own sentence is the better one")
+    func theServerExplainsWhenItCan() {
+        // inc 29 put copy written for a HUMAN in the 400 body precisely so a
+        // client could show it; iOS was reading only the status code.
+        let human = "That memory's id didn't come through, so nothing was deleted. Reload Memory and try the swipe again."
+        let v = ForgetVerdict.message(
+            id: "100", serverSaid: Api.httpMessage(400, human), reloaded: .loaded, listed: listed)
+        #expect(v?.contains("nothing was deleted") == true)
+        #expect(v != ForgetVerdict.stillThere, "the generic retry buried an actionable refusal")
+    }
+
+    @Test("with the list readable, the status code gets no vote")
+    func theListOutranksTheCode() {
+        // The whole increment, as one assertion: hold the observation fixed and
+        // vary the transport answer — the verdict must not move.
+        for said in [nil, Api.httpMessage(404, "no memory with id 999"),
+                     Api.httpMessage(500, "boom"), "The Internet connection appears to be offline."] {
+            #expect(ForgetVerdict.message(id: "999", serverSaid: said, reloaded: .loaded,
+                                          listed: listed) == nil,
+                    "absent from the list is absent, whatever the DELETE reported")
+        }
+    }
+
+    @Test("an id is matched exactly, so 10 is not 100")
+    func idsMatchWhole() {
+        // Guards against the classic slip of asking a joined string whether it
+        // "contains" the id: "10" is a substring of "100" and of "102".
+        #expect(ForgetVerdict.message(id: "10", serverSaid: nil, reloaded: .loaded,
+                                      listed: listed) == nil)
+        #expect(ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loaded,
+                                      listed: listed) == ForgetVerdict.stillThere)
+    }
+
+    // ── the list cannot see ───────────────────────────────────────────────
+
+    @Test("a failed reload after a SUCCESSFUL delete does not invent doubt")
+    func aConfirmedDeleteIsNotUnconfirmed() {
+        // The server said 2xx. The `.failed` branch already shows why the list is
+        // stale and offers Retry; a second, contradictory caption is noise.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: nil,
+                                      reloaded: .failed("memories unavailable"),
+                                      listed: listed) == nil)
+    }
+
+    @Test("a failed delete with no list to check is UNKNOWN, not a failure")
+    func noEvidenceMeansNoClaim() {
+        let v = ForgetVerdict.message(id: "100", serverSaid: "The request timed out.",
+                                      reloaded: .failed("memories unavailable"), listed: listed)
+        #expect(v != nil)
+        // It may not assert the memory survived — we did not look.
+        #expect(v?.contains("Still in your memories") == false)
+    }
+
+    @Test("a reason survives an unreadable list")
+    func theReasonIsNotLostWithTheList() {
+        let human = "That memory's id didn't come through, so nothing was deleted. Reload Memory."
+        let v = ForgetVerdict.message(id: "100", serverSaid: Api.httpMessage(400, human),
+                                      reloaded: .failed("memories unavailable"), listed: listed)
+        #expect(v?.contains("nothing was deleted") == true)
+    }
+
+    @Test("still loading is not evidence either")
+    func loadingIsNotAnObservation() {
+        // `.loading` is not a list. `listed` deliberately HOLDS the id here, so
+        // reading `.loading` as `.loaded` would answer "still there" — this is
+        // the assertion that a mid-flight state cannot answer the question the
+        // reload exists to answer.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: nil, reloaded: .loading,
+                                      listed: listed) == nil)
+        // A reason still gets through, exactly as with a failed reload.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: "The request timed out.",
+                                      reloaded: .loading, listed: listed) == "The request timed out.")
+        // …and a blank one falls back to the honest unknown.
+        #expect(ForgetVerdict.message(id: "100", serverSaid: " ", reloaded: .loading,
+                                      listed: listed) == ForgetVerdict.unconfirmed)
+    }
+
+    @Test("a blank reason never renders as an empty label")
+    func blankIsNotAReason() {
+        // Same rule Api.serverError applies to a blank `error` field: nothing to
+        // say is not a sentence. An empty red caption is a bug with no words.
+        for blank in ["", "   ", "\n"] {
+            #expect(ForgetVerdict.message(id: "100", serverSaid: blank, reloaded: .loaded,
+                                          listed: listed) == ForgetVerdict.stillThere)
+            #expect(ForgetVerdict.message(id: "100", serverSaid: blank,
+                                          reloaded: .failed("x"),
+                                          listed: listed) == ForgetVerdict.unconfirmed)
+        }
+    }
+
+    @Test("no verdict ever reads as a confirmation")
+    func nothingClaimsSuccess() {
+        // A caption that sounds like the memory went away is the same lie the
+        // route's refusal copy is careful to avoid — silence is how success is
+        // reported here, because the row leaving the list already says it.
+        for copy in [ForgetVerdict.stillThere, ForgetVerdict.unconfirmed] {
+            #expect(!copy.lowercased().contains("forgotten"))
+            #expect(!copy.lowercased().contains("deleted"))
+            #expect(!copy.lowercased().contains("removed"))
+        }
+        // …and the one that DOES invite a retry only appears with evidence for it.
+        #expect(ForgetVerdict.stillThere.contains("try again"))
+        #expect(!ForgetVerdict.unconfirmed.contains("try again"))
+    }
+}
+
+/// 📮 A transcript that never reached the server used to stay that way forever.
+///
+/// `postToServer` was one-shot: awaited once after the take, and if it failed —
+/// no network in a subway, a signed-out session, the worker mid-deploy — nothing
+/// tried again. `refreshFromServer` only ever pulls DOWN, so no later open could
+/// notice. The row listed, played and shared exactly like a synced one, and the
+/// words never entered the agent's context. That is the whole feature failing
+/// silently, which is why the fix has both halves: a retry, and a row that says
+/// so.
+///
+/// The dangerous direction is the OTHER one, and it is what the fixtures below
+/// are built around: a re-post mints a NEW server row, so retrying a row that
+/// did land duplicates it. Every row already on a phone decodes `filed: false`,
+/// which is why the retry runs only after the merge has had its say.
+@Suite struct NiclaUnfiledSyncTests {
+    /// `at` is explicit in every fixture: the settle window is measured from it,
+    /// so a row built with `Date()` would test the clock rather than the rule.
+    func row(_ id: String, label: String = "memo", agoSeconds: TimeInterval,
+             filed: Bool = false, text: String = "the roof guy comes tuesday",
+             seconds: Int = 45, audioFile: String? = nil) -> NiclaTranscript {
+        var t = NiclaTranscript(
+            id: id, at: Date(timeIntervalSince1970: 1_700_000_000 - agoSeconds),
+            seconds: seconds, label: label, text: text,
+            audioFile: audioFile, audioUrl: nil)
+        t.filed = filed
+        return t
+    }
+    let now = Date(timeIntervalSince1970: 1_700_000_000)
+    /// Comfortably outside the settle window (300s) so "old enough" is not the
+    /// thing under test in the cases that aren't about it.
+    let old: TimeInterval = 3_600
+
+    // ── unfiled: which rows are due for a re-post ─────────────────────────
+
+    @Test("an unfiled row past the settle window is retried")
+    func retriesTheUnfiled() {
+        let due = NiclaRecorder.unfiled(
+            rows: [row("a", agoSeconds: old)], now: now, olderThan: nil)
+        #expect(due.map(\.id) == ["a"], "a transcript the server never got was abandoned")
+    }
+
+    @Test("a filed row is never re-posted")
+    func skipsTheFiled() {
+        // The duplicate hazard. A second POST mints a second server row, and the
+        // agent then reads the same memo twice as two things that were said.
+        let due = NiclaRecorder.unfiled(
+            rows: [row("a", agoSeconds: old, filed: true)], now: now, olderThan: nil)
+        #expect(due.isEmpty, "a row the server already holds would be duplicated by a retry")
+    }
+
+    @Test("a take from seconds ago is left alone — its own POST is in flight")
+    func waitsOutTheSettleWindow() {
+        // The audio upload runs BEFORE the transcript POST, and a 6MB clip on a bad
+        // link is slow. Retrying at t+4s races the take's own request and
+        // duplicates it — the same failure as the case above, from the other end.
+        let due = NiclaRecorder.unfiled(
+            rows: [row("a", agoSeconds: 4)], now: now, olderThan: nil)
+        #expect(due.isEmpty, "a row whose first POST may still be running was retried")
+    }
+
+    @Test("the settle window IS the merge window, not a second copy of it")
+    func oneWindowNotTwo() {
+        // Both answer "could this row's POST still be landing?" — mergeFetched asks
+        // it of the server's `created`, the retry of the local `at`. Two constants
+        // would drift, and a drift means either duplicate rows or abandoned ones.
+        #expect(NiclaRecorder.postSettleSeconds == NiclaRecorder.mergeWindowAhead)
+    }
+
+    // ── The truncated-page watermark ──────────────────────────────────────
+
+    @Test("a truncated page does not condemn rows older than what it showed")
+    func respectsTheWatermark() {
+        // The server ring holds 200 and the list asks for 50, so an old local row
+        // can be filed AND absent from the answer. Retrying it on that evidence
+        // duplicates it. The fixture makes the two rules disagree: both rows are
+        // unfiled and both are old enough, so ONLY the watermark can separate them.
+        let cut = Date(timeIntervalSince1970: 1_700_000_000 - 1_000)
+        let due = NiclaRecorder.unfiled(
+            rows: [row("newer", agoSeconds: 500), row("older", agoSeconds: 5_000)],
+            now: now, olderThan: cut)
+        #expect(due.map(\.id) == ["newer"],
+                "a row older than the server's truncated page must not be retried")
+    }
+
+    @Test("a complete page makes absence real evidence")
+    func noWatermarkWhenComplete() {
+        // Same two rows, `olderThan: nil` — the server's answer was NOT cut off, so
+        // a local row missing from it really is missing upstream. If this returned
+        // one row, the watermark would be suppressing legitimate retries forever.
+        let due = NiclaRecorder.unfiled(
+            rows: [row("newer", agoSeconds: 500), row("older", agoSeconds: 5_000)],
+            now: now, olderThan: nil)
+        #expect(due.map(\.id).sorted() == ["newer", "older"])
+    }
+
+    // ── mergeFetched confirms what the server holds ───────────────────────
+
+    @Test("a row the server returns by id is marked filed")
+    func idMatchConfirms() {
+        let local = [row("srv-1", agoSeconds: old)]
+        let out = NiclaRecorder.mergeFetched(local: local, fetched: [row("srv-1", agoSeconds: old)])
+        #expect(out.count == 1)
+        #expect(out[0].filed, "the server just listed this row and the phone still thinks it's unsent")
+    }
+
+    @Test("a row matched by CONTENT is marked filed, not retried")
+    func contentMatchConfirms() {
+        // This is the case that makes the whole design safe. A row recorded before
+        // `filed` existed carries a local UUID and `filed: false`; the server's copy
+        // carries the worker's id. Without this, every such row is re-posted and
+        // the user's history doubles server-side on the first refresh after update.
+        let local = [row("local-uuid", agoSeconds: old)]
+        let server = [row("worker-id", agoSeconds: old - 60, filed: true)]
+        let out = NiclaRecorder.mergeFetched(local: local, fetched: server)
+        #expect(out.count == 1, "the same take listed twice")
+        #expect(out[0].id == "worker-id", "the row must adopt the server's id")
+        #expect(out[0].filed, "a content-matched row would be re-posted and duplicated")
+        #expect(NiclaRecorder.unfiled(rows: out, now: now, olderThan: nil).isEmpty)
+    }
+
+    @Test("a server row with no local twin arrives filed")
+    func appendedRowIsFiled() {
+        // It came FROM the server, so it is filed by definition. Marked false, the
+        // retry would post the server's own row back to the server.
+        let out = NiclaRecorder.mergeFetched(local: [], fetched: [row("srv-only", agoSeconds: old)])
+        #expect(out.count == 1 && out[0].filed)
+    }
+
+    @Test("a genuinely unsent row survives the merge still unfiled")
+    func mergeDoesNotForgive() {
+        // The merge must not mark everything: a local row the server has never seen
+        // has to come out of it still due. Different label AND text, so `sameTake`
+        // cannot pair them.
+        let local = [row("mine", label: "wake: hey tiny", agoSeconds: old, text: "call mum back")]
+        let out = NiclaRecorder.mergeFetched(
+            local: local, fetched: [row("srv-1", label: "memo", agoSeconds: old)])
+        let mine = out.first { $0.id == "mine" }
+        #expect(mine?.filed == false, "the merge marked a row the server never held")
+        #expect(NiclaRecorder.unfiled(rows: out, now: now, olderThan: nil).map(\.id) == ["mine"])
+    }
+
+    // ── The prune must not destroy what was never sent ────────────────────
+
+    @Test("the cap never drops a row the server has no copy of")
+    func pruneKeepsUnfiled() {
+        // Dropping a filed row costs nothing — it is re-fetchable forever. Dropping
+        // an unfiled one destroys the words AND the last chance to reach the agent.
+        // Fixture: `indexCap` filed rows, then one unfiled row past the cap, none
+        // with local audio — so the audio exemption cannot be what saves it.
+        var rows = (0 ..< NiclaRecorder.indexCap).map {
+            row("filed-\($0)", agoSeconds: old, filed: true)
+        }
+        rows.append(row("never-sent", agoSeconds: old))
+        let (kept, dropped) = NiclaRecorder.partitionForPrune(rows: rows, hasLocalAudio: { _ in false })
+        #expect(kept.contains { $0.id == "never-sent" },
+                "the cap destroyed the only copy of an unsent transcript")
+        #expect(dropped.isEmpty)
+    }
+
+    @Test("the cap still drops filed rows past it")
+    func pruneStillBounds() {
+        // The exemption must not become "keep everything": if this failed, the
+        // index would grow without limit and the test above would pass vacuously.
+        let rows = (0 ... NiclaRecorder.indexCap).map {
+            row("filed-\($0)", agoSeconds: old, filed: true)
+        }
+        let (kept, dropped) = NiclaRecorder.partitionForPrune(rows: rows, hasLocalAudio: { _ in false })
+        #expect(kept.count == NiclaRecorder.indexCap)
+        #expect(dropped.map(\.id) == ["filed-\(NiclaRecorder.indexCap)"])
+    }
+
+    @Test("the local-audio exemption still holds")
+    func pruneKeepsLocalAudio() {
+        // The rule that was there first, re-checked because partitionForPrune now
+        // carries both: a filed row with a playable file is kept past the cap.
+        var rows = (0 ..< NiclaRecorder.indexCap).map {
+            row("filed-\($0)", agoSeconds: old, filed: true)
+        }
+        rows.append(row("has-audio", agoSeconds: old, filed: true, audioFile: "x.m4a"))
+        let (kept, dropped) = NiclaRecorder.partitionForPrune(
+            rows: rows, hasLocalAudio: { $0.audioFile != nil })
+        #expect(kept.contains { $0.id == "has-audio" })
+        #expect(dropped.isEmpty)
+    }
+
+    // ── The row says which state it's in ──────────────────────────────────
+
+    @Test("an unsynced row tells the user")
+    func tellsTheUser() {
+        #expect(NiclaRecorder.showsUnsynced(row("a", agoSeconds: old), now: now),
+                "a row the agent cannot read looks identical to one it can")
+    }
+
+    @Test("a synced row says nothing")
+    func silentWhenFiled() {
+        #expect(!NiclaRecorder.showsUnsynced(row("a", agoSeconds: old, filed: true), now: now))
+    }
+
+    @Test("a fresh take does not flash 'not synced' while its POST runs")
+    func silentDuringSettle() {
+        #expect(!NiclaRecorder.showsUnsynced(row("a", agoSeconds: 4), now: now),
+                "the label appeared on a take whose own POST had not finished")
+    }
+
+    @Test("the tell and the retry agree on which rows are waiting")
+    func labelMatchesRetry() {
+        // Two rules reading one field; if they disagreed the app would either label
+        // rows it never retries or retry rows it never labels. Spans the window
+        // boundary in both directions on purpose.
+        let rows = [row("fresh", agoSeconds: 4), row("stale", agoSeconds: old),
+                    row("done", agoSeconds: old, filed: true)]
+        let due = Set(NiclaRecorder.unfiled(rows: rows, now: now, olderThan: nil).map(\.id))
+        let labelled = Set(rows.filter { NiclaRecorder.showsUnsynced($0, now: now) }.map(\.id))
+        #expect(due == labelled)
+        #expect(due == ["stale"])
+    }
+
+
+    // ── adoptFiling: the id and the confirmation are one step ──────────────
+
+    @Test("a successful POST renames the row AND marks it filed")
+    func adoptFilingDoesBoth() {
+        let out = NiclaRecorder.adoptFiling(
+            rows: [row("local-uuid", agoSeconds: old)], local: "local-uuid", server: "srv-1")
+        #expect(out[0].id == "srv-1", "the server's id is what ?id= and transcriptId need")
+        #expect(out[0].filed, "the row will be re-posted on the next refresh and duplicated")
+    }
+
+    @Test("filed is set even when the rename is refused")
+    func adoptFilingWhenRenameRefused() {
+        // adoptServerId returns nil when the server id is already present on another
+        // row — but the POST DID land, so the local row is filed either way. Missing
+        // this, the row is retried forever and duplicates the take every refresh.
+        let rows = [row("local-uuid", agoSeconds: old),
+                    row("srv-1", agoSeconds: old, filed: true)]
+        let out = NiclaRecorder.adoptFiling(rows: rows, local: "local-uuid", server: "srv-1")
+        #expect(out.first { $0.id == "srv-1" }?.filed == true)
+        // The local row could not take the id, and must not be silently abandoned:
+        // whichever row carries the filing, one of them is marked.
+        #expect(out.filter { !$0.filed }.count < rows.filter { !$0.filed }.count,
+                "a refused rename left the row unfiled and due for a duplicate post")
+    }
+
+    @Test("a row pruned mid-flight is not resurrected")
+    func adoptFilingTolerAtesMissingRow() {
+        let rows = [row("other", agoSeconds: old)]
+        let out = NiclaRecorder.adoptFiling(rows: rows, local: "gone", server: "srv-1")
+        #expect(out.count == 1 && out[0].id == "other")
+        #expect(!out[0].filed, "the filing landed on an unrelated row")
+    }
+
+    // ── The migration ─────────────────────────────────────────────────────
+
+    @Test("an index written before `filed` existed still decodes")
+    func oldIndexStillDecodes() {
+        // Third field with this hazard: a plain `decode` throws `.keyNotFound` and
+        // loadIndex() turns any throw into [] — the entire transcript history gone
+        // on first launch after the update.
+        let json = """
+        [{"id":"a","at":768000000,"seconds":45,"label":"memo","text":"hi"}]
+        """
+        let rows = try? JSONDecoder().decode([NiclaTranscript].self, from: Data(json.utf8))
+        #expect(rows?.count == 1, "an older index.json failed to decode — every transcript lost")
+        #expect(rows?[0].filed == false, "an old row must not claim the server has it")
+    }
+
+    @Test("filed round-trips through the index")
+    func roundTrips() {
+        let t = row("a", agoSeconds: old, filed: true)
+        let back = try? JSONDecoder().decode(
+            NiclaTranscript.self, from: JSONEncoder().encode(t))
+        #expect(back?.filed == true, "the flag is lost on relaunch, so every row re-posts")
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 🔇 A refusal handed to a media player, on the transcripts screen this time.
+//
+// `/voice/recording` already taught this app the whole lesson: a route that can
+// decline, a URL handed straight to `AVPlayer(url:)`, and a row left asserting
+// "playing" over silence. `CallRecordingRefusal` + `observe(\.status)` were the
+// fix, and `tests/voice-playback-refusal.test.ts` states the rule in prose.
+//
+// ⚠️ THE RANGE HALF OF THAT LESSON REACHED /media/:key AND THE ERROR HALF DID
+// NOT. NiclaRecorder uploads every take there, so this screen kept the original
+// defect verbatim — one `.AVPlayerItemDidPlayToEndTime` observer, which is the
+// notification a LOAD failure cannot fire. Same shape as
+// `a-fix-lands-where-noticed-not-where-needed`, one file over.
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Suite struct NiclaPlaybackRefusalTests {
+
+    // ── Always a sentence: silence IS the defect ──────────────────────────
+
+    @Test("every input produces something to say")
+    func alwaysSpeaks() {
+        // The difference from `CallOutcome.text`, which returns nil for a clean
+        // call. This is called only when a play FAILED, and a failed play that
+        // says nothing is the whole bug.
+        for input in [nil, "", "   ", "who knows"] as [String?] {
+            for online in [true, false] {
+                for remote in [true, false] {
+                    let s = NiclaPlaybackRefusal.text(input, online: online, remote: remote)
+                    #expect(!s.isEmpty, "said nothing for \(String(describing: input))")
+                    #expect(s.count > 4)
+                }
+            }
+        }
+    }
+
+    @Test("each refusal /media/:key can give gets its own sentence")
+    func mapsTheWorkersRefusals() {
+        // The two literals MediaGetCall.handle actually returns — pinned against
+        // the worker source by tests/nicla-playback-refusal.test.ts, so a third
+        // one added upstream fails there rather than silently becoming `unknown`.
+        let store = NiclaPlaybackRefusal.text("media store not provisioned", online: true, remote: true)
+        let gone = NiclaPlaybackRefusal.text("not found", online: true, remote: true)
+        #expect(store.contains("unavailable right now"))
+        #expect(gone.contains("no longer on the server"))
+        #expect(store != gone, "two refusals share a sentence — one of them is unsayable")
+        for s in [store, gone] {
+            #expect(s != NiclaPlaybackRefusal.unknown,
+                    "a refusal with a stated cause rendered as the generic line")
+        }
+    }
+
+    @Test("the reason arrives EMBEDDED in AVFoundation's own description")
+    func matchesBySubstring() {
+        // ⚠️ `contains`, not `==`. AVPlayer wraps the origin's body in its own
+        // wording, so an equality check would recognise nothing a real device
+        // ever produces — a map that passes every unit test and never fires.
+        let wrapped = "The operation could not be completed. (media store not provisioned)"
+        #expect(NiclaPlaybackRefusal.text(wrapped, online: true, remote: true).contains("unavailable"))
+    }
+
+    @Test("an unrecognised failure names no cause and does not echo the diagnostic")
+    func doesNotInventACause() {
+        let s = NiclaPlaybackRefusal.text("the flux capacitor desynced", online: true, remote: true)
+        #expect(s == NiclaPlaybackRefusal.unknown)
+        #expect(!s.contains("flux"), "the raw diagnostic reached the user")
+    }
+
+    // ── Offline: knowable, and knowably only for a REMOTE take ────────────
+
+    @Test("an offline phone is told the audio is on the server, not that playback broke")
+    func offlineIsNamed() {
+        // AVFoundation's offline description ("The Internet connection appears to
+        // be offline.") matches no needle, so without this the one cause the user
+        // can actually fix would render as "couldn't play this recording".
+        let s = NiclaPlaybackRefusal.text("The Internet connection appears to be offline.",
+                                          online: false, remote: true)
+        #expect(s == NiclaPlaybackRefusal.offline)
+        #expect(s.contains("offline"))
+    }
+
+    @Test("⚠️ a LOCAL file failing offline is never blamed on the network")
+    func offlineNeverBlamedForLocalAudio() {
+        // The reason `remote` is a parameter and not inferred: an m4a on this disk
+        // plays with the radio off, so "you're offline" for a corrupt local file
+        // is a confident wrong answer — the exact class of defect this removes.
+        let s = NiclaPlaybackRefusal.text("cannot open", online: false, remote: false)
+        #expect(s != NiclaPlaybackRefusal.offline)
+        #expect(s == NiclaPlaybackRefusal.unknown)
+    }
+
+    @Test("a stated refusal is not overwritten by being offline")
+    func offlineDoesNotMaskAStatedCause() {
+        // Order matters only in one direction: the offline check runs first
+        // BECAUSE its description is unmatchable, but a 424 that somehow arrives
+        // while the monitor says offline still has the more specific answer.
+        // (An offline phone gets no response body at all, so in practice the
+        // first branch is the one that fires — this pins that we prefer a real
+        // reason whenever one exists.)
+        let s = NiclaPlaybackRefusal.text("media store not provisioned", online: true, remote: true)
+        #expect(s.contains("unavailable right now"))
+    }
+
+    @Test("the generic sentence is shared with the call recordings screen")
+    func agreesWithItsSibling() {
+        // Two screens telling a person two different things about the same
+        // outcome is how "couldn't play" becomes untrustworthy. `unknown` is
+        // literally CallRecordingRefusal's, so they cannot drift.
+        #expect(NiclaPlaybackRefusal.unknown == CallRecordingRefusal.unknown)
+        #expect(NiclaPlaybackRefusal.text(nil, online: true, remote: false)
+                    == CallRecordingRefusal.text(nil))
+    }
+}
+
+// ── Creating a scheduled job from the phone ────────────────────────────────
+
+/**
+ * The create form's arithmetic, which is the only part of it that can lie.
+ *
+ * `daily@HH:MM` is stored in **UTC** by the worker's scheduler DSL, and a
+ * `DatePicker` hands back the user's own clock. Formatting those digits into the
+ * string is the obvious implementation and it ships a job that fires at the
+ * wrong hour for every user outside UTC — silently, because the LIST converts
+ * the stored value back for display and lands on the same wrong number, so the
+ * app agrees with itself all the way down. The round trip
+ * `dailyLocal(daily(x)) == x` is the assertion that catches it, and it is only
+ * available because the conversion is a function rather than a line in a view.
+ *
+ * The other two are quota traps, not clock traps: a zero-interval `every`
+ * (`*\/0m`, escaped here because it would close this comment) passes the
+ * worker's shape check but makes `nextDue` return nil, so it is stored ENABLED,
+ * never fires, and holds one of the account's ten job slots forever; and sending both
+ * `schedule` and `run_in_minutes` makes the route ignore the one-shot (it only
+ * computes `runAt` `if run_in_minutes !== undefined && !schedule`), turning
+ * "once, in an hour" into a repeating job.
+ */
+@Suite struct JobCreateTests {
+
+    @Test("a picked local time becomes the UTC the worker stores, and reads back the same")
+    func dailyRoundTrips() {
+        // Every whole hour, in zones on either side of UTC and one with a
+        // half-hour offset — the case a naive `± hours` fix still gets wrong.
+        for zoneName in ["Europe/Istanbul", "America/Los_Angeles", "Asia/Kolkata", "UTC"] {
+            let zone = TimeZone(identifier: zoneName)!
+            var cal = Calendar(identifier: .gregorian)
+            cal.timeZone = zone
+            for hour in [0, 6, 9, 13, 23] {
+                let picked = cal.date(from: DateComponents(year: 2026, month: 8, day: 2,
+                                                           hour: hour, minute: 30))!
+                let dsl = JobCadence.daily(from: picked)
+                // Shape the worker's validSchedule accepts.
+                #expect(dsl.hasPrefix("daily@"))
+                #expect(dsl.count == 11, "daily@HH:MM is 11 chars, got \(dsl)")
+                // …and the round trip lands back on the wall-clock time the user
+                // actually picked, in their own zone.
+                let back = JobCadence.dailyLocal(dsl, now: picked, output: zone,
+                                                 locale: Locale(identifier: "en_US_POSIX"))
+                // The wall-clock time the user actually picked, rendered the way
+                // the list renders it. Same formatter settings as `dailyLocal`
+                // deliberately — what is under test is the UTC conversion in
+                // between, not the short-time format.
+                let fmt = DateFormatter()
+                fmt.timeStyle = .short
+                fmt.dateStyle = .none
+                fmt.timeZone = zone
+                fmt.locale = Locale(identifier: "en_US_POSIX")
+                let want = fmt.string(from: picked)
+                #expect(back == want,
+                        "\(zoneName) \(hour):30 → \(dsl) → \(back ?? "nil"), wanted \(want)")
+            }
+        }
+    }
+
+    @Test("a UTC-offset zone does NOT produce the local digits (the defect this guards)")
+    func dailyIsNotThePickersDigits() {
+        // Istanbul is UTC+3 with no DST, so 09:00 local is 06:00 UTC. A form that
+        // formatted the picker would post daily@09:00 and fire six hours early —
+        // this asserts the difference, not merely that a conversion happened.
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "Europe/Istanbul")!
+        let nine = cal.date(from: DateComponents(year: 2026, month: 8, day: 2, hour: 9, minute: 0))!
+        #expect(JobCadence.daily(from: nine) == "daily@06:00")
+    }
+
+    @Test("every-N refuses the zero the worker would accept and never fire")
+    func everyHasAFloor() {
+        #expect(JobCadence.every(30, unit: .minutes) == "*/30m")
+        #expect(JobCadence.every(2, unit: .hours) == "*/2h")
+        // 0 and negatives clamp to 1: `*/0m` is the enabled-forever, never-firing
+        // job that still costs a quota slot.
+        #expect(JobCadence.every(0, unit: .minutes) == "*/1m")
+        #expect(JobCadence.every(-5, unit: .hours) == "*/1h")
+    }
+
+    @Test("each cadence sends exactly ONE timing key")
+    func bodyKeysAreExclusive() {
+        let common = (name: " Morning check ", prompt: " check HN ", tiny: "tiny")
+        let at = Date(timeIntervalSince1970: 1_754_150_400)
+
+        let every = JobCreateView.body(mode: .every, name: common.name, prompt: common.prompt,
+                                       tiny: common.tiny, everyN: 15, everyUnit: .minutes,
+                                       atTime: at, inMinutes: 60)
+        #expect(every["schedule"] as? String == "*/15m")
+        #expect(every["run_in_minutes"] == nil, "a repeating job must not also carry a one-shot")
+        // Trimmed, because the worker stores what it is sent and " Morning check "
+        // would render with its padding in every list and notification.
+        #expect(every["name"] as? String == "Morning check")
+        #expect(every["prompt"] as? String == "check HN")
+
+        let daily = JobCreateView.body(mode: .daily, name: "a", prompt: "b", tiny: "tiny",
+                                       everyN: 15, everyUnit: .minutes, atTime: at, inMinutes: 60)
+        #expect((daily["schedule"] as? String)?.hasPrefix("daily@") == true)
+        #expect(daily["run_in_minutes"] == nil)
+
+        let once = JobCreateView.body(mode: .once, name: "a", prompt: "b", tiny: "tiny",
+                                      everyN: 15, everyUnit: .minutes, atTime: at, inMinutes: 90)
+        #expect(once["run_in_minutes"] as? Int == 90)
+        // ⚠️ The route computes runAt only when `schedule` is absent — a stray
+        // schedule here would make "once" repeat forever.
+        #expect(once["schedule"] == nil, "a one-shot must not carry a schedule")
+        #expect(JobCreateView.body(mode: .once, name: "a", prompt: "b", tiny: "tiny",
+                                   everyN: 1, everyUnit: .minutes, atTime: at,
+                                   inMinutes: 0)["run_in_minutes"] as? Int == 1,
+                "0 minutes would be rejected by the route as non-positive")
+    }
+
+    @Test("an empty tiny name falls back to the route's own default")
+    func tinyNameFallsBack() {
+        // cfg_tiny_name is empty until the user picks one; posting "" would
+        // create a job addressed to a tiny that doesn't exist.
+        let b = JobCreateView.body(mode: .daily, name: "a", prompt: "b", tiny: "",
+                                   everyN: 1, everyUnit: .minutes, atTime: Date(), inMinutes: 1)
+        #expect(b["tiny"] as? String == "tiny")
+    }
+
+    @Test("the default time is a round hour, not whatever minute it is now")
+    func defaultTimeIsRound() {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let messy = cal.date(from: DateComponents(year: 2026, month: 8, day: 2,
+                                                 hour: 14, minute: 37, second: 12))!
+        let rounded = JobCreateView.nextRoundHour(from: messy, calendar: cal)
+        #expect(cal.component(.hour, from: rounded) == 15)
+        #expect(cal.component(.minute, from: rounded) == 0)
+        // 23:xx must not roll to hour 24 (nil from the calendar → the fallback,
+        // which would silently keep the messy minute).
+        let late = cal.date(from: DateComponents(year: 2026, month: 8, day: 2,
+                                                hour: 23, minute: 45))!
+        let wrapped = JobCreateView.nextRoundHour(from: late, calendar: cal)
+        #expect(cal.component(.hour, from: wrapped) == 0)
+        #expect(cal.component(.minute, from: wrapped) == 0)
+    }
+
+    @Test("the one-shot stepper reads in human units all the way to a week")
+    func inWordsReads() {
+        #expect(JobCreateView.inWords(1) == "1 min")
+        #expect(JobCreateView.inWords(59) == "59 min")
+        #expect(JobCreateView.inWords(60) == "1 hr")
+        #expect(JobCreateView.inWords(90) == "1 hr 30 min")
+        #expect(JobCreateView.inWords(1440) == "1 day")
+        #expect(JobCreateView.inWords(2880) == "2 days")
+        #expect(JobCreateView.inWords(1500) == "1d 1h")
+    }
+}
+
+// ── Capacity (the denominator, and the population it counts) ───────────────
+
+/**
+ * "N of what?" for the two panels on this phone that print a limit.
+ *
+ * Both were wrong, in opposite directions. The Toolbox printed `N/20` — a cap the
+ * worker does not have (`MAX_TOOLS = 10000`, list query unlimited), so a user with
+ * 20 tools read "20/20" and stopped forging. The Jobs panel printed no cap at all,
+ * and there is one: `MAX_JOBS_PER_USER = 10`, met as a 429 from the agent
+ * mid-conversation.
+ *
+ * ⚠️ What makes the jobs half worth a test suite rather than one interpolation is
+ * that **the cap counts a different population than the list shows**. The cap is
+ * `WHERE enabled = 1`; the list is every row; a one-shot flips to `enabled = 0`
+ * when it fires. `\(jobs.count)/10` would print **12/10** for someone at 3 of 10 —
+ * over a limit they are nowhere near, on a panel whose only other action is
+ * Delete. Every assertion below that mixes `active(_:)` with `spent(_:)` is
+ * guarding that one confusion.
+ */
+@Suite struct CapacityTests {
+
+    /// An active recurring job.
+    private func active(_ n: Int) -> [JobRow] {
+        (0..<n).map { row(id: "a\($0)", enabled: true, fired: 3) }
+    }
+
+    /// A spent one-shot: it fired, and the scheduler set `enabled = 0`
+    /// (scheduler.ts:117/172). Still in the list; counts for nothing.
+    private func spent(_ n: Int) -> [JobRow] {
+        (0..<n).map { row(id: "s\($0)", enabled: false, fired: 1) }
+    }
+
+    private func row(id: String, enabled: Bool, fired: Int) -> JobRow {
+        JobRow(id: id, name: id, cadence: "every 5 min", tone: .live,
+               lastFiredLabel: nil, enabled: enabled, fireCount: fired)
+    }
+
+    @Test("the caps are the worker's real numbers, not invented ones")
+    func capsMirrorTheWorker() {
+        // If either moves worker-side this is the tripwire. 20 was never either of
+        // them — that is the entire Toolbox finding.
+        #expect(Capacity.jobActiveCap == 10)
+        #expect(Capacity.toolMax == 10_000)
+        #expect(Capacity.toolMax != 20, "20 is the fabricated cap this replaced")
+    }
+
+    @Test("activeJobCount counts the CAP's population, not the list's")
+    func activeCountsEnabledOnly() {
+        #expect(Capacity.activeJobCount(active(3) + spent(9)) == 3)
+        #expect(Capacity.activeJobCount([]) == 0)
+        #expect(Capacity.activeJobCount(spent(30)) == 0)
+    }
+
+    @Test("the jobs header is a plain count when nowhere near the cap")
+    func headerIsPlainCountFarFromCap() {
+        // A permanent "3/10" reads as though the other 7 slots are a feature.
+        #expect(Capacity.jobsHeader(active(3)) == "Scheduled jobs · 3")
+    }
+
+    @Test("the header NEVER prints total/cap — the listed number is not the capped one")
+    func headerNeverPairsTheWrongTwoNumbers() {
+        // THE FINDING. 3 active + 9 spent one-shots is 12 rows and 3 of 10 used.
+        let h = Capacity.jobsHeader(active(3) + spent(9))
+        #expect(h == "Scheduled jobs · 12")
+        #expect(!h.contains("12/10"), "the two populations were mixed")
+        #expect(!h.contains("/10"), "no cap should appear at 3 of 10")
+    }
+
+    @Test("the cap appears in the last two slots, labelled with what it counts")
+    func headerRevealsCapWhenItMatters() {
+        #expect(Capacity.jobsHeader(active(8)) == "Scheduled jobs · 8 · 8/10 active")
+        #expect(Capacity.jobsHeader(active(9)) == "Scheduled jobs · 9 · 9/10 active")
+        #expect(Capacity.jobsHeader(active(10)) == "Scheduled jobs · 10 · 10/10 active — limit reached")
+        // …and at the cap the two numbers still stay apart: 15 rows, 10 counted.
+        let mixed = Capacity.jobsHeader(active(10) + spent(5))
+        #expect(mixed.contains("· 15"))
+        #expect(mixed.contains("10/10 active"))
+    }
+
+    @Test("an unloaded panel prints no number — 0 is a claim, and it would be false")
+    func nilMeansNotLoadedNotEmpty() {
+        // ⚠️ The header renders OUTSIDE JobsView's state switch (so device-local
+        // agent alerts survive a server outage), which means it also renders above
+        // "Couldn't load your scheduled jobs" — where "· 0" is not merely
+        // premature but contradicted three lines below it. Web ships this bug: it
+        // calls jobsHeader(jobs) unconditionally.
+        #expect(Capacity.jobsHeader(nil) == "Scheduled jobs")
+        #expect(Capacity.jobsCapNote(nil) == nil)
+        // An account that genuinely HAS none still says so — the two must differ.
+        #expect(Capacity.jobsHeader([]) == "Scheduled jobs · 0")
+    }
+
+    @Test("the cap note names the way out, and only when there is one to name")
+    func capNoteNamesTheWayOut() {
+        #expect(Capacity.jobsCapNote(active(9)) == nil)
+        // 2 active + 30 spent is not full, however long the list looks.
+        #expect(Capacity.jobsCapNote(active(2) + spent(30)) == nil)
+        let full = Capacity.jobsCapNote(active(10))
+        #expect(full?.contains("limit of 10 active jobs") == true)
+        #expect(full?.contains("Delete an active job") == true)
+        // Nothing to mistake when every row counts — the sentence stays off.
+        #expect(full?.contains("won't free a slot") == false)
+    }
+
+    @Test("at the cap WITH spent rows, the note says deleting those frees nothing")
+    func capNoteWarnsAboutTheDisposableLookingRows() {
+        // Without this, the rows that LOOK most disposable are exactly the ones
+        // that do not count: a user deletes three finished reminders and is still
+        // blocked, with nothing on screen explaining why.
+        let note = Capacity.jobsCapNote(active(10) + spent(4))
+        #expect(note?.contains("won't free a slot") == true)
+        #expect(note?.contains("only the 10 active jobs count") == true)
+    }
+
+    @Test("the tool badge is a bare count — no fabricated denominator")
+    func toolBadgeHasNoDenominator() {
+        #expect(Capacity.toolBoxBadge(7) == "7 forged tools")
+        #expect(Capacity.toolBoxBadge(7)?.contains("/") == false)
+        // The old header said "20/20 forged tools" here. Nothing is full at 20.
+        #expect(Capacity.toolBoxBadge(20) == "20 forged tools")
+        #expect(Capacity.toolBoxBadge(20)?.contains("20/20") == false)
+        #expect(Capacity.toolBoxBadge(1) == "1 forged tool", "singular")
+        // An empty tool box is a real state and says so.
+        #expect(Capacity.toolBoxBadge(0) == "0 forged tools")
+        // …but "not loaded" is not that state.
+        #expect(Capacity.toolBoxBadge(nil) == nil)
+        #expect(Capacity.toolBoxBadge(-1) == nil, "a negative would print as a count")
+    }
+}
+
+// ── UniverseCounts ─────────────────────────────────────────────────────────
+
+/**
+ * What the Universe surfaces may claim about builders and tinys.
+ *
+ * Same finding class as `CapacityTests` — a number the UI shows about data it did
+ * not fully receive — on the three surfaces `Capacity` didn't reach. Both defects
+ * were live and both honest numbers were already in the payload the phone parsed:
+ *
+ *  - `"\(users.count) builders"` was the PAGE (`?limit=50`, further filtered),
+ *    printed beside `totalPublicTinys`, a real `COUNT(*)`. `totalUsers` — the
+ *    genuine builder census — was in every response and nothing read it. Live
+ *    worker while this was written: `totalUsers: 7`, **6 rows**.
+ *  - `overflow: u.tinys.count > 8 ? …` could NEVER fire, because the worker embeds
+ *    at most 8 names per builder. `cagataycali` returns `tinyCount: 20` with 8
+ *    names, so 12 tinys had no chip, no count and no route on the phone.
+ *
+ * ⚠️ The arithmetic is what these tests exist for; that the VIEWS ask for it, and
+ * that the old expressions are gone from the view bodies, is what no Swift test can
+ * see — `tests/ios-universe-counts-parity.test.ts` covers that half (the
+ * `DevicesFooter`/`Capacity` lesson: a pure function nobody calls is a green suite
+ * over an unchanged screen).
+ */
+@Suite struct UniverseCountsTests {
+
+    @Test("the caps are the worker's real numbers")
+    func capsMirrorTheWorker() {
+        // NAMES_PER_USER (community.ts:53) and the ?limit CommunityFeed asks for.
+        // If either moves worker-side, this is the tripwire.
+        #expect(UniverseCounts.namesPerUser == 8)
+        #expect(UniverseCounts.pageLimit == 50)
+    }
+
+    @Test("a page next to a real total is rendered as 'N of M', never a bare count")
+    func pageIsQualifiedAgainstTheTotal() {
+        // THE FINDING, with the live numbers that exposed it.
+        #expect(UniverseCounts.builders(shown: 6, totalUsers: 7) == "6 of 7 builders")
+        #expect(UniverseCounts.builders(shown: 6, totalUsers: 7) != "6 builders")
+    }
+
+    @Test("when the page IS the whole set, no hedge appears")
+    func exactPageIsUnqualified() {
+        // A permanent "7 of 7" would be its own false suggestion of more.
+        #expect(UniverseCounts.builders(shown: 7, totalUsers: 7) == "7 builders")
+        #expect(UniverseCounts.isTruncated(shown: 7, totalUsers: 7) == false)
+        #expect(UniverseCounts.note(shown: 7, totalUsers: 7, totalPublicTinys: 26) == nil)
+    }
+
+    @Test("singular/plural, and zero builders is a sentence not a fragment")
+    func grammar() {
+        #expect(UniverseCounts.builders(shown: 1, totalUsers: 1) == "1 builder")
+        #expect(UniverseCounts.builders(shown: 0, totalUsers: 0) == "0 builders")
+        #expect(UniverseCounts.publicTinys(1) == "1 public tiny")
+        #expect(UniverseCounts.publicTinys(26) == "26 public tinys")
+        #expect(UniverseCounts.publicTinys(0) == "0 public tinys")
+    }
+
+    @Test("a MISSING total falls back to the page — and a full page is evidence of more")
+    func absentTotalUsesTheOnlyEvidenceLeft() {
+        // An older worker payload has no totalUsers. Then the page is all we
+        // know, and only a FULL page suggests there is more.
+        #expect(UniverseCounts.builders(shown: 50, totalUsers: nil) == "50 builders")
+        #expect(UniverseCounts.isTruncated(shown: 50, totalUsers: nil) == true)
+        #expect(UniverseCounts.isTruncated(shown: 6, totalUsers: nil) == false)
+        let note = UniverseCounts.note(shown: 50, totalUsers: nil, totalPublicTinys: 90)
+        #expect(note?.contains("the first 50 builders") == true)
+        #expect(note?.contains("there may be more") == true)
+    }
+
+    @Test("a total that CONTRADICTS the rows in hand is ignored, not printed")
+    func brokenPayloadNeverPrintsNOfLessThanN() {
+        // "12 of 3 builders" is the failure mode. Trust the rows over a number
+        // that contradicts them.
+        #expect(UniverseCounts.builders(shown: 12, totalUsers: 3) == "12 builders")
+        #expect(UniverseCounts.isTruncated(shown: 12, totalUsers: 3) == false)
+        #expect(UniverseCounts.note(shown: 12, totalUsers: 3, totalPublicTinys: 20) == nil)
+
+        // ⚠️ A mutation run found this case unpinned, and it is the one where
+        // `isTruncated`'s `>= shown` guard actually earns its place: a FULL page
+        // beside a contradicting total is still a page, so the incoherent number
+        // must be discarded in favour of the page-size evidence — not believed
+        // into "3 > 50 = false, everything is shown".
+        #expect(UniverseCounts.isTruncated(shown: 50, totalUsers: 3) == true)
+        let note = UniverseCounts.note(shown: 50, totalUsers: 3, totalPublicTinys: 90)
+        #expect(note?.contains("the first 50 builders") == true,
+                "a broken total must fall through to the page wording, not print '50 of 3'")
+        #expect(note?.contains("of 3") == false)
+    }
+
+    @Test("the note names both numbers, so 'N of M' has a reading on a phone")
+    func noteExplainsTheQualifiedCount() {
+        let note = UniverseCounts.note(shown: 6, totalUsers: 7, totalPublicTinys: 26)
+        // Web hides this in a `title` tooltip; a phone has no hover, so if the
+        // sentence is missing the "6 of 7" is unexplained.
+        #expect(note == "Showing 6 of 7 builders. 26 public tinys across all of them.")
+    }
+
+    @Test("hiddenTinys counts from the real total, so the overflow can actually fire")
+    func overflowComesFromTheWholePopulation() {
+        // THE OTHER FINDING: 20 real, 8 embedded → 12 hidden. The old
+        // `tinys.count - 8` gave 0 for every builder that has ever existed.
+        #expect(UniverseCounts.hiddenTinys(tinyCount: 20, chipsShown: 8) == 12)
+        #expect(UniverseCounts.hiddenTinys(tinyCount: 8, chipsShown: 8) == 0)
+        #expect(UniverseCounts.hiddenTinys(tinyCount: 1, chipsShown: 1) == 0)
+    }
+
+    @Test("an incoherent tinyCount never produces a negative overflow")
+    func staleCountCannotPrintMinusN() {
+        // A count smaller than what is on screen is stale or broken; "+-3 more"
+        // is not an acceptable rendering of that.
+        #expect(UniverseCounts.hiddenTinys(tinyCount: 3, chipsShown: 8) == 0)
+        #expect(UniverseCounts.hiddenTinys(tinyCount: -5, chipsShown: 0) == 0)
+        #expect(UniverseCounts.hiddenTinys(tinyCount: 0, chipsShown: 0) == 0)
+    }
+
+    @Test("negative inputs never reach a label")
+    func negativesAreClamped() {
+        #expect(UniverseCounts.builders(shown: -3, totalUsers: nil) == "0 builders")
+        #expect(UniverseCounts.publicTinys(-9) == "0 public tinys")
+    }
+
+    @Test("decode carries totalUsers, and ABSENCE stays absent")
+    func decodeKeepsTheCensusOptional() throws {
+        let body: [String: Any] = [
+            "users": [["login": "a", "tinys": [["name": "t1"]], "tinyCount": 20]],
+            "totalPublicTinys": 26, "totalMessages": 6882, "totalUsers": 7,
+        ]
+        let feed = try CommunityFeed.decode(body)
+        #expect(feed.totalUsers == 7)
+        #expect(feed.users.first?.tinyCount == 20, "the real total, not the 1 embedded name")
+
+        // ⚠️ The load-bearing half. `?? 0` here would turn "this worker didn't
+        // say" into a census claiming an empty platform — and then `builders`
+        // would read "6 builders" as though that were confirmed.
+        var noTotal = body
+        noTotal.removeValue(forKey: "totalUsers")
+        #expect(try CommunityFeed.decode(noTotal).totalUsers == nil)
+
+        // A genuine 0 is a real (empty) census and must survive as 0, not nil.
+        var zero = body
+        zero["totalUsers"] = 0
+        #expect(try CommunityFeed.decode(zero).totalUsers == 0)
+
+        // A negative COUNT(*) is incoherent — absent, NOT clamped to 0, because
+        // clamping would assert a census we did not receive.
+        var negative = body
+        negative["totalUsers"] = -4
+        #expect(try CommunityFeed.decode(negative).totalUsers == nil)
+    }
+}
+
+// ── SidebarVisibility (iPad) ───────────────────────────────────────────────
+
+/**
+ * The iPad sidebar's remembered open/closed state.
+ *
+ * Worth testing because the whole sidebar was, until this pass, INVISIBLE on launch:
+ * `columnVisibility` was `.automatic`, which hides the column in portrait, so all 16
+ * surfaces the sidebar reaches sat behind an undiscovered "Show Sidebar" tap. The fix
+ * is `.all` plus persistence — and persistence is where the subtle bug lives, not in
+ * the initial value.
+ */
+@Suite struct SidebarVisibilityTests {
+    // ⚠️ No `!` anywhere below. A mutation run that broke `encode` into returning nil
+    // made three of these fail correctly and then CRASHED the runner on the force
+    // unwrap — and the crashed rerun printed "Test run with 0 tests ... passed". A
+    // green line from a suite that executed nothing is worse than a red one.
+    @Test("a concrete choice round-trips")
+    func roundTrip() throws {
+        for v in [NavigationSplitViewVisibility.all, .doubleColumn, .detailOnly] {
+            let s = try #require(SidebarVisibility.encode(v), "a real user choice must be storable")
+            #expect(SidebarVisibility.decode(s) == v, "\(s) did not decode back to what encoded it")
+        }
+    }
+
+    @Test("⚠️ .automatic is REFUSED, even though it compares equal to .detailOnly")
+    func automaticIsNotAPreference() {
+        // 🔑 The finding this suite earned. `.automatic` is NOT a distinct case: it is
+        // `.detailOnly` with an `isAutomatic` flag, and `==` ignores the flag —
+        //     automatic:  {"kind":0,"isAutomatic":true}
+        //     detailOnly: {"kind":0,"isAutomatic":false}
+        // so `.automatic == .detailOnly` is TRUE and a `case .automatic:` arm is
+        // unreachable. My first version's refusal was decorative; this test caught it
+        // by returning "detailOnly" where nil was expected.
+        //
+        // Why it matters beyond tidiness: `.automatic` means "system, you decide", and
+        // the value it aliases is the SIDEBAR-HIDDEN one. Storing it naively persists
+        // "hidden" — the exact defect this change exists to fix.
+        #expect(SidebarVisibility.encode(.automatic) == nil,
+                "storing .automatic persists the collapsed state as if the user chose it")
+        #expect(SidebarVisibility.isAutomatic(.automatic))
+        #expect(!SidebarVisibility.isAutomatic(.detailOnly),
+                "a real .detailOnly must stay storable, or collapsing never sticks")
+    }
+
+    @Test("the two values that alias each other are still told apart")
+    func aliasedPairIsDistinguished() {
+        // The pair is only separable through the flag, so assert the separation
+        // directly. If a future SwiftUI drops `isAutomatic` from its encoded form,
+        // `isAutomatic` returns false and THIS is the test that says so.
+        #expect(SidebarVisibility.encode(.detailOnly) == "detailOnly")
+        #expect(SidebarVisibility.encode(.automatic) == nil)
+        #expect(NavigationSplitViewVisibility.automatic == .detailOnly,
+                "if these ever stop comparing equal, encode() can go back to a plain switch")
+    }
+
+    @Test("collapsing the sidebar survives a relaunch")
+    func collapsedIsRemembered() throws {
+        // The user-visible promise, stated as the sequence it actually happens in:
+        // collapse → store → cold launch → decode.
+        let stored = try #require(SidebarVisibility.encode(.detailOnly),
+                                  "a collapsed sidebar must be storable at all")
+        #expect(SidebarVisibility.decode(stored) == .detailOnly,
+                "the sidebar reopens itself after the user closed it")
+    }
+
+    @Test("an unknown stored value SHOWS the sidebar")
+    func unknownFallsBackToVisible() {
+        // Junk, or a value written by another build. Recovery has a direction here:
+        // guessing `.detailOnly` hides the entire app behind a button the user has to
+        // find, where guessing `.all` merely shows a sidebar they can close.
+        for junk in ["", "sidebar", "ALL", "detailonly", "{}"] {
+            #expect(SidebarVisibility.decode(junk) == .all, "\"\(junk)\" should fall back to visible")
+        }
+    }
+
+    @Test("the default matches the fallback, so first launch and junk agree")
+    func defaultAgreesWithFallback() {
+        // `@AppStorage(key) var stored = fallbackKey` and `decode`'s default arm are
+        // two separate decisions that must not drift: if the @AppStorage default were
+        // "detailOnly", a first launch would hide the sidebar while a corrupted value
+        // showed it, for no reason a user could understand.
+        #expect(SidebarVisibility.decode(SidebarVisibility.fallbackKey) == .all)
+    }
+
+    @Test("the storage key is stable")
+    func keyIsStable() {
+        // Renaming this silently resets every existing user's choice — the setting
+        // doesn't break, it just quietly forgets. Pinned so the rename is deliberate.
+        #expect(SidebarVisibility.key == "ipad.sidebar.visibility")
+    }
+}
+
+// ── the glasses camera has ONE session, so a busy one must name its holder ──
+
+/// Android twin: `WearablesSessionTest` (same four cases, same wording).
+///
+/// The glasses expose one camera session per device and no way to take over the
+/// one that is open, so an ask made while another rail holds it is genuinely
+/// dead until the holder lets go — and letting go is something the USER does.
+/// The SDK's own sentence, "A session already exists for this device", is a
+/// true statement that names neither the holder nor the remedy.
+@Suite struct GlassesCameraBusyTests {
+
+    @Test("the live feed holding the camera says so, and says how to get it back")
+    func liveFeedNamed() {
+        let msg = WearablesManager.cameraBusyMessage(liveOpen: true, recording: false)
+        #expect(msg.contains("live"))
+        #expect(msg.contains("close the live card"))
+        // The failure this replaces: a photo of what the user is looking at,
+        // asked for while they watch the feed, answered in SDK vocabulary.
+        #expect(!msg.lowercased().contains("session already exists"))
+    }
+
+    @Test("a recording in progress is not blamed on the live feed")
+    func recordingNotBlamedOnLiveFeed() {
+        let msg = WearablesManager.cameraBusyMessage(liveOpen: false, recording: true)
+        #expect(msg.contains("recording"))
+        #expect(msg.contains("finish"))
+        // Telling someone to close a live card that isn't open is a dead end
+        // with extra steps.
+        #expect(!msg.contains("live card"))
+    }
+
+    @Test("a holder we do not own still gets an honest, ending answer")
+    func unknownHolderStillEnds() {
+        // A photo asked for twice in quick succession: the first ask holds the
+        // session while it walks up to .started — up to 25s — and neither of
+        // our own flags is set. It clears itself, so "ask again" is the truth.
+        let msg = WearablesManager.cameraBusyMessage(liveOpen: false, recording: false)
+        #expect(msg.contains("few seconds"))
+        #expect(msg.contains("ask again"))
+    }
+
+    @Test("every holder gets a remedy, and none leaks SDK vocabulary")
+    func everyHolderHasARemedy() {
+        for liveOpen in [true, false] {
+            for recording in [true, false] {
+                let msg = WearablesManager.cameraBusyMessage(liveOpen: liveOpen, recording: recording)
+                let where_ = "liveOpen=\(liveOpen) recording=\(recording): \(msg)"
+                #expect(msg.contains("ask again"), "no remedy in \(where_)")
+                #expect(msg.contains("glasses"), "glasses not mentioned in \(where_)")
+                #expect(!msg.contains("session"), "SDK vocabulary in \(where_)")
+                #expect(msg.count > 60, "too terse to act on in \(where_)")
+            }
+        }
+    }
+
+    @Test("the reason survives into what the agent and the card actually render")
+    func reasonIsRendered() {
+        // All three rails render `(error as? LocalizedError)?.errorDescription`
+        // — a case whose errorDescription dropped the reason would carry the
+        // measurement all the way to the user and then throw it away.
+        let reason = WearablesManager.cameraBusyMessage(liveOpen: true, recording: false)
+        let err = WearablesCaptureError.cameraBusy(reason)
+        #expect(err.errorDescription == reason)
+        #expect((err as LocalizedError).errorDescription == reason)
     }
 }

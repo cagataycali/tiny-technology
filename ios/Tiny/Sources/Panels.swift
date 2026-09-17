@@ -13,6 +13,247 @@ import UserNotifications
 
 enum LoadState { case loading, loaded, failed(String) }
 
+// ── Capacity labels ────────────────────────────────────────────────────────
+
+/**
+ * "N of what?" — the two panels on this phone that print a limit, and both of
+ * them printed the wrong thing. Port of `lib/chat/capacity.ts`, which web grew
+ * for exactly these two findings; the phone never got either fix.
+ *
+ *  1. **The Toolbox invented its cap.** `"\(tools.count)/20 forged tools"` — and
+ *     there is no cap of 20 anywhere. The worker's is `MAX_TOOLS = 10000`
+ *     (chatgpt-plugin-tinyai/src/tools.ts:15) and its list query has no LIMIT, so
+ *     the numerator was honest and the denominator was fiction. A user with 20
+ *     forged tools reads "20/20" and stops forging. **A fabricated limit is worse
+ *     than no limit: it is a rule the product appears to enforce and doesn't.**
+ *
+ *  2. **The Jobs panel showed no cap, and there IS one** —
+ *     `MAX_JOBS_PER_USER = 10` (scheduler.ts:23). The user meets it as a 429 from
+ *     the agent, mid-conversation, having already said what they wanted.
+ *
+ * ⚠️ THE TRAP THAT MAKES (2) MORE THAN A STRING EDIT, and the reason this is a
+ * testable enum rather than one interpolation: **the cap counts a DIFFERENT
+ * POPULATION than the list shows.** The cap query is
+ * `WHERE user_id = ? AND enabled = 1`, while the list is every row for the user —
+ * and a one-shot flips to `enabled = 0` the moment it fires (scheduler.ts:117/172).
+ * A user with 12 rows, 9 of them spent one-shots, is at 3 of 10 with room to
+ * spare; rendering `\(jobs.count)/10` would have said **12/10** — over a limit
+ * they are nowhere near, on a panel whose only other action is Delete. So
+ * [activeJobCount] recomputes the cap's own population from the rows on screen.
+ *
+ * ⚠️⚠️ AND ONE THING WEB STILL GETS WRONG, which is why the jobs entry points take
+ * an **optional**: web renders `jobsHeader(jobs)` unconditionally, so during the
+ * fetch its header reads "Scheduled jobs · 0" above a body that says "Loading…".
+ * Web already knows the rule — its own tool badge returns null while unloaded,
+ * "a zero tool box and an unfinished request look identical in a badge and mean
+ * opposite things" — it just never applied it to jobs. Here `nil` means *not
+ * loaded*, and an unloaded panel prints no number at all. On this phone that
+ * matters more than on web: the section header sits OUTSIDE the state switch, so
+ * it renders over "Couldn't load your scheduled jobs" too, where a count of 0 is
+ * not merely premature but contradicted three lines below it.
+ */
+enum Capacity {
+
+    /// Worker cap on ACTIVE (`enabled = 1`) jobs per user — scheduler.ts:23.
+    static let jobActiveCap = 10
+
+    /**
+     * Worker cap on forged tools per user — tools.ts:15.
+     *
+     * Here to be ASSERTED against, never rendered: at 10000 it is not a capacity
+     * a person can approach, so showing it would be noise dressed as information.
+     * It lives here so the next person who wants an "N/M" badge finds the real
+     * number instead of inventing one, and so a test fails if the worker moves it.
+     */
+    static let toolMax = 10_000
+
+    /**
+     * How many of these jobs count against the worker's cap.
+     *
+     * Anything not enabled is excluded. Under-counting shows more room than there
+     * is, which the 429 corrects; over-counting tells someone to delete jobs they
+     * did not need to delete. (`JobsView.load` already coerces the D1 integer with
+     * `as? Int ?? 0`, so a proxy that stringifies the column reads as DISABLED —
+     * which is the safe direction, and the one web had to reach for `=== 1` to
+     * get: `enabled: "0"` is a truthy string.)
+     */
+    static func activeJobCount(_ jobs: [JobRow]) -> Int {
+        jobs.reduce(0) { $0 + ($1.enabled ? 1 : 0) }
+    }
+
+    /**
+     * The jobs section header. `nil` jobs = not loaded → no number.
+     *
+     * The plain count is what the panel is about, and a permanent "3/10" invites
+     * the reading that the other 7 slots are a feature. The cap appears only once
+     * it is within reach (the last two slots) or reached, because that is the only
+     * moment it changes a decision — and when it appears it is LABELLED with the
+     * population it counts, since the list beside it may hold more rows than the
+     * number does.
+     */
+    static func jobsHeader(_ jobs: [JobRow]?) -> String {
+        let base = "Scheduled jobs"
+        guard let jobs else { return base }
+        let active = activeJobCount(jobs)
+        let counted = "\(base) · \(jobs.count)"
+        if active >= jobActiveCap { return "\(counted) · \(active)/\(jobActiveCap) active — limit reached" }
+        if active >= jobActiveCap - 2 { return "\(counted) · \(active)/\(jobActiveCap) active" }
+        return counted
+    }
+
+    /**
+     * The sentence for a full account, or nil.
+     *
+     * Separate from the header because it names the WAY OUT, and the way out
+     * depends on which population is full: with spent one-shots in the list,
+     * deleting one of THOSE frees nothing — they already do not count. "Delete a
+     * job" would send someone to the rows that look most disposable and change
+     * nothing.
+     */
+    static func jobsCapNote(_ jobs: [JobRow]?) -> String? {
+        guard let jobs else { return nil }
+        let active = activeJobCount(jobs)
+        guard active >= jobActiveCap else { return nil }
+        let spent = jobs.count - active
+        let tail = spent > 0
+            ? " Deleting a finished one won't free a slot — only the \(active) active jobs count."
+            : ""
+        return "You're at the limit of \(jobActiveCap) active jobs. Delete an active job to schedule another.\(tail)"
+    }
+
+    /**
+     * The forged-tools header. `nil` count = not loaded → no header text.
+     *
+     * A bare count, because the real cap is not a capacity anyone meets and the
+     * old `/20` denominator was fiction.
+     */
+    static func toolBoxBadge(_ count: Int?) -> String? {
+        guard let count, count >= 0 else { return nil }
+        return "\(count) forged tool\(count == 1 ? "" : "s")"
+    }
+}
+
+// ── Universe counts ────────────────────────────────────────────────────────
+
+/**
+ * What the Universe surfaces on this phone may claim about the builders and
+ * tinys they show. Port of `lib/chat/universe-counts.ts` — and the same finding
+ * class as [Capacity] one cycle earlier: **a number the UI shows about data it
+ * did not fully receive.** Both defects web fixed there are live here, and the
+ * honest numbers are already in the payload the phone parses.
+ *
+ *  1. **`\(users.count) builders` is a PAGE LENGTH, printed beside a real
+ *     total.** `CommunityFeed.url` asks `?limit=50`; the worker answers
+ *     `totalUsers`, a plain `SELECT COUNT(*) FROM users`
+ *     (chatgpt-plugin-tinyai/src/community.ts:114) — and `CommunityFeed.Feed`
+ *     never carried the field, so `statsLine` put a page length under the word
+ *     "builders" immediately next to `totalPublicTinys`, which IS a COUNT(*).
+ *     One line, two queries, one of them a page. Live worker right now:
+ *     `totalUsers: 7` with **6 rows** — because the row query is
+ *     `HAVING tiny_count > 0` and `decode` drops `tinys.isEmpty` besides, so the
+ *     gap is not even about the limit. The phone said "6 builders · 26 public
+ *     tinys" for a platform with 7.
+ *
+ *  2. **The "+N more" overflow was computed from the truncated array, so it
+ *     could never fire.** The worker embeds at most `NAMES_PER_USER = 8` tiny
+ *     names per builder (community.ts:53) while `tinyCount` is that builder's
+ *     real SQL total. `builderCard` asked `u.tinys.count > 8 ? u.tinys.count - 8`
+ *     — and `u.tinys.count` is **at most 8**, so the chip that leads to the rest
+ *     was unreachable by construction. Live: `cagataycali` has `tinyCount: 20`
+ *     with 8 names, so the card drew a "20 tinys" badge above 8 chips and **12
+ *     tinys had no link and no mention anywhere on the phone.** The badge was
+ *     right; what it was silent about was the finding.
+ *
+ * ⚠️ THE TRAP, and why these are functions rather than two interpolations: in
+ * both cases the phone HAS the honest number and is holding it next to the
+ * dishonest one. So the rule is not "print the total" — it is **when a payload
+ * carries both a page and a total, render the total and say what the page is;
+ * and derive an overflow from the number that counts the whole population,
+ * never from the array that was cut.**
+ *
+ * ⚠️ `totalUsers` is `Int?` and the absence is load-bearing, exactly as
+ * [Capacity]'s job count is: an older worker payload without the field means
+ * *the page is all we know*, while a genuine 0 is a real (empty) census. `?? 0`
+ * would turn "didn't tell us" into "nobody is here".
+ */
+enum UniverseCounts {
+
+    /// The worker's per-user cap on embedded tiny NAMES — community.ts:53
+    /// (`NAMES_PER_USER`). Exported to be compared against, never rendered: it
+    /// is why a card's chip row can be short while its badge is right, and the
+    /// reason overflow must come from `tinyCount`.
+    static let namesPerUser = 8
+
+    /// The `limit` `CommunityFeed.url` asks for. A full page is the only
+    /// evidence of more builders when the payload carries no total.
+    static let pageLimit = 50
+
+    /// The builders half of the stats line — never a bare page length.
+    ///
+    /// Two independent proofs that builders are missing, for the same reason
+    /// `Capacity.jobsHeader` needs two: the comparison is exact but needs
+    /// `totalUsers` to exist, and a full page is all that is left when it
+    /// doesn't. Neither suffices alone.
+    static func builders(shown: Int, totalUsers: Int?, limit: Int = pageLimit) -> String {
+        let shown = max(0, shown)
+        // A total BELOW the rows in hand is a broken payload, not a truncation:
+        // trust the rows over a number that contradicts them, or the line reads
+        // "12 of 3 builders". `> shown` is the whole guard HERE — a mutation run
+        // proved a second `>= shown` filter ahead of it is unreachable, and dead
+        // code that looks like a safety check is worse than none: the next reader
+        // trusts it. `isTruncated` needs the explicit form and says why.
+        if let total = totalUsers, total > shown { return "\(shown) of \(total) builders" }
+        return "\(shown) builder\(shown == 1 ? "" : "s")"
+    }
+
+    /// True when builders exist that this page doesn't contain — drives the
+    /// explanatory caption, and is deliberately separate from the label so a
+    /// full page that IS the whole set is never reported as truncated.
+    static func isTruncated(shown: Int, totalUsers: Int?, limit: Int = pageLimit) -> Bool {
+        let shown = max(0, shown)
+        // ⚠️ `>= shown` is load-bearing here, unlike in [builders]: a total that
+        // CONTRADICTS the rows in hand must fall through to the page-size
+        // evidence, not be believed. A full page of 50 beside a broken
+        // `totalUsers: 3` is still a page — dropping this guard would answer
+        // "3 > 50 = false" and report the platform as fully shown.
+        if let total = totalUsers, total >= shown { return total > shown }
+        // No total we can use: a full page is evidence of more, an under-full
+        // one is proof there is nothing more.
+        return shown >= max(1, limit)
+    }
+
+    /// The sentence under a truncated stats line — `nil` when the page is the
+    /// whole set, because a hedge would then be its own false claim.
+    static func note(shown: Int, totalUsers: Int?, totalPublicTinys: Int, limit: Int = pageLimit) -> String? {
+        guard isTruncated(shown: shown, totalUsers: totalUsers, limit: limit) else { return nil }
+        let shown = max(0, shown)
+        let tinys = max(0, totalPublicTinys)
+        if let total = totalUsers, total > shown {
+            return "Showing \(shown) of \(total) builders. \(tinys) public tinys across all of them."
+        }
+        return "Showing the first \(shown) builders — there may be more. \(tinys) public tinys across all of them."
+    }
+
+    /// The public-tinys half. A true total, so it never needs qualifying.
+    static func publicTinys(_ total: Int) -> String {
+        let n = max(0, total)
+        return "\(n) public tin\(n == 1 ? "y" : "ys")"
+    }
+
+    /// How many of a builder's tinys are NOT among the chips on screen.
+    ///
+    /// `tinyCount` is the builder's real total; the chip row is the worker's ≤8
+    /// slice, further sliced by the caller's own display cap. The old
+    /// `tinys.count - 8` could never be positive.
+    ///
+    /// Returns 0 when nothing is hidden, and when `tinyCount` is *smaller* than
+    /// what is on screen — a stale or incoherent count must not produce
+    /// "+-3 more".
+    static func hiddenTinys(tinyCount: Int, chipsShown: Int) -> Int {
+        max(0, max(0, tinyCount) - max(0, chipsShown))
+    }
+}
+
 // ── 🌌 Universe ────────────────────────────────────────────────────────────
 
 struct UniverseUser: Identifiable {
@@ -52,6 +293,13 @@ enum CommunityFeed {
         let trust: [String: Double]
         let totalMessages: Double
         let totalPublicTinys: Int
+        /// The worker's `totalUsers` — a real `COUNT(*) FROM users`, independent
+        /// of `?limit` (community.ts:114). **Optional, and the absence is
+        /// load-bearing:** an older payload without the field means the page is
+        /// all we know, while a genuine 0 is a real census. See
+        /// [UniverseCounts] — this field existed in every response the phone
+        /// ever parsed and nothing read it, which is the whole defect.
+        let totalUsers: Int?
     }
 
     /// Public worker endpoint (no token) — the same one the web drawer fetches.
@@ -110,9 +358,17 @@ enum CommunityFeed {
                 if !k.isEmpty, n.isFinite, n > 0, n <= 1 { trust[k] = n }
             }
         }
+        // ⚠️ NOT `?? 0`, unlike its two neighbours. `Number(null)`-shaped
+        // coercion here would turn "this worker didn't tell us" into a census
+        // claiming an empty platform — the exact reading the optional exists to
+        // prevent (web's normalizeCommunity carries the same note). A negative
+        // is incoherent for a COUNT(*) and is treated as absent, not clamped:
+        // clamping to 0 would assert a census we did not receive.
+        let rawTotalUsers = (obj["totalUsers"] as? NSNumber)?.intValue
         return Feed(users: users, trust: trust,
                     totalMessages: (obj["totalMessages"] as? NSNumber)?.doubleValue ?? 0,
-                    totalPublicTinys: (obj["totalPublicTinys"] as? NSNumber)?.intValue ?? 0)
+                    totalPublicTinys: (obj["totalPublicTinys"] as? NSNumber)?.intValue ?? 0,
+                    totalUsers: rawTotalUsers.flatMap { $0 >= 0 ? $0 : nil })
     }
 }
 
@@ -147,6 +403,9 @@ struct UniverseView: View {
     @State private var trust: [String: Double] = [:]
     @State private var totalMessages = 0.0
     @State private var totalPublicTinys = 0
+    /// The worker's real builder COUNT(*), or nil when the payload omitted it
+    /// (and before the fetch — where nil correctly means "we have no census").
+    @State private var totalUsers: Int?
     /// The builder whose profile sheet is open (nil = none). Tapping a
     /// universe row header opens it — web parity (drawer @login → /@login).
     /// A wrapper (not a bare String) so `.sheet(item:)` has an Identifiable.
@@ -190,10 +449,21 @@ struct UniverseView: View {
                         // Headline stats (web Community header): compact
                         // messages · builders · public tinys.
                         Section {
-                            Text(statsLine)
-                                .font(.caption).foregroundStyle(.secondary)
-                                .frame(maxWidth: .infinity, alignment: .center)
-                                .listRowBackground(Color.clear)
+                            VStack(spacing: 3) {
+                                Text(statsLine)
+                                    .font(.caption).foregroundStyle(.secondary)
+                                // Web puts this in a `title` tooltip; a phone has
+                                // no hover, so the sentence that explains the
+                                // qualified count has to be on screen or the
+                                // "6 of 7" has no reading.
+                                if let statsNote {
+                                    Text(statsNote)
+                                        .font(.caption2).foregroundStyle(.tertiary)
+                                        .multilineTextAlignment(.center)
+                                }
+                            }
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .listRowBackground(Color.clear)
                         }
                         if visibleUsers.isEmpty {
                             Text("No tinys match “\(query)”.")
@@ -223,13 +493,24 @@ struct UniverseView: View {
         .task { await load() }
     }
 
-    /// "1.9M messages · 12 builders · 34 public tinys" — web's header stats.
+    /// "1.9M messages · 6 of 7 builders · 26 public tinys" — web's header stats.
+    ///
+    /// ⚠️ `users.count` is the PAGE (`?limit=50`, further filtered by `decode`);
+    /// `totalPublicTinys` beside it is a `COUNT(*)`. [UniverseCounts.builders]
+    /// is what keeps the two apart — see its doc for the measurement.
     private var statsLine: String {
         var parts: [String] = []
         if totalMessages > 0 { parts.append("\(CommunityFmt.compact(totalMessages)) messages") }
-        parts.append("\(users.count) builder\(users.count == 1 ? "" : "s")")
-        parts.append("\(totalPublicTinys) public tiny\(totalPublicTinys == 1 ? "" : "s")")
+        parts.append(UniverseCounts.builders(shown: users.count, totalUsers: totalUsers))
+        parts.append(UniverseCounts.publicTinys(totalPublicTinys))
         return parts.joined(separator: " · ")
+    }
+
+    /// The caption under [statsLine] when this page isn't every builder — the
+    /// phone's twin of web's `title` tooltip, which has no hover to live in here.
+    private var statsNote: String? {
+        UniverseCounts.note(shown: users.count, totalUsers: totalUsers,
+                            totalPublicTinys: totalPublicTinys)
     }
 
     /// One builder card — avatar/initial, tappable @login → profile, name,
@@ -276,11 +557,20 @@ struct UniverseView: View {
             if u.tinys.isEmpty {
                 Text("No public tinys yet").font(.caption).foregroundStyle(.secondary)
             } else {
-                // Chips flow — capped at 8 like web, then a "+N more" to profile
+                // Chips flow — capped at 8 like web, then a "+N more" to profile.
+                //
+                // ⚠️ The overflow comes from `tinyCount`, NOT `tinys.count`. The
+                // worker embeds at most 8 names (community.ts:53), so the old
+                // `u.tinys.count > 8` was unreachable BY CONSTRUCTION — a builder
+                // with 20 public tinys showed 8 chips, a "20 tinys" badge, and no
+                // route to the other 12. The profile sheet does return all of
+                // them, so the affordance was the only thing missing.
                 FlowChips(
-                    tinys: Array(u.tinys.prefix(8)),
+                    tinys: Array(u.tinys.prefix(UniverseCounts.namesPerUser)),
                     trust: trust,
-                    overflow: u.tinys.count > 8 ? u.tinys.count - 8 : 0,
+                    overflow: UniverseCounts.hiddenTinys(
+                        tinyCount: u.tinyCount,
+                        chipsShown: min(u.tinys.count, UniverseCounts.namesPerUser)),
                     onPick: { picked in dismiss(); onPick(picked) },
                     onMore: { profileLogin = BuilderLogin(login: u.login) })
             }
@@ -300,6 +590,7 @@ struct UniverseView: View {
             trust = feed.trust
             totalMessages = feed.totalMessages
             totalPublicTinys = feed.totalPublicTinys
+            totalUsers = feed.totalUsers
             state = .loaded
         } catch { state = .failed(LoadFailure.contentMessage(error)) }
     }
@@ -996,8 +1287,9 @@ struct ForgedTool: Identifiable {
 /// load (401/424/network) is NEVER painted as "no tools yet" (the web panel's
 /// myToolsFailed lesson). Rows expand to params + source (+copy); delete via
 /// swipe OR the explicit button, both confirmed, DELETE /api/tools {name}
-/// with optimistic removal + restore-on-failure. "N/20" mirrors the worker's
-/// per-account cap.
+/// with optimistic removal + restore-on-failure. The header is a bare count via
+/// `Capacity.toolBoxBadge` — it used to read "N/20", a cap the worker does not
+/// have (see `Capacity`).
 struct ToolboxView: View {
     let token: String?
     @Environment(\.dismiss) private var dismiss
@@ -1056,8 +1348,11 @@ struct ToolboxView: View {
                                             }
                                     }
                                 } header: {
-                                    // The worker caps forged tools at 20/account
-                                    Text("\(tools.count)/20 forged tools")
+                                    // Was "\(tools.count)/20 forged tools". There
+                                    // is no cap of 20 — see `Capacity`, which
+                                    // holds the worker's real one (10000, not
+                                    // renderable) and answers with a bare count.
+                                    Text(Capacity.toolBoxBadge(tools.count) ?? "")
                                 } footer: {
                                     Text("Tools follow your account across all your tinys as my_<name>. They're public on your profile.")
                                 }
@@ -1271,7 +1566,7 @@ private struct ToolboxRow: View {
 ///
 /// 🔑 `!enabled` is NOT evidence that a job ran. The scheduler clears the flag
 /// from two places and only one of them is a run (verified against the CURRENT
-/// `worker/src/scheduler.ts`, since its line numbers have moved
+/// `chatgpt-plugin-tinyai/src/scheduler.ts`, since its line numbers have moved
 /// since the web wrote this rule down):
 ///
 ///   • after a successful fire — `UPDATE jobs SET enabled = 0` (:238), preceded
@@ -1389,6 +1684,46 @@ enum JobCadence {
         }
     }
 
+    /// A local wall-clock time → the `daily@HH:MM` the worker stores, which is
+    /// **UTC**. The exact inverse of `dailyLocal`, and the one line in a create
+    /// form that can silently lie.
+    ///
+    /// ⚠️ A `DatePicker` hands back the user's own clock. Formatting those digits
+    /// straight into the DSL ships a job that fires at 9am UTC for a user who
+    /// asked for 9am in Istanbul — six hours early, every day, and nothing in the
+    /// app would say so: the list would read "daily at 09:00" too, because
+    /// `dailyLocal` converts the stored value back and would land on the wrong
+    /// number in the same direction. **The round trip is only honest if this
+    /// function exists**, which is why it is here rather than inline in a view,
+    /// and why the tests assert `dailyLocal(daily(x)) == x`.
+    ///
+    /// Anchored on the picked date itself so the offset is the one in force then
+    /// (DST included) rather than a fixed number of seconds.
+    /// No timezone parameter on purpose: `picked` is an absolute instant, and the
+    /// picker's zone only ever governed how it was DISPLAYED. Reading its
+    /// components through a UTC calendar *is* the whole conversion — there is no
+    /// offset arithmetic here, which is precisely why there is none to get wrong.
+    static func daily(from picked: Date) -> String {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let h = cal.component(.hour, from: picked)
+        let m = cal.component(.minute, from: picked)
+        return String(format: "daily@%02d:%02d", h, m)
+    }
+
+    /// The schedule string for "every N" — the DSL the worker's `validSchedule`
+    /// accepts, with its own floor applied.
+    ///
+    /// ⚠️ `*/0m` passes the worker's `\d+` shape check in one place but makes
+    /// `nextDue` return nil, so it is stored ENABLED and never fires while
+    /// holding one of the user's 10 job slots. The floor of 1 belongs on the
+    /// client too: a stepper that can reach 0 would ship that job.
+    static func every(_ n: Int, unit: EveryUnit) -> String {
+        "*/\(max(1, n))\(unit == .minutes ? "m" : "h")"
+    }
+
+    enum EveryUnit { case minutes, hours }
+
     /// `daily@HH:MM` (the worker DSL stores UTC) → the viewer's own clock.
     ///
     /// The one-shot branch formats in the DEVICE's timezone, so labelling this
@@ -1467,6 +1802,9 @@ struct JobsView: View {
     /// job, and the row simply reappeared — the user's only signal that anything
     /// went wrong being that their delete didn't seem to happen.
     @State private var deleteError: String?
+    /// The create form (web JobsPanel has none either — it tells you to ask the
+    /// agent; but a phone is where "remind me every morning" gets thought of).
+    @State private var creating = false
 
     var body: some View {
         NavigationStack {
@@ -1480,12 +1818,27 @@ struct JobsView: View {
                 // stranding an alarm the user can only manage here. Mirrors
                 // MemoryView, whose local section sits outside its state switch.
                 if case .loaded = state, jobs.isEmpty, localAlerts.isEmpty {
-                    ContentUnavailableView("No scheduled jobs", systemImage: "clock",
-                        description: Text("Ask your tiny to schedule something —\n\"remind me every morning at 9\""))
+                    ContentUnavailableView {
+                        Label("No scheduled jobs", systemImage: "clock")
+                    } description: {
+                        // Still names the conversational route first — it is the
+                        // better one, and the only one that can phrase a job in
+                        // words. The button is for when you already know what you
+                        // want and are standing in this panel.
+                        Text("Ask your tiny to schedule something —\n\"remind me every morning at 9\"")
+                    } actions: {
+                        Button("New job") { creating = true }
+                    }
                 } else {
                     List {
                         localAlertsSection
-                        Section("Scheduled jobs") {
+                        // The count is the LIST's; the cap counts only enabled
+                        // rows, and a fired one-shot is disabled — `Capacity`
+                        // keeps the two populations apart, and answers with no
+                        // number at all until the rows are actually loaded (this
+                        // header sits OUTSIDE the state switch, so it renders
+                        // above "Couldn't load…" too).
+                        Section {
                             switch state {
                             case .loading: ProgressView()
                             case .failed(let e):
@@ -1546,6 +1899,14 @@ struct JobsView: View {
                                     }
                                 }
                             }
+                        } header: {
+                            Text(Capacity.jobsHeader(loadedJobs))
+                        } footer: {
+                            // Only at the cap, and only then — the note names the
+                            // way out, which is not the same as the way in.
+                            if let note = Capacity.jobsCapNote(loadedJobs) {
+                                Text(note)
+                            }
                         }
                     }
                     .refreshable { await loadLocalAlerts(); await load() }
@@ -1553,7 +1914,26 @@ struct JobsView: View {
             }
             .navigationTitle("Jobs")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } }
+                // Signed out there is nothing to post to — the panel's own
+                // sign-in gate is elsewhere, so gate the affordance rather than
+                // let it open a form that can only fail.
+                if token != nil {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button { creating = true } label: {
+                            Label("New job", systemImage: "plus")
+                        }
+                    }
+                }
+            }
+            // A new job must appear in the list, so the sheet's completion
+            // re-loads rather than trusting an optimistic insert — the worker
+            // assigns the id and the cadence phrasing is derived from what it
+            // stored, not from what was typed.
+            .sheet(isPresented: $creating) {
+                JobCreateView(token: token) { Task { await load() } }
+            }
             .confirmationDialog(
                 "Delete “\(pendingDelete?.name ?? "job")”?",
                 isPresented: Binding(get: { pendingDelete != nil },
@@ -1579,6 +1959,20 @@ struct JobsView: View {
             await loadLocalAlerts()
             await load()
         }
+    }
+
+    /// The rows, or nil while they are not loaded.
+    ///
+    /// ⚠️ `jobs` is `[]` in three different situations — before the fetch, after a
+    /// failed one, and for an account with no jobs — and only the third is a count
+    /// of zero. The header renders above all three (it is outside the state
+    /// switch, deliberately, so device-local agent alerts survive a server
+    /// outage), so passing the array straight in would print "· 0" over
+    /// "Couldn't load your scheduled jobs". `nil` is the difference between "none"
+    /// and "don't know yet", and `Capacity` prints no number for the latter.
+    private var loadedJobs: [JobRow]? {
+        if case .loaded = state { return jobs }
+        return nil
     }
 
     /// Pending schedule_alert notifications (agent-alert-* only)
@@ -1728,6 +2122,212 @@ struct JobsView: View {
         // Reload either way: server truth is the only thing worth painting, and
         // on failure that truth is the row still being there.
         await load()
+    }
+}
+
+/// Create a scheduled job — the phone's half of what the web calls "ask your
+/// tiny to schedule one".
+///
+/// The whole design question is which cadences to offer, and the answer is: the
+/// three the worker's `validSchedule` actually accepts, as three pickers, so an
+/// invalid schedule cannot be composed. A free-text field for the DSL would put
+/// `daily@25:70` and `*/0m` one typo away — the first is rejected by the worker
+/// with a message nobody can act on, and the second is worse: it is ACCEPTED,
+/// stored enabled, never fires, and holds one of ten job slots forever.
+struct JobCreateView: View {
+    let token: String?
+    /// Called after a job is genuinely created, so the list reloads from server
+    /// truth rather than an optimistic insert.
+    let created: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("cfg_tiny_name", store: UserDefaults(suiteName: WidgetStore.suite)) private var tinyName = ""
+
+    enum Mode: String, CaseIterable, Identifiable {
+        case every = "Repeat"
+        case daily = "Daily"
+        case once = "Once"
+        var id: String { rawValue }
+    }
+
+    @State private var mode: Mode = .daily
+    @State private var name = ""
+    @State private var prompt = ""
+    @State private var everyN = 30
+    @State private var everyUnit: JobCadence.EveryUnit = .minutes
+    /// Defaults to a round hour rather than "now", which would otherwise be a
+    /// daily job firing at 14:37.
+    @State private var atTime: Date = JobCreateView.nextRoundHour()
+    @State private var inMinutes = 60
+    @State private var saving = false
+    @State private var error: String?
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("Name", text: $name)
+                        .textInputAutocapitalization(.sentences)
+                    // The prompt IS the job — it's the message the scheduler
+                    // sends the tiny when it fires, so it reads like something
+                    // you'd say, not like a config value.
+                    TextField("What should it do?", text: $prompt, axis: .vertical)
+                        .lineLimit(3...8)
+                } footer: {
+                    Text("When it fires, your tiny receives this as a message and answers it — you'll get the result as a notification.")
+                }
+
+                Section("When") {
+                    Picker("Cadence", selection: $mode) {
+                        ForEach(Mode.allCases) { Text($0.rawValue).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+
+                    switch mode {
+                    case .every:
+                        Stepper(value: $everyN, in: 1...240) {
+                            Text("Every \(everyN) \(everyUnit == .minutes ? "min" : "hr")")
+                        }
+                        Picker("Unit", selection: $everyUnit) {
+                            Text("minutes").tag(JobCadence.EveryUnit.minutes)
+                            Text("hours").tag(JobCadence.EveryUnit.hours)
+                        }
+                        .pickerStyle(.segmented)
+                    case .daily:
+                        DatePicker("At", selection: $atTime, displayedComponents: .hourAndMinute)
+                    case .once:
+                        Stepper(value: $inMinutes, in: 1...10080) {
+                            Text("In \(JobCreateView.inWords(inMinutes))")
+                        }
+                    }
+                }
+
+                if let error {
+                    Section {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                    }
+                }
+
+                Section {
+                    Button {
+                        Task { await save() }
+                    } label: {
+                        if saving { ProgressView() } else { Text("Create job") }
+                    }
+                    // Both are required server-side (400 otherwise) — refuse
+                    // here so the round trip isn't spent learning that.
+                    .disabled(saving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                              || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                } footer: {
+                    // The cap is the worker's and it answers 429; saying so up
+                    // front beats surfacing that. ⚠️ "ACTIVE" is load-bearing —
+                    // this said "Up to 10 scheduled jobs per account", which is
+                    // the same population mistake the list header made in the
+                    // other direction: spent one-shots stay in the list and count
+                    // for nothing, so someone reading 12 rows would believe they
+                    // were two over a limit they are nowhere near.
+                    Text("Up to \(Capacity.jobActiveCap) active scheduled jobs per account.")
+                }
+            }
+            .navigationTitle("New job")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) { Button("Cancel") { dismiss() } }
+            }
+        }
+    }
+
+    /// The next :00 on the clock — a sane default for a daily job.
+    static func nextRoundHour(from now: Date = Date(), calendar: Calendar = .current) -> Date {
+        let h = calendar.component(.hour, from: now)
+        return calendar.date(bySettingHour: (h + 1) % 24, minute: 0, second: 0, of: now) ?? now
+    }
+
+    /// "90 min" reads worse than "1 hr 30 min" on a stepper that goes to a week.
+    static func inWords(_ minutes: Int) -> String {
+        if minutes < 60 { return "\(minutes) min" }
+        let h = minutes / 60, m = minutes % 60
+        if h < 24 { return m == 0 ? "\(h) hr" : "\(h) hr \(m) min" }
+        let d = h / 24, rh = h % 24
+        return rh == 0 ? "\(d) day\(d == 1 ? "" : "s")" : "\(d)d \(rh)h"
+    }
+
+    /// The request body for a mode — pure, so the DSL and the one-shot's key are
+    /// pinned without a network or a view.
+    ///
+    /// ⚠️ `run_in_minutes` and `schedule` are mutually exclusive at the route: it
+    /// only computes `runAt` `if run_in_minutes !== undefined && !schedule`, so
+    /// sending both silently makes the job recurring and drops the "once".
+    /// `nonisolated` because a `View`'s statics inherit `@MainActor`, and a
+    /// non-Sendable `[String: Any]` cannot be returned from a main-actor method
+    /// into a nonisolated one — which is what a `@Test` function is. Nothing
+    /// here touches the view, so the isolation was never earning anything.
+    nonisolated static func body(mode: Mode, name: String, prompt: String, tiny: String,
+                                 everyN: Int, everyUnit: JobCadence.EveryUnit,
+                                 atTime: Date, inMinutes: Int) -> [String: Any] {
+        var b: [String: Any] = [
+            "name": name.trimmingCharacters(in: .whitespacesAndNewlines),
+            "prompt": prompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            // '' would post an empty tiny; the route's own default is 'tiny'.
+            "tiny": tiny.isEmpty ? "tiny" : tiny,
+        ]
+        switch mode {
+        case .every: b["schedule"] = JobCadence.every(everyN, unit: everyUnit)
+        // ⚠️ NOT the picker's digits — the DSL stores UTC. See JobCadence.daily.
+        case .daily: b["schedule"] = JobCadence.daily(from: atTime)
+        case .once: b["run_in_minutes"] = max(1, inMinutes)
+        }
+        return b
+    }
+
+    /// POSTs the job and answers only what this screen needs to read.
+    ///
+    /// ⚠️ Swift 6 region analysis: a `[String: Any]` that exists in a
+    /// main-actor-isolated frame cannot be *sent* to nonisolated `Api.post` —
+    /// "sending main actor-isolated value of non-Sendable type". Its `Any`
+    /// values are not provably Sendable and the actor is still holding it, so
+    /// no amount of serialize-and-rehydrate at the call site helps: the
+    /// rehydrated copy is isolated too. `nonisolated` is the actual fix — the
+    /// dictionary is built where nothing is isolated. The bridge in is `Data`
+    /// and the bridge out is `String?`, both Sendable, so nothing crosses that
+    /// a race could reach.
+    ///
+    /// The route passes the worker's body through, and the worker answers the
+    /// created job — an `error` key (the 10-job cap, a validation refusal) can
+    /// ride a 200, so it is read rather than assumed absent.
+    nonisolated private static func submit(_ encoded: Data, token: String?) async throws -> String? {
+        let fresh = (try? JSONSerialization.jsonObject(with: encoded)) as? [String: Any] ?? [:]
+        let d: [String: Any] = try await Api.post("/api/jobs", token: token, body: fresh)
+        return d["error"] as? String
+    }
+
+    private func save() async {
+        saving = true
+        error = nil
+        guard let encoded = try? JSONSerialization.data(
+            withJSONObject: Self.body(mode: mode, name: name, prompt: prompt, tiny: tinyName,
+                                      everyN: everyN, everyUnit: everyUnit,
+                                      atTime: atTime, inMinutes: inMinutes)) else {
+            error = "Couldn't prepare the job."
+            saving = false
+            return
+        }
+        do {
+            if let e = try await Self.submit(encoded, token: token) {
+                error = e
+                saving = false
+                return
+            }
+            saving = false
+            created()
+            dismiss()
+        } catch ApiError.http(let code, let serverMsg) {
+            error = Api.httpMessage(code, serverMsg)
+            saving = false
+        } catch {
+            self.error = error.localizedDescription
+            saving = false
+        }
     }
 }
 
@@ -2151,12 +2751,26 @@ func capabilityIcon(_ c: String) -> String? {
     // 🐬📶 The same board, reached over Bluetooth by the phone wearing this chip
     // instead of down a USB cable. A SEPARATE token on purpose: one shared
     // `flipper` would let the backend route an IR capture to a phone, and BLE
-    // has no receive RPC at all, so "nothing received" and "never listened" are
-    // the same answer — the one failure a user cannot tell from success.
+    // has no receive RPC at all — docs/flipper-ble-ios-design.md §4.2.
     case "flipper_ble": return "dot.radiowaves.right"
     // ── Endpoint robots (their own API declares these) ──
     case "print": return "printer.fill"
     case "telemetry": return "waveform.path.ecg"
+    // 🧠 q-the-brain declares these: the 13×8 LED matrix and the STM32 link.
+    case "led": return "square.grid.3x3.fill"
+    case "mcu": return "cpu"
+    // 🧊 A model to BUILD, not a build in progress, so the chip beside
+    // `printer.fill` reads as "hand it geometry" rather than a second way of saying
+    // "prints". ⚠️ NOT `cube.transparent`, which was the first choice and is wrong:
+    // DEVICE_KIND_GLYPH already spends it on the "endpoint" KIND, so a printer row
+    // would draw the identical picture twice in one row meaning two different things
+    // (what the device IS, and one thing it can DO). `view.3d` is also the nearer
+    // analogue to Android's `Icons.Outlined.ViewInAr`.
+    // ⚠️ The live printer declares this (["chat","telemetry","print","cad"]) and
+    // every table here missed it, on BOTH phones, byte-equal to each other and both
+    // wrong: the parity suite compares the two phones and nothing compared either to
+    // what a device SENDS.
+    case "cad": return "view.3d"
     default: return nil
     }
 }
@@ -2233,6 +2847,11 @@ let CAPABILITY_LABELS: [String: String] = [
     // ── Endpoint robots ──
     "print": "prints",
     "telemetry": "telemetry",
+    "led": "LED matrix",
+    "mcu": "MCU",
+    // The web's own hint for this token says "accepts a CAD/model file to build",
+    // so the chip says the noun and lets the icon carry the rest.
+    "cad": "3D models",
 ]
 
 /// A capability's label, falling back to the token with its separators opened up.
@@ -2338,6 +2957,9 @@ enum CapabilityRibbon {
 private let DEVICE_PLATFORM_GLYPH: [(needle: String, symbol: String)] = [
     ("nicla-vision", "camera.aperture"),
     ("nicla-voice", "mic.and.signal.meter"),
+    ("nicla-sense", "sensor"),
+    // 🧠 The Arduino UNO Q (q-the-brain endpoint): a Linux SBC + MCU on one board.
+    ("q-the-brain", "cpu"),
     ("darwin", "laptopcomputer"),
     ("mac", "laptopcomputer"),
     ("ipad", "ipad"),
@@ -2392,6 +3014,8 @@ private let DEVICE_KIND_GLYPH: [String: String] = [
 private let DEVICE_PLATFORM_NAME: [(needle: String, name: String)] = [
     ("nicla-vision", "Nicla Vision"),
     ("nicla-voice", "Nicla Voice"),
+    ("nicla-sense", "Nicla Sense"),
+    ("q-the-brain", "UNO Q"),
     ("darwin", "Mac"),
     ("mac", "Mac"),
     ("ipad", "iPad"),
@@ -2563,7 +3187,7 @@ enum DevicePresence {
 /// when it may not?
 ///
 /// The worker's own definition of a dial-in device answers it. `PULL_KINDS`
-/// (worker/src/devices.ts) is documented as the kinds that "hold a
+/// (chatgpt-plugin-tinyai/src/devices.ts) is documented as the kinds that "hold a
 /// `tind_` token, heartbeat, poll the relay" — one loop, both jobs. A device
 /// outside the 60s `PRESENCE_WINDOW_S` is therefore not reading the relay
 /// either, so an invoke posted to it can only wait out the caller's own poll
@@ -3006,6 +3630,87 @@ enum VoiceFmt {
     }
 }
 
+/// 🔴 Why an adoption didn't happen — one case per NEXT MOVE, because the moves
+/// are opposite and the panel used to offer only one of them.
+///
+/// Every failure printed the same line:
+///
+///     "Couldn't claim the necklace on the server. Check your connection and try again."
+///
+/// `/api/devices/adopt` goes out of its way to make the causes tellable apart —
+/// 401 `login required`, 404 `device not found`, 503 `registry unreachable` with
+/// an explicit `retryable: true`, 424 carrying the worker's own reason — and its
+/// own comment says why it bothers: *"the caller's next move (enroll it fresh)
+/// differs from what it should do on an outage (retry)"*. iOS discarded all of
+/// it with `try?` and printed the outage advice for every one, so the reader
+/// whose session had expired, and the reader whose necklace had been revoked,
+/// were both sent to look at their WiFi. Neither retrying nor a better signal
+/// fixes either.
+///
+/// ⚠️ The guard immediately above the one that produced that line already
+/// carries this exact lesson, in a comment: *"Say WHICH failure it was.
+/// 'Couldn't find it' sends the user hunting for the necklace when the real
+/// problem is a radio switch."* It was written for the BLE branch and never
+/// crossed the four lines to the network one.
+///
+/// ⚠️⚠️ The case that had no words at all: **adoption is a token ROTATION**, so
+/// a 2xx means the other client's credential is ALREADY dead (the route: "The
+/// OLD token stops working immediately — that is the point, not a side effect").
+/// If the reply arrives without a usable token, the necklace is relayed by
+/// NOBODY — the precise state `adopt()`'s scan-first ordering exists to prevent
+/// — and the old copy called that "check your connection", which describes the
+/// one thing that demonstrably worked. `Api.request` throws `.http` for every
+/// non-2xx, so `.badResponse` out of `Api.post` can ONLY mean a 2xx whose body
+/// wasn't usable: the handover landed and the key didn't.
+enum AdoptFailure: Equatable {
+    /// 401 — the session, not the necklace. Retrying cannot help.
+    case signedOut
+    /// 404 — the row is gone (revoked, or never this account's). The route's own
+    /// comment names the next move, and it is not retry: enroll it fresh.
+    case notInFleet
+    /// No answer at all, or a 5xx. The rotation may or may not have landed on
+    /// the far side, and adopting again settles it either way.
+    case uncertain
+    /// A 2xx with no usable token. It DID land; this phone just didn't get the key.
+    case keyNotDelivered
+    /// The server explained itself (424 with the worker's reason, a 400, …) —
+    /// it is describing THIS request, so it keeps the floor.
+    case refused(String)
+
+    /// ⚠️ `URLError` is checked BEFORE the `ApiError` cast, not after: a
+    /// transport failure never produced a status, and `.refused` would print
+    /// "Unexpected response" for a request that got no response.
+    static func classify(_ error: Error) -> AdoptFailure {
+        if error is URLError { return .uncertain }
+        guard let api = error as? ApiError else { return .refused(LoadFailure.message(error)) }
+        if case .badResponse = api { return .keyNotDelivered }
+        switch api.status {
+        case 401: return .signedOut
+        case 404: return .notInFleet
+        // 0 is the house code for "nothing arrived"; 5xx includes the route's
+        // own 503 `registry unreachable, retryable: true`.
+        case 0, .some(500...599): return .uncertain
+        default: return .refused(LoadFailure.message(error))
+        }
+    }
+
+    /// ⚠️ 401 defers to `Api.friendlyHTTPError` instead of restating it — that
+    /// table is what `HTTPErrorTests` exists to keep from drifting, and an
+    /// expired session must read the same here as in every other sheet.
+    var message: String {
+        switch self {
+        case .signedOut: return Api.friendlyHTTPError(401)
+        case .notInFleet:
+            return "This necklace isn't in your fleet any more. Set it up again from Nearby."
+        case .uncertain:
+            return "Couldn't reach tiny, so the necklace may or may not have moved yet. Tap Adopt again — that settles it either way."
+        case .keyNotDelivered:
+            return "The necklace moved to this phone but its key didn't arrive, so nothing is relaying it yet. Tap Adopt again."
+        case .refused(let why): return why
+        }
+    }
+}
+
 /// 🎙️ The Nicla Voice's panel — RelayCameraPanel's counterpart for a board with
 /// no camera and no internet.
 ///
@@ -3227,20 +3932,33 @@ struct VoiceDevicePanel: View {
         ble.startScan(duration: 6)
         try? await Task.sleep(for: .seconds(6.5))
         guard let found = ble.devices.first(where: { $0.tiny?.kind == .voice }) else {
-            // Say WHICH failure it was. "Couldn't find it" sends the user
-            // hunting for the necklace when the real problem is a radio switch.
-            adoptError = ble.state == "unauthorized" ? "Bluetooth permission is denied for tiny on this phone."
-                : ble.state == "poweredOff" ? "Bluetooth is turned off on this phone."
-                : "Couldn't see the necklace nearby. Bring it closer — and if another phone is holding it, tap Release there first."
+            // Say WHICH failure it was. "Couldn't find it" sends the user hunting
+            // for the necklace when the real problem is a radio switch — or a
+            // scan that never ran at all, which is what a phone with no radio and
+            // a permission verdict still in flight both looked like here. The
+            // shared rule answers that; only the found-nothing sentence is ours,
+            // because it asks for something rather than reporting.
+            adoptError = BleEmptyState.obstacle(scanning: ble.scanning, state: ble.state,
+                                                completedScan: ble.completedScan)
+                ?? "Couldn't see the necklace nearby. Bring it closer — and if another phone is holding it, tap Release there first."
             return
         }
 
-        guard let r: [String: Any] = try? await Api.post(
-            "/api/devices/adopt", token: Keychain.get("tiny_token"),
-            body: ["deviceId": deviceId]),
-            let token = r["device_token"] as? String, !token.isEmpty
-        else {
-            adoptError = "Couldn't claim the necklace on the server. Check your connection and try again."
+        // Catch, don't `try?`: the route answers a DIFFERENT status per cause
+        // precisely so this branch can act differently. See AdoptFailure.
+        let r: [String: Any]
+        do {
+            r = try await Api.post("/api/devices/adopt", token: Keychain.get("tiny_token"),
+                                   body: ["deviceId": deviceId])
+        } catch {
+            adoptError = AdoptFailure.classify(error).message
+            return
+        }
+        // A 2xx got us here, so the rotation LANDED and the previous holder's
+        // token is already dead. No usable key means the necklace is relayed by
+        // nobody until this is retried, which is worth saying out loud.
+        guard let token = r["device_token"] as? String, !token.isEmpty else {
+            adoptError = AdoptFailure.keyNotDelivered.message
             return
         }
 
@@ -3248,6 +3966,144 @@ struct VoiceDevicePanel: View {
         // panel switch to the isMine branch, which is honest: this phone can
         // genuinely speak for the board from this point.
         gw.register(deviceId: deviceId, token: token, beaconId: found.id, name: found.name)
+    }
+}
+
+/// 🌡️ The Nicla Sense ME's panel — the Voice panel's sibling for a board that
+/// measures instead of listens.
+///
+/// Everything here comes from the phone's own BLE link (NiclaSenseGateway):
+/// there is no server-side truth to read, the board heartbeats only through
+/// this phone. The first thing on the card is whether the board is MOVING
+/// right now — that is the one reading you can check against your own hand
+/// and know instantly whether the whole chain is live.
+struct SenseDevicePanel: View {
+    let deviceId: String
+    let deviceName: String
+    @ObservedObject private var gw = NiclaSenseGateway.shared
+    @EnvironmentObject var session: TinySession
+    @State private var adopting = false
+    @State private var adoptError: String?
+
+    private var isMine: Bool { gw.unit?.deviceId == deviceId }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !isMine {
+                Label("Relayed by a computer or another phone.", systemImage: "iphone.slash")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Text("Adopting moves the board to this phone and keeps its history. The other gateway stops relaying it.")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Button {
+                    Task { await adopt() }
+                } label: {
+                    Label(adopting ? "Adopting…" : "Adopt on this phone", systemImage: "iphone.badge.play")
+                        .font(.caption2)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(adopting)
+                if let adoptError {
+                    Text(adoptError).font(.caption2).foregroundStyle(.orange)
+                }
+            } else {
+                HStack(spacing: 6) {
+                    Image(systemName: gw.connected ? "iphone.radiowaves.left.and.right" : "iphone.slash")
+                        .foregroundStyle(gw.connected ? .green : .secondary)
+                    Text(gw.connected ? "relayed by this phone" : "out of range")
+                        .font(.caption2).foregroundStyle(.secondary)
+                    if gw.connected, let r = gw.rssi {
+                        Text("\(r) dBm").font(.caption2).foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                    if gw.connected {
+                        SenseMotionBadge(moving: gw.moving)
+                    }
+                }
+                if gw.connected, let e = gw.env {
+                    SenseEnvGrid(env: e)
+                    if !e.calibrated {
+                        Text("Air quality is still calibrating (BSEC \(e.bsecAccuracy)/3) — IAQ, CO₂ and VOC are placeholders until it reaches 3.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                if gw.connected, let m = gw.motion {
+                    Text(String(format: "accel %.2f g · gyro %.0f °/s · steps %d", m.accelMagnitude, m.gyroMagnitude, m.steps))
+                        .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+                }
+                if gw.connected, let s = gw.status {
+                    Text("\(s.fw) · up \(SenseFmt.uptime(s.uptimeS)) · \(String(format: "%.2f", s.vbat)) V" + (s.fault != 0 ? " · FAULT \(s.fault)" : "") + (gw.answered > 0 ? " · answered \(gw.answered)" : ""))
+                        .font(.caption2).foregroundStyle(s.fault != 0 ? Color.orange : Color.secondary)
+                }
+                if let e = gw.lastError {
+                    Text(e).font(.caption2).foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func adopt() async {
+        adopting = true
+        adoptError = nil
+        defer { adopting = false }
+        let ble = Bluetooth.shared
+        ble.startScan(duration: 6)
+        try? await Task.sleep(for: .seconds(6.5))
+        guard let found = ble.devices.first(where: { $0.tiny?.kind == .sense && $0.name == deviceName })
+                ?? ble.devices.first(where: { $0.tiny?.kind == .sense }) else {
+            adoptError = BleEmptyState.obstacle(scanning: ble.scanning, state: ble.state,
+                                                completedScan: ble.completedScan)
+                ?? "Couldn't see the board nearby. Power it and bring it closer — and if a computer is holding it, stop that gateway first."
+            return
+        }
+        adoptError = await gw.adopt(beacon: found, sessionToken: session.token)
+    }
+}
+
+/// The word MOVING, or "still" — big enough to read across a desk, animated
+/// only while true so a resting board is a quiet card.
+struct SenseMotionBadge: View {
+    let moving: Bool
+    var body: some View {
+        Label(moving ? "MOVING" : "still",
+              systemImage: moving ? "move.3d" : "circle.dotted")
+            .font(.caption2.weight(moving ? .bold : .regular))
+            .foregroundStyle(moving ? .orange : .secondary)
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .background((moving ? Color.orange : Color.secondary).opacity(moving ? 0.18 : 0.08), in: Capsule())
+            .symbolEffect(.pulse, isActive: moving)
+            .animation(.easeInOut(duration: 0.2), value: moving)
+            .accessibilityLabel(moving ? "board is moving" : "board is still")
+    }
+}
+
+/// Four environment readings in a compact grid.
+struct SenseEnvGrid: View {
+    let env: SenseEnv
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 4) {
+            cell("thermometer", String(format: "%.1f°", env.tempC), "temp")
+            cell("humidity", String(format: "%.0f%%", env.humidityPct), "humidity")
+            cell("barometer", String(format: "%.0f", env.pressureHpa), "hPa")
+            cell("aqi.medium", env.calibrated ? "\(env.iaq)" : "…", "IAQ")
+        }
+    }
+    private func cell(_ symbol: String, _ value: String, _ unit: String) -> some View {
+        VStack(spacing: 1) {
+            Image(systemName: symbol).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.monospacedDigit().weight(.semibold))
+            Text(unit).font(.system(size: 9)).foregroundStyle(.tertiary)
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
+enum SenseFmt {
+    static func uptime(_ s: Int) -> String {
+        if s < 60 { return "\(s)s" }
+        if s < 3600 { return "\(s / 60)m" }
+        return String(format: "%dh%02dm", s / 3600, (s % 3600) / 60)
     }
 }
 
@@ -3264,6 +4120,10 @@ struct FlipperDevicePanel: View {
     let hostName: String
     let hostPresence: DevicePresence
     let token: String?
+    /// The OTHER route to the same board. Observed, not read once: the asleep line
+    /// below depends on whether this phone is holding the Flipper right now, and
+    /// that changes while this row is on screen.
+    @ObservedObject private var flipper = FlipperGateway.shared
     @State private var status: String?
     /// When `status` was read. The line it dates is prose in the present tense —
     /// firmware, a battery percentage, which machine the cable is in — and none
@@ -3298,7 +4158,15 @@ struct FlipperDevicePanel: View {
                 // Honest wording, matching the backend flipper_status rule: the
                 // Flipper is fine, the LAPTOP it lives on is asleep. Saying
                 // "Flipper offline" sends the user to unplug a working cable.
-                Label("\(hostName) isn't online — wake that machine to reach the Flipper.",
+                //
+                // ⚠️ …and then it stopped, for 26 cycles: "wake that machine" was
+                // the whole remedy on the one surface that can SEE the second
+                // route. This phone may be holding the same board over Bluetooth
+                // as this renders, which is what `otherRouteClause()` says — the
+                // panel-side twin of `aboutTheOtherRoute` in flipper.ts, which the
+                // agent has had since c21.
+                Label("\(hostName) isn't online — wake that machine to reach the Flipper."
+                      + flipper.otherRouteClause(),
                       systemImage: "moon.zzz")
                     .font(.caption2).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -3860,7 +4728,11 @@ struct NearbyBeaconCard: View {
     /// sources of truth for one wire format.
     private var detail: String {
         guard let t = d.tiny else { return "tiny hardware" }
-        return t.provisioned ? "configured · ready to reconfigure" : "ready to set up"
+        guard t.provisioned else { return "ready to set up" }
+        // What the button will actually do. A configured Vision's tap now changes
+        // its WiFi over Bluetooth instead of enrolling it again.
+        return TinyBeaconSheet.tapped(d) == .wifi(d)
+            ? "configured · change its WiFi" : "configured · ready to reconfigure"
     }
 
     var body: some View {
@@ -3887,7 +4759,10 @@ struct NearbyBeaconCard: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("\(d.name), \(detail), \(BleSignal.label(rssi: d.rssi))")
             Spacer(minLength: 0)
-            Button(d.tiny?.provisioned == true ? "Reconfigure" : "Set up", action: onSetUp)
+            // The words come from the same place the DESTINATION does. They were a
+            // ternary here, and "Reconfigure" pointed a person whose network had
+            // changed at the one flow that enrolls a second device row.
+            Button(TinyBeaconSheet.actionLabel(d), action: onSetUp)
                 .font(.caption.weight(.semibold))
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
@@ -4044,7 +4919,7 @@ enum DevicesHarness {
 /// At the other end the two sentences contradicted each other: the count said
 /// the account was full while the line beneath it explained how to add another.
 /// The worker refuses that enrollment with "device limit reached (20) — revoke
-/// one first" (worker/src/devices.ts), so say the same thing here
+/// one first" (chatgpt-plugin-tinyai/src/devices.ts), so say the same thing here
 /// instead of instructions that can only end in that error.
 ///
 /// Pure, like `BleEmptyState` two rows down the same sheet: what a surface may
@@ -4090,9 +4965,54 @@ enum DevicesFooter {
 /// opposite, that nothing has been decided yet.
 ///
 /// Web parity: `lib/devices/revoke-message.ts`, same lead clause.
+///
+/// ⚠️ …and then it said that about answers that never arrived. "Its token still
+/// works" is a CLAIM, and this sheet asserted it for a dropped connection and a
+/// worker that broke mid-write — the two cases where the revoke may well have
+/// happened and only the answer was lost. See `decided`.
 enum RevokeFailure {
-    /// The outcome clause, before any reason. Byte-identical on web (pinned).
+    /// The outcome clause for a DECISION. Byte-identical on web + Android (pinned).
     static let lead = "Not revoked — its token still works."
+
+    /// The outcome clause when there was no decision — also byte-identical across
+    /// the three surfaces.
+    ///
+    /// It states the same FACT the other lead does — what is true of the device's
+    /// token — rather than describing the HTTP call, and mirrors its shape, so
+    /// somebody who has read "its token still works" sees at a glance that this
+    /// one is hedged. And it carries the action, because there IS one here: the
+    /// list is the answer, and asking twice is free.
+    static let unconfirmedLead =
+        "Not confirmed — its token may or may not still work, and revoking again is safe."
+
+    /// Is this status a decision about the revoke — proof it did not happen?
+    ///
+    /// Only a 4xx. Every 4xx on this path refuses BEFORE anything is written:
+    /// `/api/devices` answers 401 with no session and 400 with no deviceId, both
+    /// before it calls the worker, and its 424 arm fires only for a worker 4xx —
+    /// whose own 401/400 arms precede `DEVICE_REVOKE_SQL`.
+    ///
+    /// Nothing else is, and the old sentence claimed all of them:
+    ///
+    ///  - **0** — `try? URLSession.data` returned nil, so nothing answered. The
+    ///    DELETE may have been received and executed; the ANSWER is what was lost.
+    ///  - **5xx** — it broke mid-decision. The route's own transient arm never
+    ///    reached the worker, but a worker 5xx can land after the UPDATE ran.
+    ///  - **a 2xx that is not a success** — a mid-redeploy HTML page or an
+    ///    intermediary answering 200 with something that isn't this route's body.
+    ///    It says nothing whatsoever about the row.
+    ///
+    /// `unconfirmedLead` can promise a safe retry because `DEVICE_REVOKE_SQL` is
+    /// an idempotent `UPDATE … SET revoked = 1` with no `revoked = 0` guard, and
+    /// `DEVICE_LIST_SQL` filters `revoked = 0` — so the list this sheet has just
+    /// reloaded IS the answer. Both facts are pinned in
+    /// tests/revoke-message.test.ts, because a promise resting on another repo's
+    /// SQL is a promise worth checking.
+    ///
+    /// The same rule the server-side send path draws, in the same words: a 4xx is
+    /// a decision, a 5xx or a dead connection is the absence of one
+    /// (`lib/chat/relay-send.ts`).
+    static func decided(_ status: Int) -> Bool { (400...499).contains(status) }
 
     /// nil when the token really is dead; the sheet's red line when it isn't.
     ///
@@ -4104,7 +5024,9 @@ enum RevokeFailure {
     /// assume the two always agree.
     static func message(status: Int?, body: [String: Any]?) -> String? {
         if let status, (200...299).contains(status), (body?["ok"] as? Bool) == true { return nil }
-        return lead + " " + Api.httpMessage(status ?? 0, body?["error"] as? String)
+        let code = status ?? 0
+        return (decided(code) ? lead : unconfirmedLead)
+            + " " + Api.httpMessage(code, body?["error"] as? String)
     }
 }
 
@@ -4121,7 +5043,11 @@ struct DevicesView: View {
     @State private var revokeError: String?
     /// 💎 Pairing lives here now, not behind a separate menu item.
     @ObservedObject private var ble = Bluetooth.shared
-    @State private var setupTarget: BleDevice?
+    /// One item for BOTH beacon sheets. Two `.sheet(item:)` modifiers on one view
+    /// is how the second one silently never presents; `TinyBeaconSheet` also owns
+    /// the choice between them, which the panel used to make with a ternary that
+    /// only knew two states.
+    @State private var beaconSheet: TinyBeaconSheet?
 
     /// A harness run has no Keychain device id, and `myDeviceId` nil silently
     /// turns off two things worth looking at: the "this phone" pill and the
@@ -4188,7 +5114,13 @@ struct DevicesView: View {
             // radio: a necklace switched on since the sheet opened should appear
             // on the same gesture that refreshes everything else.
             .refreshable { revokeError = nil; ble.startScan(duration: Self.scanWindow); await load() }
-            .sheet(item: $setupTarget) { d in TinySetupView(beacon: d) }
+            .sheet(item: $beaconSheet) { sheet in
+                switch sheet {
+                case .setUp(let d): TinySetupView(beacon: d)
+                case .wifi(let d): TinyWifiView(beacon: d)
+                case .adopt(let d): SenseAdoptView(beacon: d)
+                }
+            }
             .navigationTitle("My devices")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
@@ -4265,7 +5197,7 @@ struct DevicesView: View {
                 }
             } else {
                 ForEach(beacons) { d in
-                    NearbyBeaconCard(d: d) { setupTarget = d }
+                    NearbyBeaconCard(d: d) { beaconSheet = TinyBeaconSheet.tapped(d) }
                 }
             }
         } header: {
@@ -4284,6 +5216,14 @@ struct DevicesView: View {
     @ViewBuilder private func cell(_ d: DeviceRow) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             DeviceRowView(d: d, isThisPhone: d.id == thisPhone)
+            if PineappleCore.matches(platform: d.platform, capabilities: d.capabilities) {
+                NavigationLink {
+                    PineappleScreen(device: d, token: token)
+                } label: {
+                    Label("Open Pineapple", systemImage: "wifi")
+                }
+                .accessibilityIdentifier("pineapple-open")
+            }
             // 🤖 A robot's chamber camera + telemetry, always visible (web
             // parity). Only endpoint devices poll anything — every other row
             // costs nothing extra.
@@ -4308,6 +5248,18 @@ struct DevicesView: View {
             if d.platform == "nicla-voice" {
                 VoiceDevicePanel(deviceId: d.id)
             }
+            // 🌡️ The Sense ME — same BLE-only situation as the Voice, but it
+            // MEASURES: the panel is live readings plus a moving/still badge.
+            if d.platform == "nicla-sense" {
+                SenseDevicePanel(deviceId: d.id, deviceName: d.name)
+            }
+            // 🧲 The Sticky — the e-ink phone on the fridge. A PULL device
+            // like the necklaces (relay poll every 5s), so its panel is all
+            // envelopes: mirror the glass, flip shell pages, ask on-screen.
+            if d.platform == "esp32s3" {
+                StickyPanel(deviceId: d.id, deviceName: d.name,
+                            presence: d.presence, token: token)
+            }
             // 🐬 The Flipper is USB-only: its panel is really about the host it
             // hangs off, so the host's name and presence go in with it.
             if d.capabilities.contains("flipper") {
@@ -4317,7 +5269,7 @@ struct DevicesView: View {
             // 🐬📶 …and the OTHER route to the same board: the BLE link THIS
             // phone holds. It hangs off this phone's row rather than a host's,
             // because with no cable anywhere the phone IS the host — which is
-            // the whole point of it: unplug the cable and the board stays usable.
+            // the whole point of it (docs/flipper-ble-ios-design.md).
             if d.id == thisPhone {
                 FlipperBlePanel()
             }
@@ -4364,6 +5316,11 @@ struct DevicesView: View {
     /// tunnel is not a reason to throw the user's devices away.
     private func load(silent: Bool = false) async {
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--pineapple-harness") {
+            devices = [PineapplePreview.row]
+            state = .loaded
+            return
+        }
         if DevicesHarness.usesDemoDataset(arguments: ProcessInfo.processInfo.arguments) {
             devices = Self.decodeDevices(DevicesHarness.serverWire())
             state = .loaded
@@ -4433,6 +5390,12 @@ struct DevicesView: View {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         req.httpBody = try? JSONSerialization.data(withJSONObject: ["deviceId": dev.id])
+        // The 30s house rule every `Api` verb carries, which this hand-rolled
+        // request never had — so it inherited URLSession's 60s default. That is
+        // the delay before `status` goes nil and `RevokeFailure` reaches for
+        // `unconfirmedLead`: a full minute of spinner over a destructive action,
+        // and the route's own deadline (`T()`, 10s) has long since fired.
+        req.timeoutInterval = 30
         // ⚠️ The BODY, not just the status code. The route answers a typed failure
         // (login required / deviceId required / revoke failed / a transport blip
         // marked `retryable`) and the status alone cannot tell the user which of
@@ -4450,5 +5413,77 @@ struct DevicesView: View {
         // row disappearing IS the message.
         await load()
         revokeError = RevokeFailure.message(status: status, body: body)
+    }
+}
+
+/// 🌡️ The sheet a Sense beacon opens from Nearby / the pairing card. Not a
+/// setup: the board stores no identity, so the only correct action is to
+/// adopt the fleet row that already carries its name. Says so, does it, and
+/// shows the first live reading as the proof.
+struct SenseAdoptView: View {
+    let beacon: BleDevice
+    @ObservedObject private var gw = NiclaSenseGateway.shared
+    @EnvironmentObject var session: TinySession
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.tinyAccent) private var accent
+    @State private var working = false
+    @State private var error: String?
+
+    private var isMine: Bool { gw.unit?.beaconId == beacon.id }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    LabeledContent("Kind", value: "Nicla Sense ME")
+                    LabeledContent("Name", value: beacon.name)
+                    LabeledContent("Radio", value: "Bluetooth only — this phone is its network")
+                } header: { Text("Board") }
+                Section {
+                    if isMine {
+                        HStack(spacing: 6) {
+                            Image(systemName: gw.connected ? "iphone.radiowaves.left.and.right" : "iphone.slash")
+                                .foregroundStyle(gw.connected ? .green : .secondary)
+                            Text(gw.connected ? "linked — relaying to your tiny" : "linking…")
+                            Spacer()
+                            if gw.connected { SenseMotionBadge(moving: gw.moving) }
+                        }
+                        if gw.connected, let e = gw.env { SenseEnvGrid(env: e) }
+                        Text("Move the board — the badge should say MOVING within a quarter second.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("This board was enrolled from a computer under the name it advertises. Adopting rotates its key onto this phone so the fleet sees it wherever you carry it. Nothing is re-enrolled.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button {
+                            Task {
+                                working = true
+                                error = await gw.adopt(beacon: beacon, sessionToken: session.token)
+                                working = false
+                            }
+                        } label: {
+                            Label(working ? "Adopting…" : "Adopt on this phone", systemImage: "iphone.badge.play")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(accent)
+                        .disabled(working || session.token == nil)
+                        if let error { Text(error).font(.caption).foregroundStyle(.orange) }
+                    }
+                } header: { Text(isMine ? "Live" : "Adopt") }
+                if isMine {
+                    Section {
+                        Button("Stop relaying from this phone", role: .destructive) {
+                            gw.forget()
+                            dismiss()
+                        }
+                        Text("Forgets the key here only. The board stays in your fleet; another gateway can adopt it.")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle(beacon.name)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
     }
 }

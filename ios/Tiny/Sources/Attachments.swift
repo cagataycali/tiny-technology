@@ -54,7 +54,11 @@ let MAX_DOCUMENT_BYTES = 3_000_000
 /// it — this is the batch guard the mobile clients were missing (only web had
 /// it), so a too-heavy set was caught server-side as a send failure instead of
 /// up front in the composer.
-let MAX_ATTACHMENTS_PAYLOAD_BYTES = 3_500_000
+/// ⚠️ Deliberately BELOW web's 3_500_000: this counts DECODED bytes, and
+/// 3.5MB decoded is 4.67MB of base64 on the wire — already past the ~4.5MB
+/// Edge cap before history/system context ride along. 2.8MB decoded ≈ 3.73MB
+/// encoded, leaving ~0.7MB of headroom for the rest of the request.
+let MAX_ATTACHMENTS_PAYLOAD_BYTES = 2_800_000
 
 extension Array where Element == PendingAttachment {
     /// Sum of the model-bound payloads (web `attachmentsPayloadBytes`).
@@ -74,15 +78,61 @@ let MAX_IMAGE_DIM: CGFloat = 1568
 /// same photo; text in a screenshot lost crispness the model then had to guess at.
 let MODEL_IMAGE_QUALITY: CGFloat = 0.85
 
+/// Per-image decoded byte budget for the model-bound JPEG. 1568px/q0.85
+/// bounds DIMENSIONS but not BYTES: a detailed camera shot (foliage, texture,
+/// low light noise) can still encode to 1.5–2MB, which base64 inflates to
+/// ~2.7MB — one photo + history could blow the ~4.5MB Edge request cap and
+/// the send died server-side with a generic error. Web re-encodes anything
+/// whose payload exceeds 1MB (lib/file-attachments.ts `oversized`); this is
+/// the iOS equivalent, enforced by walking quality down (0.85→0.5) and then
+/// dimensions (1568→1024) until the encode fits. Anthropic's vision pipeline
+/// tolerates this fine — a 1MB JPEG at ≤1568px keeps text crisp.
+/// Target ~20KB per photo: at this size a 4-photo message is ~107KB on the
+/// wire — sends never fight the Edge cap and survive weak cellular. The
+/// walk below trades resolution for bytes (1568px → 512px); the model still
+/// recognizes scenes/objects fine at 512–768px, though fine print in dense
+/// screenshots gets soft. Bump this back toward 1_000_000 if that tradeoff
+/// ever reverses.
+let MAX_IMAGE_BYTES = 20_000
+
 enum AttachmentCodec {
     static func encode(_ image: UIImage) -> PendingAttachment? {
-        // Model-bound image at web parity (1568px / q0.85). The 96px thumb is a
+        // Model-bound image at web parity (1568px / q0.85), then a byte-budget
+        // walk: quality steps first (cheap, keeps detail), dimension steps only
+        // if quality alone can't fit MAX_IMAGE_BYTES. The 96px thumb is a
         // history-only preview — deliberately tiny so the persisted store stays
         // light (never sent to the model), so it keeps its own low settings.
-        guard let full = downscale(image, maxDim: MAX_IMAGE_DIM).jpegData(compressionQuality: MODEL_IMAGE_QUALITY),
+        guard let full = encodeWithinBudget(image),
               let thumb = downscale(image, maxDim: 96).jpegData(compressionQuality: 0.6)
         else { return nil }
         return PendingAttachment(base64: full.base64EncodedString(), thumb: thumb.base64EncodedString())
+    }
+
+    /// Walk (dimension, quality) pairs from web-parity best-case down until the
+    /// JPEG fits MAX_IMAGE_BYTES. Ordered so the FIRST fit is the best-looking
+    /// one: hold 1568px through quality 0.5 before surrendering resolution —
+    /// screenshots/receipts lose more to downscaling than to compression.
+    /// Last rung (1024px/q0.5) is the floor: return it even if it somehow
+    /// exceeds the budget (never nil for a decodable image — a slightly-over
+    /// send that might pass beats a silent drop).
+    static func encodeWithinBudget(_ image: UIImage, budget: Int = MAX_IMAGE_BYTES) -> Data? {
+        let rungs: [(dim: CGFloat, q: CGFloat)] = [
+            (MAX_IMAGE_DIM, MODEL_IMAGE_QUALITY), (MAX_IMAGE_DIM, 0.7),
+            (MAX_IMAGE_DIM, 0.6), (MAX_IMAGE_DIM, 0.5),
+            (1280, 0.6), (1024, 0.6), (1024, 0.5),
+            // Aggressive tail for tiny budgets (MAX_IMAGE_BYTES ≈ 20KB):
+            // resolution buys more bytes than quality below q0.5, so step
+            // dims down and hold mid-quality — a 512px q0.45 photo reads
+            // better than a 1024px q0.15 mosquito-net of artifacts.
+            (896, 0.5), (768, 0.5), (640, 0.45), (512, 0.45), (512, 0.35),
+        ]
+        var last: Data?
+        for rung in rungs {
+            guard let data = downscale(image, maxDim: rung.dim).jpegData(compressionQuality: rung.q) else { continue }
+            if data.count <= budget { return data }
+            last = data
+        }
+        return last
     }
 
     static func downscale(_ image: UIImage, maxDim: CGFloat) -> UIImage {
@@ -107,11 +157,12 @@ enum AttachmentCodec {
         case err(String)
     }
 
-    /// Byte cap rendered for reject copy — "2.9MB": web renders the cap in MiB
-    /// (`(MAX_DOCUMENT_BYTES/1024/1024).toFixed(1)` → "2.9MB" for 3_000_000) and
-    /// Android's MAX_DOC_LABEL computes the same. Derived, not hardcoded, so the
-    /// copy self-updates (and stays consistent with the file-size figure in the
-    /// same sentence, which is also MiB) if MAX_DOCUMENT_BYTES moves.
+    /// The byte cap rendered for reject copy, in MiB like the file size in the
+    /// same sentence — 3_000_000 B → "2.9MB". Matches web
+    /// `(MAX_DOCUMENT_BYTES/1024/1024).toFixed(1)` and Android MAX_DOC_LABEL.
+    /// Derived, never hardcoded: a literal "3MB" beside a MiB-rendered size made
+    /// the message state a limit HIGHER than the file it just refused (13bd170).
+    /// Kept beside MAX_DOCUMENT_BYTES so both move together.
     private static var docCapLabel: String {
         String(format: "%.1fMB", Double(MAX_DOCUMENT_BYTES) / 1_048_576)
     }

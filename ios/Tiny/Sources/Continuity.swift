@@ -23,6 +23,28 @@ struct MemoryEntry: Codable, Identifiable, Equatable {
     let ts: Double
 }
 
+/// Port of web's `ForgetOutcome` (components/chat/continuity.ts) so all three
+/// surfaces answer the model in the same three cases.
+///
+/// ⚠️ A count of "3 removed" is the same lie in a more confident wrapper when
+/// the write never landed — the number describes an in-memory array, not the
+/// store on disk.
+enum ForgetOutcome {
+    case forgotten, noMatch, blocked
+
+    /// The user-facing sentence. A no-match is NOT an error: calling it a storage
+    /// problem sends someone to clear app data over a typo'd match string (web
+    /// Chat.tsx:1290 "Three outcomes, three messages"). Only `.blocked` warns,
+    /// and it must say the memory SURVIVED.
+    var line: String {
+        switch self {
+        case .forgotten: return "🧠 Memory forgotten"
+        case .noMatch: return "no memory matched"
+        case .blocked: return "couldn't forget that — the memory is still there"
+        }
+    }
+}
+
 extension Notification.Name {
     /// Posted by `Continuity.scrubAllLocal()` — a DIFFERENT user just signed in
     /// and every local per-tiny store has been erased from disk.
@@ -88,10 +110,45 @@ enum Continuity {
         return items
     }
 
-    private static func write<T: Encodable>(_ kind: String, _ name: String, _ items: [T]) {
-        if let data = try? JSONEncoder().encode(items) {
-            try? data.write(to: url(kind, name), options: .atomic)
+    /// ⚠️ Returns WHETHER the bytes landed. It used to swallow both `try?`s, and
+    /// the callers above state outcomes as fact — the voice `forget` tool answers
+    /// the MODEL `{ ok: true }`. A full disk or a protected-data container made
+    /// every one of those claims false, which is web's v13 G2 bug verbatim
+    /// (continuity.ts:32-47): the array shrank in memory, the user was told the
+    /// fact was forgotten, and `buildContext` kept injecting it into every later
+    /// request. "I forgot your address" followed by the address, forever.
+    @discardableResult
+    private static func write<T: Encodable>(_ kind: String, _ name: String, _ items: [T]) -> Bool {
+        guard let data = try? JSONEncoder().encode(items) else { return false }
+        do {
+            try data.write(to: url(kind, name), options: .atomic)
+            return true
+        } catch {
+            print("⚠️ continuity write \(kind) failed: \(error.localizedDescription)")
+            return false
         }
+    }
+
+    /// Truncate on a CODE-POINT boundary — the only unit web, Android and iOS
+    /// can agree on.
+    ///
+    /// ⚠️ `prefix(n)` is WRONG here and looks right: it counts GRAPHEME
+    /// CLUSTERS, so `"a"*498 + "👨‍👩‍👧‍👦"` is 496 characters to Swift and 506 to
+    /// web/Android (measured) — a cap of 500 cuts the three surfaces in three
+    /// different places, and this file promises the opposite (line 8:
+    /// "byte-compatible with the web's buildContinuityContext"). Code points are
+    /// `unicodeScalars` here, `Array.from` on web, `codePointCount` on the JVM.
+    ///
+    /// The other direction is not available: web and the JVM count UTF-16 units,
+    /// so their cut can split one emoji and leave a LONE SURROGATE, which each
+    /// then encodes differently (U+FFFD in the browser, `?` on the JVM) — and
+    /// Swift's String cannot hold one at all, substituting U+FFFD on
+    /// construction (measured). So "never split a character" is the only rule
+    /// all three can keep. Same rule as the DM rail's `clipToCodePoints`.
+    static func clipToCodePoints(_ text: String, _ max: Int) -> String {
+        let scalars = text.unicodeScalars
+        guard scalars.count > max else { return text }
+        return String(String.UnicodeScalarView(scalars.prefix(max)))
     }
 
     // ── Turn log ──────────────────────────────────────────────────────────
@@ -101,7 +158,7 @@ enum Continuity {
         let at = a.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !qt.isEmpty, !at.isEmpty else { return }
         var log: [TurnEntry] = read("turnlog", name)
-        log.append(TurnEntry(q: String(qt.prefix(500)), a: String(at.prefix(800)),
+        log.append(TurnEntry(q: clipToCodePoints(qt, 500), a: clipToCodePoints(at, 800),
                              ts: Date().timeIntervalSince1970 * 1000))
         write("turnlog", name, Array(log.suffix(turnMax)))
     }
@@ -112,28 +169,65 @@ enum Continuity {
 
     // ── Memories ──────────────────────────────────────────────────────────
 
-    static func addMemory(_ name: String, content: String, tags: [String]? = nil) {
+    /// True only when the memory is actually durable — the caller's "remembered"
+    /// claim is exactly as true as this write. An empty content is `false` too:
+    /// nothing was stored (web continuity.ts `addMemory`).
+    @discardableResult
+    static func addMemory(_ name: String, content: String, tags: [String]? = nil) -> Bool {
         let c = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !c.isEmpty else { return }
+        guard !c.isEmpty else { return false }
         var mems: [MemoryEntry] = read("memories", name)
         mems.append(MemoryEntry(id: UUID().uuidString.lowercased().prefix(12).description,
-                                content: String(c.prefix(1000)), tags: tags,
+                                content: clipToCodePoints(c, 1000), tags: tags,
                                 ts: Date().timeIntervalSince1970 * 1000))
-        write("memories", name, Array(mems.suffix(memoryMax)))
+        return write("memories", name, Array(mems.suffix(memoryMax)))
     }
 
     static func memories(_ name: String) -> [MemoryEntry] { read("memories", name) }
 
-    /// Substring/id match delete — same guard as the web: an empty match
-    /// must never wipe the store (includes("") matches everything).
+    /// The Boolean form, kept because it IS the `forget` tool's result contract
+    /// (the model is told `{ removed }`). Delegates so the "did this match AND
+    /// land?" predicate has exactly ONE implementation — two copies of that
+    /// question is how the two answers drift apart (web continuity.ts:148).
     @discardableResult
     static func forgetMemory(_ name: String, _ idOrText: String) -> Bool {
-        let needle = idOrText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return false }
+        forgetOutcome(name, idOrText) == .forgotten
+    }
+
+    /// Substring/id match delete — same guard as the web: an empty match
+    /// must never wipe the store (includes("") matches everything).
+    ///
+    /// Three states, not a Bool: "nothing matched" and "the disk refused the
+    /// write" are different facts, and a caller that reports the wrong one has
+    /// diagnosed the user confidently and wrongly. Only `.forgotten` means the
+    /// fact stopped reaching the model.
+    static func forgetOutcome(_ name: String, _ idOrText: String) -> ForgetOutcome {
         let mems: [MemoryEntry] = read("memories", name)
+        // nil = nothing to do, so nothing is written and nothing can be .blocked:
+        // a store that never needed changing cannot have refused.
+        guard let filtered = survivors(mems, idOrText) else { return .noMatch }
+        // The shrink is NECESSARY but not sufficient — the write has to land too.
+        return write("memories", name, filtered) ? .forgotten : .blocked
+    }
+
+    /// Pure: which memories SURVIVE a forget for `idOrText`, or nil when the
+    /// store must not be touched at all (blank needle, or nothing matched).
+    ///
+    /// ⚠️ The blank guard reads as redundant HERE and is not: Swift's
+    /// `contains("")` returns FALSE, so an empty needle would fall through to the
+    /// count check and return nil anyway. On the other two surfaces it is the
+    /// whole store's safety catch — JS `includes("")` and JVM `contains("")` are
+    /// both TRUE, so a blank needle matches EVERY memory and an empty forget
+    /// wipes everything, then reports "forgotten" with a count. `idOrText` comes
+    /// straight from the model's forget tool call. Keep it: it is the shape all
+    /// three surfaces share, and a "simplification" here is a silent invitation
+    /// to drop it on the surface where it is load-bearing (Android's was only
+    /// reachable via a Context, so no test could have caught its removal).
+    static func survivors(_ mems: [MemoryEntry], _ idOrText: String) -> [MemoryEntry]? {
+        let needle = idOrText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return nil }
         let filtered = mems.filter { $0.id != idOrText && !$0.content.lowercased().contains(needle) }
-        write("memories", name, filtered)
-        return filtered.count < mems.count
+        return filtered.count < mems.count ? filtered : nil
     }
 
     /// Watch sync: wipe-and-replace the store with the phone's copy

@@ -19,12 +19,23 @@ import UniformTypeIdentifiers
 
 /// "phone" reads wrong when this binary is a desktop — the login tagline and
 /// the devices footnote both name the machine they run on.
-private var deviceNoun: String {
-    #if targetEnvironment(macCatalyst)
-    "Mac"
-    #else
-    "phone"
-    #endif
+///
+/// ⚠️ IT READ WRONG ON iPAD TOO, and this was the app's FIRST SENTENCE: a signed-out
+/// iPad Pro said "Your AI. This phone becomes a node of your tiny identity." The
+/// Catalyst check meant a Mac was named correctly and the one idiom in between was
+/// not — an iPad fell through to `#else` and got the phone's word.
+///
+/// 🔑 The answer already existed. `LocalHardware.selfNoun` (Panels.swift) is the
+/// same question — "what is the machine I am running on called" — solved properly
+/// for all three shapes, with tests asserting `selfPill(.pad) == "this iPad"`. Its
+/// own doc comment even complains that an iPad "sits under a header that calls it
+/// a phone". This was a SECOND implementation of that question, older and less
+/// correct, and having two is what let one of them stay wrong: the Devices panel
+/// was fixed and this line was never looked at, because nothing connected them.
+/// So this is now a delegation, not a parallel switch — there is one answer to the
+/// question and both callers read it.
+@MainActor private var deviceNoun: String {
+    LocalHardware.selfNoun(LocalHardware.current)
 }
 
 struct LoginView: View {
@@ -65,6 +76,23 @@ struct LoginView: View {
                 .multilineTextAlignment(.center)
                 .padding(.bottom, 32)
         }
+        // 📐 The readable measure the chat transcript and composer already use
+        // (`frame(maxWidth: 760)` + `.infinity`, "P2.4" in this file, web max-w-4xl).
+        //
+        // ⚠️ Without it this screen was the ONE surface that never got the iPad pass:
+        // on a 1032pt-wide canvas the sign-in button stretched 984pt edge to edge
+        // under a 96pt logo, with the tagline centred in a field of black. Every
+        // signed-out iPad — including the first launch of a fresh install, i.e. the
+        // first thing anyone sees — opened on it. It was invisible in review because
+        // a simulator with a session never renders it, and the sidebar work all
+        // happens on the far side of the login gate (`RootView`: token != nil →
+        // AdaptiveRoot, else LoginView), so no amount of iterating past sign-in
+        // reaches this.
+        //
+        // The 760 cap is a no-op on every iPhone (the widest is 440pt), so this
+        // borrows an idiom already proven here rather than adding a size-class check.
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity)
     }
 }
 
@@ -425,6 +453,17 @@ final class ChatModel: ObservableObject {
             }
             return ["role": m.role, "content": [["text": t]]]
         }
+    }
+
+    /// Append a one-line italic notice to the streaming reply, at most once per
+    /// reply. iOS has no toast: the map hint (`.mapTool`) established this as the
+    /// way a client-side tool tells the user something the model can't know, and
+    /// the idempotence matters because a single reply can fire the same tool
+    /// repeatedly (N `forget` calls must not stack N identical warnings).
+    private func appendNotice(_ reply: inout ChatMessage, _ line: String) {
+        guard !reply.text.contains(line) else { return }
+        reply.text += reply.text.isEmpty ? line : "\n\n" + line
+        setReply(reply)
     }
 
     /// Write the streaming reply bubble by ID, not by captured index — the
@@ -1025,13 +1064,25 @@ final class ChatModel: ObservableObject {
            let d = try? JSONSerialization.data(withJSONObject: props) {
             propsJson = String(data: d, encoding: .utf8) ?? "{}"
         }
+        // ⚠️ This return is what the agent then says OUT LOUD, so it has to be
+        // gated on what the card will actually draw. Unserializable props (a bare
+        // string, a Double.nan) collapse to "{}" three lines up, and `.empty`
+        // renders the "No data in this card" placeholder — while the tool told
+        // the agent to announce a card, in a mode where the user is listening and
+        // cannot see that nothing arrived. Web fixed its twin of this bug by
+        // gating the same claim on its compiler.
+        let content = parseRenderUi(propsJson)
+        if let refusal = renderUiRefusal(content) { return ["ok": false, "error": refusal] }
         if voiceReplyId == nil { voiceAssistantStarted() }
         guard let id = voiceReplyId, let idx = messages.lastIndex(where: { $0.id == id }) else {
             return ["ok": false, "error": "no live reply to attach the card to"]
         }
         messages[idx].ui.append(RenderUiItem(id: "voice-\(UUID().uuidString)", title: title, propsJson: propsJson))
         save()
-        return ["ok": true, "note": "the card is now visible in the chat — mention it briefly out loud"]
+        // Named, because "here's the chart" over a table is the same mistake one
+        // size smaller — the agent describes this card from these words alone.
+        return ["ok": true,
+                "note": "the \(renderUiShapeName(content)) card is now visible in the chat — mention it briefly out loud"]
     }
 
     /// Offline queue (north-star P1.5): text sends wait for the network
@@ -1128,10 +1179,22 @@ final class ChatModel: ObservableObject {
                     case .followups(let chips):
                         followups = chips
                     case .remember(let content, let tags):
-                        // Same client-side memory the web writes to localStorage
-                        Continuity.addMemory(tiny, content: content, tags: tags)
+                        // Same client-side memory the web writes to localStorage.
+                        // A refused write has to be visible (web toasts both ways,
+                        // Chat.tsx:1281) or the fact is silently lost after the
+                        // reply already claimed it was kept.
+                        if !Continuity.addMemory(tiny, content: content, tags: tags) {
+                            appendNotice(&reply, "_🧠 couldn't store that memory — storage is full or unavailable_")
+                        }
                     case .forget(let match):
-                        Continuity.forgetMemory(tiny, match)
+                        // Only .blocked speaks up. A no-match is not a failure worth
+                        // alarming anyone over (web Chat.tsx:1290), but a refused
+                        // write must be said out loud: the reply has already told the
+                        // user the fact is gone while buildContext keeps injecting it.
+                        let outcome = Continuity.forgetOutcome(tiny, match)
+                        if outcome == .blocked {
+                            appendNotice(&reply, "_🧠 \(outcome.line)_")
+                        }
                     case .spawnTasks(let id, let prompts):
                         AgentLive.shared.spawn(done: 0, total: prompts.count)
                         // Fan-out tree: all nodes start "running"
@@ -1170,6 +1233,18 @@ final class ChatModel: ObservableObject {
                         Torch.shared.run(mode: mode, times: times, seconds: seconds)
                     case .deviceAction(let name, let argsJson):
                         DeviceTools.shared.handle(name: name, argsJson: argsJson)
+                        // 📋 Web's fourth clipboard rule, on the surface that has
+                        // somewhere to put it: a line QUOTING what landed. Not
+                        // "Copied!" — the risk this exists for is a SUBSTITUTION
+                        // (the tiny copying its own wallet address over the one
+                        // the user meant), and only the value can surface that
+                        // before it is pasted somewhere none of this code sees.
+                        // A refusal is said too: silence would read as success.
+                        if name == "copy_to_clipboard" {
+                            let note = Clipboard.chatNote(argsJson: argsJson)
+                            reply.text += reply.text.isEmpty ? "_\(note)_" : "\n\n_\(note)_"
+                            setReply(reply)
+                        }
                     case .mapTool(let name, let argsJson):
                         // 🗺️ pins/camera land on TinyMapView + the ambient map;
                         // placed-while-hidden pins keep (they show when 📍 goes on)
@@ -1960,16 +2035,6 @@ struct ChatView: View {
         }
     }
 
-    private var glassesToolbarButton: some View {
-        Button {
-            TinyDesign.haptic()
-            showGlassesLive.toggle()
-        } label: {
-            Image(systemName: "eyeglasses")
-                .foregroundStyle(showGlassesLive ? Color.green : Color.primary)
-        }
-        .accessibilityLabel("Glasses live view")
-    }
     #endif
 
     // 💎 The necklace's glasses-style live view (TinyLive.swift): LAN MJPEG +
@@ -1982,15 +2047,64 @@ struct ChatView: View {
         }
     }
 
-    private var tinyLiveToolbarButton: some View {
-        Button {
-            TinyDesign.haptic()
-            showTinyLive.toggle()
-        } label: {
-            Image(systemName: "sparkles.tv")
-                .foregroundStyle(showTinyLive ? Color.green : Color.primary)
+
+    // 🦾 The arm's live view (ArmLive.swift / ArmLiveScreen.swift): the same
+    // PiP card pattern, fed by the strands-arm endpoint device's own API. The
+    // button owns discovery and draws nothing while the account has no arm row.
+    // Restored from FomoPiPPrefs so the card comes back after a relaunch.
+    @State private var showArmLive = FomoPiPPrefs.open
+
+    @ViewBuilder private var armLiveOverlayView: some View {
+        if showArmLive {
+            ArmLiveOverlay(shown: $showArmLive)
         }
-        .accessibilityLabel("Necklace live view")
+    }
+
+    // 🧠 The UNO Q (q-the-brain endpoint device): same shape as the arm — the
+    // button owns discovery and draws nothing while the account has no board row.
+    @State private var showQBrain = false
+
+    // 🤖 The robot bodies (scout-the-rover, reachy-mini endpoint devices): same
+    // shape again — BodyToolbarButton owns discovery and hides without a row.
+    // Since build 94 these open floating PiP cards (BodyPiP.swift), like the
+    // arm's, restored across relaunches; the full screens sit behind "expand".
+    @State private var showScout = BodyPiPPrefs.open(.scout)
+    @State private var showReachy = BodyPiPPrefs.open(.reachy)
+    /// 📐 Width of THIS column (the detail pane on iPad with the sidebar open
+    /// is ~520 pt of a 1032 pt screen). TopBarPlan budgets tiles against it —
+    /// against the screen it planned six tiles and the title shrank to "t…".
+    @State private var columnWidth: CGFloat = 0
+
+    /// The body cards share one area (ZStack, not VStack): each card's
+    /// GeometryReader spans the same space and aligns to its own corner, so
+    /// Fomo + Scout + Reachy float together and touches pass through the gaps.
+    @ViewBuilder private var bodyOverlaysView: some View {
+        ZStack {
+            armLiveOverlayView
+            if showScout { BodyPiPOverlay(kind: .scout, shown: $showScout) }
+            if showReachy { BodyPiPOverlay(kind: .reachy, shown: $showReachy) }
+        }
+    }
+
+
+    /// 🎞️ The presence-driven top bar (TopBarStrip.swift): one live tile per
+    /// body that is online right now — glasses, necklace, Fomo, UNO Q, Scout,
+    /// Reachy — budgeted by TopBarPlan so iOS 26 never evicts the capsule
+    /// (build 88 lesson), overflow + offline bodies inside the Devices menu at
+    /// its end. The strip also owns discovery and the bodies' loops.
+    private var topBarBindings: TopBarBindings {
+        #if canImport(MWDATCore) && canImport(MWDATCamera)
+        let glasses = $showGlassesLive
+        #else
+        let glasses = Binding<Bool>.constant(false)
+        #endif
+        return TopBarBindings(glasses: glasses, necklace: $showTinyLive, fomo: $showArmLive,
+                              qBrain: $showQBrain, scout: $showScout, reachy: $showReachy)
+    }
+    private var deviceToolbarButtons: some View {
+        TopBarStrip(bindings: topBarBindings, sessionToken: session.token,
+                    hasNecklace: session.deviceId != nil || session.token != nil,
+                    columnWidth: columnWidth)
     }
     @ObservedObject private var voice = VoiceMode.shared
     // 📞 Real speech-to-speech call (VoiceCall.swift) — a full-screen call
@@ -2350,6 +2464,14 @@ struct ChatView: View {
                 chat.switchTiny(picked)
                 banner = "🌱 now chatting with \(chat.tiny)"
             }
+            // ⚠️ EXHAUSTIVE ON PURPOSE — no `default:`. This switch is the reason
+            // a new Router.Panel case cannot ship half-wired: adding one to the
+            // enum breaks THIS BUILD until it opens something. The eight cases
+            // that were missing here (activity, graph, sessions, callRecordings,
+            // transcripts, universe, wallet, relayLog) were not missing because
+            // the screens didn't exist — every one is a sheet a few lines below.
+            // They were missing because the enum stopped at 8 and a shorter enum
+            // makes this switch look complete.
             .onReceive(router.$openPanel) { panel in
                 guard let panel else { return }
                 router.openPanel = nil
@@ -2357,14 +2479,23 @@ struct ChatView: View {
                 case .memory: showMemory = true
                 case .jobs: showJobs = true
                 case .toolbox: showToolbox = true
+                case .graph: showGraph = true
                 case .devices: showDevices = true
                 case .messages: showMessages = true
                 case .nearby: showNearby = true
                 case .map: showMap = true
+                case .activity: showActivity = true
+                case .sessions: showSessions = true
+                case .callRecordings: showCallRecordings = true
+                case .transcripts: showTranscripts = true
+                case .universe: showUniverse = true
+                case .wallet: showWallet = true
+                case .relayLog: showRelayLog = true
                 case .settings: showSettings = true
                 }
             }
             .navigationBarTitleDisplayMode(.inline)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { columnWidth = $0 }
             // 🕶️ Floating live-glasses card, above the chat, draggable.
             // Rendering it via overlay (not a sheet) keeps the chat usable
             // while watching the stream — the PiP the user asked for.
@@ -2373,6 +2504,19 @@ struct ChatView: View {
                 VStack(alignment: .trailing, spacing: 8) {
                     glassesLiveOverlayView
                     tinyLiveOverlayView
+                    bodyOverlaysView
+                }
+            }
+            // 🦾 Arm discovery lives on the screen, not on the toolbar button:
+            // a `.task` on a view that renders nothing (the button before an
+            // arm is known) never fires, so the button could never appear.
+            .task(id: session.token) { await ArmManager.shared.discover(sessionToken: session.token) }
+            #else
+            // No glasses SDK (Catalyst): the necklace + body cards still float.
+            .overlay(alignment: .topTrailing) {
+                VStack(alignment: .trailing, spacing: 8) {
+                    tinyLiveOverlayView
+                    bodyOverlaysView
                 }
             }
             #endif
@@ -2405,20 +2549,18 @@ struct ChatView: View {
                             : "\(chat.tiny), private, locked")
                     }
                 }
-                #if canImport(MWDATCore) && canImport(MWDATCamera)
-                // 🕶️ The glasses icon appears the moment glasses are linked;
-                // tap = live picture-in-picture from the glasses camera.
+                // 🕶️💎🦾🧠 Device live buttons — ONE toolbar item, not four.
+                // iOS 26 overflows trailing items it cannot fit into a "More"
+                // (OverflowBarButtonItem) — and with glasses + necklace + arm +
+                // UNO Q each in its own glass capsule, the item it evicted on a
+                // 402 pt iPhone was the LAST one: the account Menu. The owner
+                // then tapped "More" and then the account entry ("I have to
+                // tap the account icon twice", 2026-09-09, the day the UNO Q
+                // button landed). One shared capsule is ~50 pt narrower and
+                // UIKit never splits a single custom item. TinyUITests/
+                // AccountMenuUITests.testH6_* holds this line.
                 ToolbarItem(placement: .topBarTrailing) {
-                    if wearablesState.isLinked {
-                        glassesToolbarButton
-                    }
-                }
-                #endif
-                // 💎 Necklace live view — the glasses button's sibling.
-                ToolbarItem(placement: .topBarTrailing) {
-                    if session.deviceId != nil || session.token != nil {
-                        tinyLiveToolbarButton
-                    }
+                    deviceToolbarButtons
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -2437,6 +2579,14 @@ struct ChatView: View {
                             showDevices = true
                         } label: {
                             Label("My devices", systemImage: "iphone.radiowaves.left.and.right")
+                        }
+                        // 🤖 Robot bodies also live here: the account Menu survives
+                        // iOS 26's toolbar overflow, the custom device capsule does not.
+                        if BodyManager.scout.device != nil {
+                            Button { showScout = true } label: { Label("Scout rover", systemImage: BodyKind.scout.symbol) }
+                        }
+                        if BodyManager.reachy.device != nil {
+                            Button { showReachy = true } label: { Label("Reachy Mini", systemImage: BodyKind.reachy.symbol) }
                         }
                         Button {
                             showMemory = true
@@ -2559,43 +2709,67 @@ struct ChatView: View {
                         Image(systemName: "person.crop.circle").foregroundStyle(.green)
                     }
                     .accessibilityLabel("Account and chat options")
+                    // TinyUITests/AccountMenuUITests taps this once and expects
+                    // "My devices" within 2 s (owner report 2026-09-09: needed two taps).
+                    .accessibilityIdentifier("account-menu")
                 }
             }
-            .sheet(isPresented: $showSessions) { SessionsView(chat: chat) }
-            .sheet(isPresented: $showCallRecordings) { CallRecordingsView() }
-            .sheet(isPresented: $showTranscripts) { NiclaTranscriptsView() }
+            // 📐 `.panelSheet()` (Split.swift) is what makes these open PAGE-sized
+            // instead of as a phone-shaped form card. Every one of them is a sidebar
+            // destination on iPad, and a fixed ~840pt box on a 1376pt canvas gave a
+            // 981-line Wallet and a 34-line Relay log the same postage stamp. It is a
+            // no-op at compact width, so the phone is unchanged.
+            .sheet(isPresented: $showSessions) { SessionsView(chat: chat).panelSheet() }
+            .sheet(isPresented: $showCallRecordings) { CallRecordingsView().panelSheet() }
+            .sheet(isPresented: $showTranscripts) { NiclaTranscriptsView().panelSheet() }
             .sheet(item: $shareURL) { url in
-                // System share sheet for the fresh tiny.technology link
+                // System share sheet for the fresh tiny.technology link. NOT
+                // .panelSheet(): a transient picker, and its detent is real on phone.
                 ActivitySheet(items: [url])
                     .presentationDetents([.medium])
             }
-            .sheet(isPresented: $showNearby) { NearbyView() }
-            .sheet(isPresented: $showMessages) { MessagesView() }
+            .sheet(isPresented: $showNearby) { NearbyView().panelSheet() }
+            .sheet(isPresented: $showMessages) { MessagesView().panelSheet() }
             .sheet(isPresented: $showUniverse) {
                 UniverseView(onPick: { picked in
                     chat.switchTiny(picked)
                     banner = "🌱 now chatting with \(picked)"
                 }, token: session.token)
+                .panelSheet()
             }
-            .sheet(isPresented: $showJobs) { JobsView(token: session.token) }
-            .sheet(isPresented: $showToolbox) { ToolboxView(token: session.token) }
-            .sheet(isPresented: $showMemory) { MemoryView(token: session.token, tiny: chat.tiny) }
-            .sheet(isPresented: $showGraph) { MemoryGraphView(token: session.token) }
-            .sheet(isPresented: $showDevices) { DevicesView(token: session.token, myDeviceId: session.deviceId) }
-            .sheet(isPresented: $showSettings) { SettingsView() }
+            .sheet(isPresented: $showJobs) { JobsView(token: session.token).panelSheet() }
+            .sheet(isPresented: $showToolbox) { ToolboxView(token: session.token).panelSheet() }
+            .sheet(isPresented: $showMemory) { MemoryView(token: session.token, tiny: chat.tiny).panelSheet() }
+            .sheet(isPresented: $showGraph) { MemoryGraphView(token: session.token).panelSheet() }
+            .sheet(isPresented: $showQBrain) { QBrainLiveScreen() }
+            // 🧠 A panel hands a prompt to the composer (QBrainLiveScreen's
+            // "Ask tiny about this board"); consumed + cleared like openTiny.
+            .onReceive(router.$composerDraft) { draft in
+                guard let draft else { return }
+                router.composerDraft = nil
+                input = draft
+                focused = true
+            }
+            .sheet(isPresented: $showDevices) {
+                DevicesView(token: session.token, myDeviceId: session.deviceId).panelSheet()
+            }
+            .sheet(isPresented: $showSettings) { SettingsView().panelSheet() }
             // 💳 In-chat wallet top-up (web WalletSheet parity) — WalletView owns
             // a NavigationStack toolbar, so wrap it. On dismiss the price badge
             // re-loads so a just-funded balance is reflected without a full reload.
             .sheet(isPresented: $showWallet, onDismiss: handleWalletDismiss) {
-                NavigationStack { WalletView(token: session.token) }
+                NavigationStack { WalletView(token: session.token) }.panelSheet()
             }
             .sheet(isPresented: $showVoicePicker) {
+                // NOT .panelSheet(): a short list of voices, and these detents are
+                // the phone's real behaviour.
                 VoicePickerSheet(chat: chat)
                     .presentationDetents([.medium, .large])
             }
-            .sheet(isPresented: $showRelayLog) { RelayLogView() }
+            .sheet(isPresented: $showRelayLog) { RelayLogView().panelSheet() }
             .sheet(isPresented: $showActivity) {
                 ActivityView(token: session.token) { maxId in session.markEventsSeen(maxId: maxId) }
+                    .panelSheet()
             }
         }
     }
@@ -2996,9 +3170,15 @@ struct ChatView: View {
     /// Toolbar row beneath the field (web Chat.tsx:2352): "+" attach on the
     /// left, then camera + voice-call (idle only) and the single morphing
     /// send/stop/mic action on the right.
-    private var composerToolbar: some View {
+    // Type-erased on purpose: body → chatCore → composerBox → composerToolbar →
+    // composerRightAction is one opaque generic chain, and build 76/77 crashed at
+    // launch (EXC_BAD_ACCESS, "stack guard region") inside
+    // __swift_instantiateConcreteTypeFromMangledName here — the runtime's
+    // demangler recursed past the main-thread stack once the UNO Q toolbar item,
+    // sheet and onReceive lengthened the chain. AnyView here ends the chain.
+    private var composerToolbar: AnyView {
         let composerEmpty = draftEmpty && pending.isEmpty
-        return HStack(spacing: 4) {
+        return AnyView(HStack(spacing: 4) {
             // ➕ One attach entry point: library / camera / files
             Menu {
                 Button { showPhotos = true } label: { Label("Photo Library", systemImage: "photo.on.rectangle") }
@@ -3092,7 +3272,7 @@ struct ChatView: View {
         }
         .padding(.horizontal, 4).padding(.bottom, 2)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: composerEmpty)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: chat.streaming)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: chat.streaming))
     }
 
     /// ⬆️/⏹/🎙️ The single morphing right action — Send when the composer holds
@@ -3176,7 +3356,14 @@ struct ChatView: View {
     /// The text composer, pulled out of the toolbar HStack so its modifier
     /// chain type-checks on its own (the inline expression blew SwiftUI's
     /// type-check budget once .onKeyPress was added).
-    private var composerField: some View {
+    // AnyView on purpose (build 79): this is ChatView's deepest modifier chain
+    // and builds 76/77 crashed at launch demangling the opaque body type. Erasing
+    // it here keeps the body type shallower than build 78.
+    private var composerField: AnyView {
+        AnyView(composerFieldContent)
+    }
+
+    private var composerFieldContent: some View {
         // Borderless field — the bordered composer box (VStack) IS the frame
         // now (web Chat.tsx:2277 parity, matching Android 679dd47). The field
         // spans the full width on top; the toolbar row lives below it, so the
@@ -3196,6 +3383,7 @@ struct ChatView: View {
             .multilineTextAlignment(composerTextAlignment)
             .padding(.horizontal, 12).padding(.vertical, 8)
             .focused($focused)
+            .accessibilityIdentifier("composer-input")
             // A multiline TextField (axis: .vertical) inserts a newline on
             // Return and NEVER fires .onSubmit, so a hardware-keyboard user's
             // Return did nothing — they had to reach for the send button (the
@@ -3641,22 +3829,51 @@ struct ChatView: View {
              "schedule_alert", "cancel_alerts", "open_url":
             let json = (try? JSONSerialization.data(withJSONObject: args))
                 .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-            DeviceTools.shared.handle(name: name, argsJson: json)
+            // ⚠️ NOT a bare ok:true. The tiny SPEAKS this result, so a play_sound
+            // the phone muted for quiet hours came back as success and it told the
+            // user a sound had played — the relay path's exact bug, on the surface
+            // where a person hears the claim.
+            let outcome = DeviceTools.shared.handle(name: name, argsJson: json)
+            // …and the clipboard needs one step more: its arm runs even when the
+            // write was refused, so `outcome` is .ran for a copy that never
+            // happened. On the SPEAKING surface that is a tiny telling a person
+            // their text is ready to paste while the clipboard holds what it
+            // always held. Re-runs the decision, like open_url's audit line.
+            output = name == "copy_to_clipboard"
+                ? DeviceActionAudit.clipboardResult(argsJson: json)
+                : DeviceActionAudit.voiceResult(name, outcome)
         case "remember":
             // Same Continuity store the chat stream's remember/forget route to.
             let content = (args["content"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if content.isEmpty {
                 output = ["ok": false, "error": "content required"]
-            } else {
-                Continuity.addMemory(chat.tiny, content: content, tags: args["tags"] as? [String])
+            } else if Continuity.addMemory(chat.tiny, content: content, tags: args["tags"] as? [String]) {
                 output = ["ok": true, "note": "remembered"]
+            } else {
+                // The claim follows the WRITE, not the attempt: the tiny SPEAKS
+                // this, and a false "remembered" is how a user loses a fact they
+                // were told was kept.
+                output = ["ok": false,
+                          "error": "storage is full or unavailable — it was NOT remembered; tell the user"]
             }
         case "forget":
             let match = (args["match"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             if match.isEmpty {
                 output = ["ok": false, "error": "match required"]
             } else {
-                output = ["ok": true, "removed": Continuity.forgetMemory(chat.tiny, match)]
+                // Three outcomes, three answers (web Chat.tsx:2049). `removed`
+                // used to be the FILTER's verdict, so a memory the store refused
+                // to drop was spoken as forgotten while buildContext kept
+                // injecting it into every later request.
+                switch Continuity.forgetOutcome(chat.tiny, match) {
+                case .forgotten:
+                    output = ["ok": true, "removed": true]
+                case .noMatch:
+                    output = ["ok": true, "removed": false, "reason": "no memory matched"]
+                case .blocked:
+                    output = ["ok": false, "removed": false,
+                              "error": "storage is full or unavailable — the memory is still there; tell the user"]
+                }
             }
         default:
             // A roster tool this build doesn't know locally — forward to the
@@ -4457,6 +4674,7 @@ func niclaKindLabel(_ info: TinyBeaconInfo) -> String {
     switch info.kind {
     case .vision: return "Nicla Vision"
     case .voice: return "Nicla Voice"
+    case .sense: return "Nicla Sense"
     case .unknown: return "tiny hardware"
     }
 }
@@ -4466,16 +4684,21 @@ func niclaKindLabel(_ info: TinyBeaconInfo) -> String {
 struct NearbyView: View {
     @ObservedObject private var ble = Bluetooth.shared
     @Environment(\.dismiss) private var dismiss
-    @State private var setupTarget: BleDevice?
+    /// One item for BOTH beacon sheets — see TinyBeaconSheet. Two `.sheet(item:)`
+    /// modifiers on one view is how the second one silently never presents.
+    @State private var beaconSheet: TinyBeaconSheet?
 
     var body: some View {
         NavigationStack {
             List {
                 if ble.devices.isEmpty {
-                    Text(ble.scanning ? "Scanning…"
-                         : ble.state == "unauthorized" ? "Bluetooth permission denied — enable it in Settings."
-                         : ble.state == "poweredOff" ? "Bluetooth is off."
-                         : "No devices found yet.")
+                    // The shared rule, not this view's own ternary. That ternary
+                    // was the bug `BleEmptyState` was extracted to fix, kept
+                    // alive here: `scanning` first (so an unavailable radio read
+                    // as "Scanning…"), no arm for a phone with no radio, and
+                    // "No devices found yet." over a scan that never ran.
+                    Text(BleEmptyState.message(scanning: ble.scanning, state: ble.state,
+                                               completedScan: ble.completedScan))
                         .foregroundStyle(.secondary)
                 }
                 ForEach(ble.devices.sorted { $0.rssi > $1.rssi }) { d in
@@ -4499,7 +4722,9 @@ struct NearbyView: View {
                         }
                         if let t = d.tiny {
                             Spacer()
-                            Button(t.provisioned ? "Reconfigure" : "Set up") { setupTarget = d }
+                            Button(TinyBeaconSheet.actionLabel(d)) {
+                                beaconSheet = TinyBeaconSheet.tapped(d)
+                            }
                                 .font(.caption.weight(.semibold))
                                 .buttonStyle(.borderedProminent)
                                 .controlSize(.mini)
@@ -4507,7 +4732,13 @@ struct NearbyView: View {
                     }
                 }
             }
-            .sheet(item: $setupTarget) { d in TinySetupView(beacon: d) }
+            .sheet(item: $beaconSheet) { sheet in
+                switch sheet {
+                case .setUp(let d): TinySetupView(beacon: d)
+                case .wifi(let d): TinyWifiView(beacon: d)
+                case .adopt(let d): SenseAdoptView(beacon: d)
+                }
+            }
             .navigationTitle("Nearby")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -4737,6 +4968,7 @@ private struct PairingCardView: View {
         switch d.tiny?.kind {
         case .voice: return "Nicla Voice"
         case .vision: return "Nicla Vision"
+        case .sense: return "Nicla Sense"
         default: return "tiny hardware"
         }
     }
@@ -4749,7 +4981,14 @@ private struct PairingCardView: View {
 
     var body: some View {
         if connecting {
-            TinySetupView(beacon: d)
+            // 🌡️ A Sense board has no config characteristic and is enrolled
+            // from a computer; the phone ADOPTS its row instead of provisioning
+            // (which would mint a duplicate).
+            if d.tiny?.kind == .sense {
+                SenseAdoptView(beacon: d)
+            } else {
+                TinySetupView(beacon: d)
+            }
         } else {
             VStack(spacing: 20) {
                 // The AirPods proximity grammar: rings leave the device and
@@ -4774,7 +5013,7 @@ private struct PairingCardView: View {
                                              startPoint: .topLeading, endPoint: .bottomTrailing))
                         .frame(width: 96, height: 96)
                         .overlay(Circle().stroke(accent.opacity(0.35), lineWidth: 1))
-                    Image(systemName: d.tiny?.kind == .voice ? "waveform.badge.mic" : "sparkles.tv")
+                    Image(systemName: d.tiny?.kind == .voice ? "waveform.badge.mic" : d.tiny?.kind == .sense ? "sensor" : "sparkles.tv")
                         .font(.system(size: 40, weight: .medium))
                         .foregroundStyle(accent)
                         .symbolEffect(.pulse)
@@ -4849,6 +5088,10 @@ struct ProximityPairing: ViewModifier {
                 guard target == nil, session.token != nil else { return }
                 guard let d = devs.first(where: {
                     $0.tiny?.provisioned == false && !offered.contains($0.id)
+                        // A Sense advertises provisioned=0 forever (it stores no
+                        // identity); once this phone relays it there is nothing
+                        // left to pair.
+                        && !($0.tiny?.kind == .sense && NiclaSenseGateway.shared.unit?.beaconId == $0.id)
                 }) else { return }
                 offered.insert(d.id)
                 Haptic.shared.play(pattern: "success", times: 1, intensity: 0.6)

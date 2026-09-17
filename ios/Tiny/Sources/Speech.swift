@@ -6,6 +6,40 @@
  */
 import AVFoundation
 
+/**
+ * 🎧 Which microphone is capturing right now — the one sentence every rail that
+ * transcribes has to be able to say.
+ *
+ * "bluetooth" = the Meta glasses (their HFP profile) or a paired headset;
+ * "phone" = the built-in mic. Every rail that sets `.allowBluetooth` can end up
+ * hearing either one, and a transcript that does not say which is a transcript
+ * whose ROOM is unknown: the glasses on the user's face, or the phone in their
+ * pocket, muffled through a jacket. Nothing fails either way, which is exactly
+ * why it has to be reported rather than noticed.
+ *
+ * ⚠️ SINGLE-SOURCED ON PURPOSE, and it is a lesson rather than tidiness. This
+ * text is compared across rails by the agent (`meta_listen` and
+ * `nicla_voice_record` both post the field, and Android's
+ * `PhoneRecorder.route()` returns these same two words) — so a second copy
+ * spelling it "headset" or "BT" would be a different fact to any reader doing
+ * string equality, and the drift would be invisible: both rails would look
+ * correct in their own file. The two-rail split that this loop keeps paying for
+ * (`meta_listen`'s punctuation, `BtMic`'s owner strings) started exactly this
+ * way — each rail building its own answer.
+ *
+ * ⚠️ READ IT WHILE THE SESSION IS STILL ACTIVE. `currentRoute` describes the
+ * route NOW; after `setActive(false)` it describes the fallback, which is the
+ * built-in mic. A rail that answers after its own teardown must capture this
+ * first and carry it (`NiclaRecordResult.micRoute` documents that trap).
+ */
+enum MicRoute {
+    static func current() -> String {
+        let bt = AVAudioSession.sharedInstance().currentRoute.inputs
+            .contains { $0.portType == .bluetoothHFP }
+        return bt ? "bluetooth" : "phone"
+    }
+}
+
 @MainActor
 final class Speech: NSObject, ObservableObject {
     static let shared = Speech()

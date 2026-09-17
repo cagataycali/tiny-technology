@@ -15,7 +15,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     # OTA build number — bump on every /ios push (scripts/push-ota.sh syncs
     # the manifest to this; the in-app Updater compares against it)
-    CURRENT_PROJECT_VERSION: 66
+    CURRENT_PROJECT_VERSION: 97
 packages:
   # Meta Wearables Device Access Toolkit (glasses). Binary xcframeworks with
   # ios-arm64 + simulator slices ONLY — no Mac Catalyst slice, hence the
@@ -262,3 +262,50 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: $(BUILT_PRODUCTS_DIR)/Tiny.app/Tiny
         BUNDLE_LOADER: $(TEST_HOST)
+  # 🧪 On-device UI tests (XCUITest). Started for the account-menu double-tap
+  # report (2026-09-09): launch, tap the toolbar account menu ONCE by
+  # accessibility identifier, expect a menu item within 2 s. Runs on the phone:
+  #   xcodebuild test -project ios/Tiny.xcodeproj -scheme Tiny \
+  #     -destination 'id=<devicectl id>' -only-testing:TinyUITests
+  TinyUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+    - UITests
+    dependencies:
+    - target: Tiny
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: technology.tiny.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: Tiny
+schemes:
+  # Explicit so `xcodebuild test -scheme Tiny` runs BOTH bundles
+  # (-only-testing:TinyUITests narrows it to the on-device UI tests).
+  Tiny:
+    build:
+      targets:
+        Tiny: all
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+      - TinyTests
+      - TinyUITests
+    archive:
+      config: Release
+  # UI tests against the RELEASE app (what the owner runs). TinyTests carries
+  # DEBUG-only harness code and cannot build in Release, so this scheme tests
+  # TinyUITests alone: `xcodebuild test -scheme TinyUI -configuration Release`.
+  TinyUI:
+    build:
+      targets:
+        Tiny: all
+        TinyUITests: [test]
+    run:
+      config: Release
+    test:
+      config: Release
+      targets:
+      - TinyUITests

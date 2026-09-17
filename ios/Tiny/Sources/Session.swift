@@ -172,6 +172,17 @@ final class TinySession: NSObject, ObservableObject {
         // Transcripts on disk are deliberately NOT deleted here: signing back
         // in as the SAME user should keep their history (the scrub in loadMe()
         // fires only on a real identity change, for exactly that reason).
+        //
+        // 🎥 A glasses clip is NOT in that category. meta_record_video parks an
+        // auto-stopped clip for the agent's next call, and a rolling recording
+        // outlives this method by itself — both are video of the OUTGOING user's
+        // surroundings, hosted at a public-but-unguessable /media/ URL, and the
+        // next call to collect one wins it whoever is signed in. Unlike a
+        // transcript there is no same-user case that wants it kept: the turn
+        // that asked for the clip ended with the session.
+        #if canImport(MWDATCore) && canImport(MWDATCamera)
+        GlassesRecorder.shared.endSession()
+        #endif
         NotificationCenter.default.post(name: .tinySessionEnded, object: nil)
     }
 
@@ -220,6 +231,16 @@ final class TinySession: NSObject, ObservableObject {
             Continuity.scrubAllLocal()
             WidgetStore.write(WatchCore.loggedOut(WidgetStore.read(), now: Date()))
             WidgetCenter.shared.reloadAllTimelines()
+            // 🎥 …and whatever the glasses recorder is holding for the PRIOR
+            // user. logout() drops it too, but this path does not go through
+            // logout(): a revoked/expired token leaves the chat showing the
+            // signed-out paywall card whose Sign in calls login() IN PLACE
+            // (Views.swift onSignIn), so a clip parked under A survives into
+            // B's session with nothing else clearing it. Same boundary the
+            // Android account switch draws (MainActivity's scrubIdentity).
+            #if canImport(MWDATCore) && canImport(MWDATCamera)
+            GlassesRecorder.shared.endSession()
+            #endif
         }
         store.set(login, forKey: key)
     }
@@ -254,8 +275,12 @@ final class TinySession: NSObject, ObservableObject {
         await enrollDeviceIfNeeded()
         if Keychain.get("tiny_device_id") != nil {
             startDeviceLoops()
+            // Ambient: the phone healed itself, hours ago, about something the
+            // user never asked for and cannot act on. Android's twin
+            // (RelayNotifier.notifyFleetTrace) has always been silent here.
             await Notify.post(title: "Device re-enrolled",
-                              body: "This phone's fleet registration was revoked — it re-joined automatically.")
+                              body: "This phone's fleet registration was revoked — it re-joined automatically.",
+                              ambient: true)
         }
     }
 
@@ -369,6 +394,11 @@ final class TinySession: NSObject, ObservableObject {
                                 : "🎙️ recorded \(res.seconds)s — “\(String(res.transcript.prefix(600)))”"]
                             reply["transcriptId"] = res.transcriptId
                             if let u = res.audioUrl { reply["audioUrl"] = u }
+                            // WHICH microphone heard it — the glasses on the
+                            // user's face or the phone in their pocket. Read
+                            // during the take (see NiclaRecordResult.micRoute)
+                            // because the route is gone by the time we're here.
+                            if let r = res.micRoute { reply["micRoute"] = r }
                         } else {
                             reply = ["result": "recording failed: \(res.error ?? "unknown")"]
                         }
@@ -637,7 +667,7 @@ final class TinySession: NSObject, ObservableObject {
             return DeviceActionAudit.toolLine("flashlight", ran: true)
         case .deviceAction(let name, let argsJson):
             return await MainActor.run { () -> String? in
-                DeviceTools.shared.handle(name: name, argsJson: argsJson)
+                let outcome = DeviceTools.shared.handle(name: name, argsJson: argsJson)
                 if name == "open_url" {
                     // The audit re-derives the exact silent-failure layer
                     // (scheme refused / backgrounded) the execution hit.
@@ -645,7 +675,18 @@ final class TinySession: NSObject, ObservableObject {
                         argsJson: argsJson,
                         foreground: UIApplication.shared.applicationState == .active)
                 }
-                return DeviceActionAudit.toolLine(name, ran: DeviceTools.names.contains(name))
+                if name == "copy_to_clipboard" {
+                    // Same reason as open_url, one step worse: the arm runs
+                    // either way, so `outcome` says .ran for a write that was
+                    // refused — and the model then tells the user their text is
+                    // on the clipboard when it is not. Re-runs the decision.
+                    return DeviceActionAudit.clipboardLine(argsJson: argsJson)
+                }
+                // ⚠️ The EXECUTION's own verdict, not `names.contains(name)`: a
+                // known name only means the switch has a case, never that the
+                // case did anything. `play_sound` under quiet hours no-ops by
+                // design and used to be audited as "ran on the phone".
+                return DeviceActionAudit.outcomeLine(name, outcome)
             }
         case .speak(_, let text, let voice):
             return await MainActor.run { () -> String? in
@@ -665,7 +706,7 @@ final class TinySession: NSObject, ObservableObject {
             _ = await ImageGen.shared.run(toolUseId: id, prompt: prompt, style: style, token: token)
             return DeviceActionAudit.toolLine("generate_image", ran: true)
         case .screenshot(let id, let reason):
-            // 📸 Remote consent.
+            // 📸 Remote consent (docs/remote-screenshot-consent-design-2026-08-02).
             // The web agent asked THIS phone for its screen. Ask the human here
             // — but DISPATCH, never await: this runs inside the relay poll
             // loop's iteration, and that loop claims the {type:"notify"}
@@ -775,7 +816,7 @@ final class TinySession: NSObject, ObservableObject {
     ///   glasses   = meta_* bridges (honest "not linked" when absent)
     ///   screenshot = ReplayKit capture behind a per-capture consent prompt the
     ///     relay path now presents itself (foreground-gated; backgrounded says
-    ///     so)
+    ///     so — docs/remote-screenshot-consent-design-2026-08-02.md)
     nonisolated static let capabilities = ["chat", "bluetooth_scan", "location", "record", "speak", "open_app", "image_gen", "glasses", "screenshot"]
 
     /// What to actually send on a beat: the static set, plus whatever is true
@@ -788,11 +829,27 @@ final class TinySession: NSObject, ObservableObject {
     /// `flipper_status` resolve THIS phone and send it a prompt-shaped `invoke`,
     /// which the relay loop below proxies straight back through /api/chat —
     /// where the same tool resolves the same phone again. One status check, an
-    /// unbounded loop, no answer. `tests/flipper-ble.test.ts` pins the two labels
-    /// apart, and that this one is added only while the link is real.
+    /// unbounded loop, no answer. See docs/flipper-ble-ios-design.md §4.1.
     nonisolated static var beatCapabilities: [String] {
         FlipperGateway.shared.linked ? capabilities + ["flipper_ble"] : capabilities
     }
+
+    /// What the web agent can actually ASK this phone to do with the Flipper,
+    /// named as the tools it calls.
+    ///
+    /// Every sentence below that lists capabilities is addressed to the agent, not
+    /// to a person — it comes back as the tool RESULT and gets quoted into the
+    /// transcript. So the unit is a tool name: a capability the agent has no tool
+    /// for is one it cannot use, and naming it is a promise nobody can keep. Both
+    /// sentences said "read the SD card, checksums" for months; nothing in the
+    /// backend has ever sent `read` or `md5`, and `/ext/nfc` is where the user's
+    /// real passports, IDs and bank cards live.
+    ///
+    /// ⚠️ This mirrors `bleCanDo()` in `lib/chat/tools/flipper.ts`, which cannot be
+    /// imported here. `tests/flipper-ble.test.ts` pins the two lists to each other
+    /// by set equality, in both directions — a tool added to one side and not the
+    /// other is red, whichever side moved.
+    nonisolated static let flipperAgentTools = "flipper_status, flipper_files, flipper_find"
 
     /// 🐬 {type:"flipper"} — the flipper_* tools reaching the board through this
     /// phone's BLE link instead of a USB cable.
@@ -808,12 +865,13 @@ final class TinySession: NSObject, ObservableObject {
         let args = payload["args"] as? [String: Any] ?? [:]
         let path = (args["path"] as? String)?.trimmingCharacters(in: .whitespaces) ?? "/ext"
 
-        guard fg.linked else {
-            let paired = fg.unit != nil
-            return ["result": paired
-                ? "The Flipper is paired with this phone but not connected right now — it's out of range or its Bluetooth is off. Nothing can reach it until it's back."
-                : "No Flipper is linked to this phone over Bluetooth. Pair it in the tiny app: Devices → this phone → Find my Flipper."]
-        }
+        // One sentence, shared with the panel row and `statusLine()`, in the words
+        // of THIS reader — see `FlipperGateway.outage(radio:unit:for:)`. It said
+        // "its Bluetooth is off" here, blaming the board, while the phone already
+        // knew when the radio that was off was its OWN: a diagnosis it wrote into
+        // `lastError`, which only this phone's screen can read. Whoever asked
+        // through the relay is not looking at this phone's screen.
+        guard fg.linked else { return ["result": fg.outageLine(for: .relayReply)] }
 
         await MainActor.run { fg.activity = "🐬 \(action) for the web agent…" }
         defer { Task { @MainActor in fg.activity = "" } }
@@ -850,7 +908,9 @@ final class TinySession: NSObject, ObservableObject {
                 return ["result": out]
 
             case "read":
-                let data = try await fg.read(path)
+                // Stated, not defaulted: the refusal this can throw is a sentence
+                // addressed to somebody, and this caller's reader is the agent.
+                let data = try await fg.read(path, for: .relayReply)
                 let text = String(data: data, encoding: .utf8)
                 if let t = text, !t.contains("\u{FFFD}") {
                     return ["result": FlipperGateway.fitReply(
@@ -862,32 +922,53 @@ final class TinySession: NSObject, ObservableObject {
                 // is a preview. Without it the header's byte count reads as a
                 // promise about the hex below it, and 6000 bytes of allowed file
                 // can arrive 83% missing looking complete.
-                let window = min(data.count, FlipperGateway.hexPreviewBytes)
-                let hex = data.prefix(window).map { String(format: "%02x", $0) }.joined()
-                let cut = window < data.count
-                    ? "…\n(preview: the first \(window) of \(data.count) bytes.)" : ""
+                // Window and admission both live in FlipperGateway.hexPreview, so
+                // the panel's Files sheet cannot disagree with this reply about
+                // the same file. It did: half this window, and nothing said.
+                let p = FlipperGateway.hexPreview(data)
                 return ["result": FlipperGateway.fitReply(
-                    "📄 \(path) (\(data.count) bytes, binary)\n\(hex)\(cut)", "this file's hex preview")]
+                    "📄 \(path) (\(data.count) bytes, binary)\n\(p.hex)\(p.cut)", "this file's hex preview")]
 
             case "md5":
                 return ["result": "\(path) — md5 \(try await fg.md5(path))"]
 
             case "alert", "beep", "find":
                 try await fg.alert()
-                return ["result": "🔔 The Flipper beeped, blinked and buzzed — over Bluetooth from this phone."]
+                // ⚠️ NOT "it beeped": this used to claim the board "beeped, blinked
+                // and buzzed", and vibro is switched OFF on the user's own board —
+                // measured in `/int/.notification.settings`. The RPC answers OK
+                // regardless, so the only fact here is that the board ACCEPTED it.
+                return ["result": FlipperGateway.alertSent(for: .relayReply)]
 
             case "listen", "ir_rx", "subghz_rx", "rfid_read", "ikey_read":
                 // Defence in depth: the backend already refuses to route a
                 // capture here, and if that ever regresses this must still not
                 // answer "nothing received" — which is exactly what a working
                 // capture of a silent room looks like.
-                return ["result": "Capturing IR, Sub-GHz, RFID or iButton is not possible over Bluetooth — the Flipper's radios are only reachable from its USB serial CLI, which has no receive command over BLE. This needs the Flipper plugged into a machine running the tiny CLI. What this phone CAN do over Bluetooth: status, browse and read the SD card, checksums, and make it beep."]
+                //
+                // And BECAUSE it only speaks in a state where something upstream
+                // has already failed, the consolation clause has to be the most
+                // correct sentence in the file: nothing else is left to correct it.
+                return ["result": "Capturing IR, Sub-GHz, RFID or iButton is not possible over Bluetooth — the Flipper's radios are only reachable from its USB serial CLI, which has no receive command over BLE. This needs the Flipper plugged into a machine running the tiny CLI. What you can ask this phone for over Bluetooth: \(Self.flipperAgentTools) — a listing names what is saved without opening it."]
 
             default:
-                return ["result": "Unknown Flipper action “\(action)”. Over Bluetooth this phone can do: status, files, read, md5, alert."]
+                // The backend composes every one of these envelopes and only ever
+                // sends an action it has a tool for, so an unknown one is not a
+                // typo — it is THIS BUILD being older than the server that asked.
+                // That is the remedy to name; a capability list alone leaves the
+                // agent to conclude the board is broken (hazard 25: the list on
+                // the side that ages is the one that lies).
+                return ["result": "This phone's tiny app has no Flipper action “\(action)” — its build is older than the server that asked for it. Updating the tiny app on the phone is what fixes it. What this build can do over Bluetooth: \(Self.flipperAgentTools)."]
             }
         } catch {
-            return ["result": "Flipper error: \(error.localizedDescription)"]
+            // The action decides what a timeout still leaves open: a listing that
+            // did not come back changed nothing, while an alert the board already
+            // has may have sounded — and this reply is the device testifying
+            // about itself, quoted into the transcript as fact. A bare
+            // `localizedDescription` reported both as failures, so the beep the
+            // room just heard came back as silence and the agent asked for
+            // another one.
+            return ["result": "Flipper error: \(FlipperGateway.actionFailed(error, action: action, for: .relayReply))"]
         }
     }
 
@@ -950,11 +1031,18 @@ final class TinySession: NSObject, ObservableObject {
             // rides the banner's userInfo, so a TAP lands on the fetched
             // result: Notify delegate → RedeemStash → the ask route (web ?q= /
             // Android c6de2bcc parity).
+            // Loudness is a FUNCTION OF THE TAG here, and only here: this one
+            // call site carries every kind the worker can push (job results,
+            // finished device tasks, money movements, tiny visits), so a
+            // hardcoded level — either level — is wrong for most of them. The
+            // rule lives in Notify.isAmbient / lib/push/loudness.ts, shared with
+            // Android's RelayNotifier.classify so the two phones cannot drift.
             let q = Notify.redeemQuery(from: url)
             await Notify.post(
                 title: title.isEmpty ? "tiny" : String(title.prefix(100)),
                 body: String(body.prefix(400)),
-                userInfo: q.map { ["redeemQ": String($0.prefix(2000))] } ?? [:]
+                userInfo: q.map { ["redeemQ": String($0.prefix(2000))] } ?? [:],
+                ambient: Notify.isAmbient(tag: tag)
             )
         }
     }
@@ -1050,11 +1138,20 @@ final class TinySession: NSObject, ObservableObject {
                     : "recording failed: \(res.error ?? "unknown")"]
                 reply["transcriptId"] = res.transcriptId
                 if let u = res.audioUrl { reply["audioUrl"] = u }
+                // Same field as the foreground loop: this is the SAME tool answer,
+                // and a reply whose contents depend on whether the app happened to
+                // be backgrounded is the two-rail split all over again.
+                if let r = res.micRoute { reply["micRoute"] = r }
                 _ = try? await Api.patchJson("/api/devices/relay", body: [
                     "deviceId": id, "token": devTok, "inReplyTo": envId, "payload": reply,
                 ])
+                // Ambient trace, like Android's ("🎙️ Web agent recorded on your
+                // phone" → CHANNEL_ACTIVITY): the web agent asked for this and
+                // is being answered on the envelope above — the person reading
+                // that answer is at the web, not this lock screen.
                 await Notify.post(title: "Recorded for your tiny",
-                                  body: String(res.transcript.prefix(120)))
+                                  body: String(res.transcript.prefix(120)),
+                                  ambient: true)
                 continue
             }
             // 🐬 Same rule for the Flipper: this loop runs when the app is
@@ -1087,10 +1184,17 @@ final class TinySession: NSObject, ObservableObject {
                 "deviceId": id, "token": devTok, "inReplyTo": envId,
                 "payload": ["result": String(answer.prefix(7000))],
             ])
-            // The app was asleep when this happened — leave a trace
+            // The app was asleep when this happened — leave a trace. AMBIENT:
+            // a trace is a record, not an interruption. The web agent's answer
+            // went back on the relay envelope above, so the person who asked is
+            // already reading it somewhere else; this exists only so the phone
+            // isn't silently doing things. Android's parity comment on
+            // notifyFleetTrace says exactly this, and pointed here while iOS
+            // still chimed.
             await Notify.post(
                 title: "Web agent reached your phone",
-                body: String(prompt.prefix(120))
+                body: String(prompt.prefix(120)),
+                ambient: true
             )
         }
     }

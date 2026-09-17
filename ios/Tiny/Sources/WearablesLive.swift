@@ -215,8 +215,8 @@ final class GlassesLive: ObservableObject {
         // RIDES this transcriber whenever it is already running, and hands the
         // delta straight to the agent as a tool result. So the same tool returned
         // punctuated prose or one unbroken run-on depending on whether the user
-        // happened to have the live card open — the reason NiclaRecorder sets this
-        // for a wake take is the reason it belongs here too.
+        // happened to have the live card open — the reason DmMedia sets this is
+        // the reason it belongs here too.
         req.addsPunctuation = true
         request = req
 
@@ -328,15 +328,15 @@ final class GlassesListener {
         await postResult(toolUseId, token: token, payload: payload)
     }
 
-    /// Which microphone the audio session is actually capturing from —
-    /// "bluetooth" = the glasses (their HFP profile) or a paired headset,
-    /// "phone" = the built-in mic. Keeps the agent honest about which
-    /// microphone heard the transcript (Android posts the same field).
-    private static func micRoute() -> String {
-        let bt = AVAudioSession.sharedInstance().currentRoute.inputs
-            .contains { $0.portType == .bluetoothHFP }
-        return bt ? "bluetooth" : "phone"
-    }
+    /// Which microphone the audio session is actually capturing from. Keeps the
+    /// agent honest about which microphone heard the transcript (Android posts
+    /// the same field).
+    ///
+    /// One line, because the ANSWER is shared: `MicRoute` (Speech.swift) owns the
+    /// two words, and the take rail reads the same function — the agent compares
+    /// this field across rails, so two spellings would be two facts. Kept as a
+    /// named function here so the call sites below still read as prose.
+    private static func micRoute() -> String { MicRoute.current() }
 
     /// The shared core (voice answers over its own WS, not the mailbox).
     func listen(seconds: Int) async -> [String: Any] {

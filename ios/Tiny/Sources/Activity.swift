@@ -32,14 +32,10 @@ enum EventGlyph {
     /// matches longest-key-first instead of trusting this array's order, because
     /// a correctness that depends on line position is one reorder from wrong.
     ///
-    /// 🚫 `device_missed` is that same trap on the device side: `device` is a real
-    /// prefix, so a task the laptop NEVER picked up would draw 💻, the glyph for
-    /// one it FINISHED. Keyed in full.
-    ///
     /// Mirrors lib/chat/event-icons.ts KIND_ICONS.
     static let icons: [(key: String, glyph: String)] = [
         ("job", "⏰"), ("job_missed", "⛔"), ("telegram", "✈️"), ("tiny_visit", "👀"), ("learn", "🧬"),
-        ("device", "💻"), ("device_missed", "🚫"), ("pay_alarm", "🚨"),
+        ("device", "💻"), ("pay_alarm", "🚨"),
         // 🗣️🎙️👁️ Keyed in full, not behind a shared `nicla` prefix: a wake, the
         // words that followed it, and the Vision seeing motion are three
         // different rows to a reader.
@@ -65,8 +61,17 @@ enum EventGlyph {
         "job_result", "job_error", "dm", "follow", "tiny_visit", "device_result",
         "tool-update", "telegram", "telegram_out", "telegram_button", "pay_alarm",
         "pay_earned", "pay_received", "pay_withdrawn", "pay_refunded",
-        "job_missed", "device_missed",
+        "job_missed",
         "batch_result", // app-emitted via POST /events (spawn_agents wait:false)
+        // 💻 relay.ts RelayTaskResultCall — a daemon's use_tasks completion, the
+        // offloaded half of "trigger and forget on the Mac". It shipped to the
+        // WEB roster only, and the reason is the trap: the `device` prefix key
+        // above already renders it 💻 on all three surfaces, so the glyph cost
+        // nothing and the roster looked like paperwork. But the roster is not
+        // what draws the row — it is the GUARD, and here it is the guard's whole
+        // input. Skipping it on the surfaces where it is *only* a guard leaves
+        // the row rendering correctly and the next kind unprotected.
+        "device_task_result",
         // 🗣️🎙️👁️📝 devices.ts DEVICE_EVENT_KINDS — and THIS app writes two of
         // them (NiclaVoiceGateway posts nicla_wake, NiclaRecorder posts
         // device_note). The glyphs above were added when the necklace shipped;

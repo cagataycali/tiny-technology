@@ -199,8 +199,8 @@ final class VoiceMode: NSObject, ObservableObject {
         }
         // What the silence watcher hands to `onUtterance` is not a preview — every
         // caller of `toggle(onUtterance:)` does `chat.send(text, token:)`, so this
-        // text is a message the agent reads (NiclaRecorder states the same reason
-        // for a wake take). This is also the FALLBACK rail for beginAnalyzerSession, and
+        // text is a message the agent reads (DmMedia states the same reason for a
+        // voice note). This is also the FALLBACK rail for beginAnalyzerSession, and
         // two rails feeding one `chat.send` should not format differently.
         // Partials and punctuation coexist fine — TinyLive's live transcriber sets
         // both on one request.

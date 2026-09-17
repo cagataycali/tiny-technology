@@ -579,6 +579,142 @@ struct CallSession: Identifiable, Decodable {
     let started_at: Double?
     let duration_ms: Double?
     let segment_count: Int?
+    /// ⚠️ The recorded reason an abnormal end had — decoded, because
+    /// `rows(from:)` ADMITS `status == "error"` rows and without this field one
+    /// drew exactly like a call the person hung up on themselves. The column
+    /// reaches the app already (VOICE_LIST_SQL selects it, /api/voice/sessions
+    /// passes rows through verbatim); it was dropped on this line. Diagnostic
+    /// text (`upstream closed: 1011 …`) — `CallOutcome` translates it; never
+    /// show it raw.
+    let error: String?
+}
+
+/// 🔴 Why a call ended, in the language of the person who asks — the Swift twin
+/// of `lib/voice/outcome.ts` (Android `CallOutcome` is the third).
+///
+/// The recorded reason is a worker-tail diagnostic, and keeping it that way is
+/// right: the close code and the exception text are what you want when
+/// debugging. But showing one to the owner of the call would be the same
+/// wrong-surface mistake pointing the other way, so the translation happens
+/// here, where the reader is known.
+///
+/// ⚠️ AN UNRECOGNISED REASON IS NOT SILENCE. A reason this map hasn't seen — a
+/// new teardown arm in the worker, or a row from before the reason was wired —
+/// must still say the call did not end normally, without inventing a cause.
+/// Saying nothing is how the reason lost its reader in the first place.
+/// 🔇 Why a recording won't play — the Swift twin of `lib/voice/playback.ts`.
+///
+/// `/voice/recording/:id` is a route that STITCHES segments on first listen, and
+/// it can decline: 409 still live, 413 over the 40MB stitch cap, 404 nothing
+/// journaled, 424 no R2. `AVPlayer(url:)` handed one of those sets
+/// `currentItem.status = .failed` — and nothing here read it, so `playingId`
+/// stayed set: a pause glyph over a transport frozen at 0:00, forever, with the
+/// reason sitting unread in `currentItem.error`.
+///
+/// ⚠️ This screen's LOAD path already learned exactly this (see `load()`:
+/// "reaching past the house client is what threw the status away, and a screen
+/// with no status can only guess at a cause"). The play path then handed a URL
+/// to a player with no error channel at all.
+enum CallRecordingRefusal {
+    /// The generic answer for a refusal we can't read — and for a player error
+    /// with no readable body, which is the normal `AVPlayer` case. All three
+    /// clients share this sentence; the pins assert they agree.
+    static let unknown = "couldn't play this recording"
+
+    /// ⚠️ KEYED ON THE WORKER'S OWN LITERALS — `voice-playback-refusal.test.ts`
+    /// extracts every `json({ error: … }, 4xx)` that `voiceRecording` can
+    /// return from `src/voice.ts` and proves this list covers them, so a sixth
+    /// refusal added upstream fails a suite instead of quietly falling to the
+    /// generic sentence.
+    private static let refusals: [(String, String)] = [
+        ("call still in progress", "this call is still going — reload in a moment"),
+        ("call too long to stitch", "this call is too long to replay in one piece"),
+        ("no replay journaled for this session", "this call wasn't recorded"),
+        ("no audio journaled", "this call's audio wasn't saved"),
+        ("media store not provisioned", "recordings are unavailable right now"),
+        // ⚠️ Needs a client bug to reach (the URL is built from a row id), but
+        // the map's claim is that it covers EVERY refusal — an exception
+        // "because that one can't happen" is how the next arm gets skipped too.
+        // Shares the generic sentence deliberately: there is nothing useful to
+        // tell someone about a malformed URL they never typed.
+        ("session id required", unknown),
+    ]
+
+    /// Bytes per PCM segment (`SEGMENT_BYTES` in the worker) and the stitch's
+    /// 40MB memory guard. Kept as constants so `tooLong` reads as arithmetic.
+    private static let segmentBytes = 1_440_000
+    private static let stitchByteCap = 40_000_000
+
+    /// Will this call's stitch CERTAINLY be refused for size?
+    ///
+    /// ⚠️ One-sided on purpose: it answers "certainly refused", never
+    /// "certainly fine". `segment_count` sums both directions and only the last
+    /// segment per direction may be short, so `(n - 2) * segmentBytes` is the
+    /// guaranteed floor. At 30 that floor exceeds 40MB; at 29 it does not. A row
+    /// under the line is NOT promised a recording — every other refusal is
+    /// invisible from here — so this only ever adds a note, never gates play.
+    static func tooLong(segmentCount: Int?) -> Bool {
+        let n = segmentCount ?? 0
+        guard n >= 3 else { return false }
+        return (n - 2) * segmentBytes > stitchByteCap
+    }
+
+    /// What to say when a recording won't play. ALWAYS a sentence.
+    ///
+    /// ⚠️ Never nil, and that is the difference from `CallOutcome.text`: that
+    /// one describes a call, where "nothing to say" is the common and correct
+    /// answer. This is called only when a play attempt FAILED, and a failed play
+    /// that says nothing is the entire defect.
+    static func text(_ error: String?) -> String {
+        let reason = (error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reason.isEmpty else { return unknown }
+        for (needle, sentence) in refusals {
+            // `contains`, not `==`: AVFoundation wraps the origin's body in its
+            // own description, so the reason arrives embedded rather than bare.
+            if reason.contains(needle) { return sentence }
+        }
+        return unknown
+    }
+}
+
+enum CallOutcome {
+    /// The generic answer for an abnormal end whose reason we can't read. All
+    /// three clients share this sentence; the pins assert they agree.
+    static let unknown = "ended unexpectedly"
+
+    /// ⚠️ KEYED ON THE WORKER'S OWN LITERALS — `voice-call-outcome.test.ts`
+    /// extracts every string `VoiceSession.teardown` can receive from
+    /// `src/voice.ts` and proves this list covers them, so a sixth arm added
+    /// upstream fails a suite instead of quietly falling to the generic
+    /// sentence. The two `hasPrefix` entries drop the diagnostic tail on
+    /// purpose.
+    private static let reasons: [(String, String, Bool)] = [
+        ("upstream closed:", "the voice service closed the connection", true),
+        ("upstream error:", "the voice service dropped", true),
+        ("the client socket errored", "this device's connection dropped", false),
+        ("the client went silent", "we stopped hearing this device", false),
+        ("the call hit the maximum length", "the call hit the maximum length", false),
+    ]
+
+    /// What to say about a finished call, or nil when there is nothing to say.
+    ///
+    /// Nil means "this ended the way calls end" — a clean row with no recorded
+    /// reason. A badge on every row would say nothing; this one appears exactly
+    /// when the call did something the person didn't ask for.
+    ///
+    /// ⚠️ `status == "error"` with no reason is NOT nil: every error row written
+    /// before the reason was wired looks like that, and the status alone is more
+    /// than the row said yesterday.
+    static func text(status: String?, error: String?) -> String? {
+        let reason = (error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if !reason.isEmpty {
+            for (needle, text, isPrefix) in reasons {
+                if isPrefix ? reason.hasPrefix(needle) : reason == needle { return text }
+            }
+            return unknown
+        }
+        return status == "error" ? unknown : nil
+    }
 }
 
 /// 🔴 The body of GET /api/voice/sessions — `ok` included, and that is the fix.
@@ -622,6 +758,12 @@ struct CallRecordingsView: View {
     @State private var total: Double = 0
     @State private var scrubbing = false
     @State private var timeObserver: Any?
+    // Why a play failed, per call id. AVPlayer reports a failed item
+    // asynchronously into `currentItem.status`, which nothing read — so a
+    // recording that can never stitch left a pause glyph over a dead
+    // transport. Keyed by id so the sentence sits on the row that failed.
+    @State private var playError: [String: String] = [:]
+    @State private var failObserver: NSKeyValueObservation?
 
     var body: some View {
         NavigationStack {
@@ -659,6 +801,10 @@ struct CallRecordingsView: View {
         .onDisappear {
             if let timeObserver { player?.removeTimeObserver(timeObserver) }
             timeObserver = nil
+            // The undo of its own setup, not the Nth item in a list: a KVO
+            // observation outliving the view it writes @State into is a leak.
+            failObserver?.invalidate()
+            failObserver = nil
             player?.pause()
             player = nil
             playingId = nil
@@ -691,6 +837,32 @@ struct CallRecordingsView: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    // Why the call ended, when it didn't end the way calls end.
+                    // Absent on a clean hangup — a badge on every row says
+                    // nothing. The duration just above is why this matters: a
+                    // 0:20 row reads as a short call, so "the service dropped
+                    // 20 seconds in" has to be ON the row.
+                    // ⚠️ Never `s.error` raw — that is worker-tail text.
+                    if let outcome = CallOutcome.text(status: s.status, error: s.error) {
+                        Text("⚠️ \(outcome)")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                    }
+                    // ⚠️ Why the play failed — because AVPlayer cannot say. The
+                    // refusal lands in `currentItem.status` and used to go
+                    // unread, leaving a pause glyph over a dead transport.
+                    if let why = playError[s.id] {
+                        Text("⚠️ \(why)")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    } else if CallRecordingRefusal.tooLong(segmentCount: s.segment_count) {
+                        // Knowable before the tap: `segment_count` is already on
+                        // the row, and ~30 segments cannot fit the 40MB stitch
+                        // cap. Better than a play button guaranteed to fail.
+                        Text("⚠️ this call is too long to replay in one piece")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 // Share the episode — the same public-but-unguessable WAV URL
@@ -736,15 +908,42 @@ struct CallRecordingsView: View {
             player?.pause()
             playingId = nil
             clearNowPlaying()
+            // Pausing keeps the item, so the observation stays live on purpose:
+            // an error can still surface for the paused item, and resuming from
+            // the lock screen would otherwise have no error channel at all.
             return
         }
         guard let url = URL(string: "https://plugin.tiny.technology/voice/recording/\(s.id)") else { return }
         try? AVAudioSession.sharedInstance().setCategory(.playback)
         try? AVAudioSession.sharedInstance().setActive(true)
         if let timeObserver { player?.removeTimeObserver(timeObserver); self.timeObserver = nil }
+        failObserver?.invalidate(); failObserver = nil
         player?.pause()
         let p = AVPlayer(url: url)
         player = p
+        playError[s.id] = nil
+        // ⚠️ THE ERROR CHANNEL. Without this the route's refusal (413 over the
+        // stitch cap, 409 still live, 404 nothing journaled) lands in
+        // `currentItem.status = .failed` and nothing reads it: `playingId` stays
+        // set and the row shows a pause button over a transport that never
+        // moves.
+        //
+        // ⚠️ `status`, NOT `.AVPlayerItemFailedToPlayToEndTime`. Every refusal
+        // here fails at LOAD — the item never begins playing, so the
+        // failed-to-play-to-end notification never fires. `error.localizedDescription`
+        // embeds the origin's own body, hence `CallRecordingRefusal`'s
+        // `contains` matching rather than equality.
+        failObserver = p.currentItem?.observe(\.status, options: [.new]) { item, _ in
+            guard item.status == .failed else { return }
+            let described = (item.error as NSError?)?.localizedDescription
+            Task { @MainActor in
+                playError[s.id] = CallRecordingRefusal.text(described)
+                // Stop claiming it is playing — a pause glyph over a frozen
+                // transport is half of what made this invisible.
+                if playingId == s.id { playingId = nil }
+                clearNowPlaying()
+            }
+        }
         elapsed = 0
         total = (s.duration_ms ?? 0) / 1000
         // Half-second transport ticks — skipped mid-scrub so the thumb stays
@@ -816,8 +1015,14 @@ struct CallRecordingsView: View {
         let body = try JSONDecoder().decode(CallSessionsBody.self, from: data)
         guard body.ok, let list = body.sessions else { throw ApiError.badResponse }
         // Only finished calls stitch (live ones 409); hide sub-2s pocket dials
-        // and zero-segment rows (no audio ever journaled — e.g. calls that
-        // died in an upstream outage; their stitch 404s, the row is dead).
+        // and zero-segment rows.
+        // ⚠️ A zero count is "nothing we can offer", NOT "no audio ever
+        // existed". Teardown's counters live only in the Durable Object's
+        // memory, so a teardown on a fresh instance used to overwrite a real
+        // count with 0 while the PCM segments sat in R2 intact (fixed
+        // worker-side: the row update is monotonic now). The filter is still
+        // right — a 0 row has no mix markers, so its stitch really does 404 —
+        // but do not read it as proof the call was lost.
         return list.filter {
             ($0.status == "ended" || $0.status == "error")
                 && ($0.duration_ms ?? 0) > 2000

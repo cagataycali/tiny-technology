@@ -28,6 +28,7 @@ struct TinyBeaconInfo: Equatable {
     enum Kind: Equatable {
         case vision   // version 1 — firmware/tiny_ble.py
         case voice    // version 2 — firmware/voice/tiny_voice
+        case sense    // version 3 — firmware/sense/tiny_sense (Nicla Sense ME)
         case unknown
     }
 
@@ -35,6 +36,7 @@ struct TinyBeaconInfo: Equatable {
         switch version {
         case 1: return .vision
         case 2: return .voice
+        case 3: return .sense
         default: return .unknown
         }
     }
@@ -45,6 +47,7 @@ struct TinyBeaconInfo: Equatable {
         switch kind {
         case .vision: return "nicla-vision"
         case .voice: return "nicla-voice"
+        case .sense: return "nicla-sense"
         case .unknown: return "nicla-vision"
         }
     }
@@ -156,9 +159,15 @@ final class Bluetooth: NSObject, ObservableObject {
         try? await Task.sleep(for: .seconds(duration + 0.5))
         let found = devices.sorted { $0.rssi > $1.rssi }
         if found.isEmpty {
-            return state == "unauthorized" ? "Bluetooth permission denied on the phone."
-                 : state == "poweredOff" ? "Bluetooth is turned off on the phone."
-                 : "No BLE devices discovered nearby."
+            // ⚠️ This string is appended to the prompt and comes back out of the
+            // model's mouth as a fact about the user's room, so the obstacle goes
+            // FIRST: "no BLE devices" is reserved for a scan that really looked.
+            // The three cases this used to miss — no radio at all, a verdict
+            // still in flight, and a scan the radio never let start — all read as
+            // a confidently empty room.
+            return BleEmptyState.obstacle(scanning: scanning, state: state,
+                                          completedScan: completedScan)
+                ?? "No BLE devices discovered nearby."
         }
         return found.prefix(25)
             .map { "- \($0.name) · RSSI \($0.rssi) dBm" }
@@ -190,9 +199,9 @@ extension Bluetooth: CBCentralManagerDelegate {
     nonisolated func centralManager(_ central: CBCentralManager, didDiscover peripheral: CBPeripheral, advertisementData: [String: Any], rssi RSSI: NSNumber) {
         // Extract Sendables before hopping — advertisementData is not Sendable
         let id = peripheral.identifier
-        let name = peripheral.name
-            ?? (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? "Unnamed device"
+        let name = BleName.pick(
+            advertised: advertisementData[CBAdvertisementDataLocalNameKey] as? String,
+            cached: peripheral.name)
         let rssi = RSSI.intValue
         let tiny = TinyBeaconInfo.parse(advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data)
         Task { @MainActor in
@@ -204,6 +213,36 @@ extension Bluetooth: CBCentralManagerDelegate {
                 b.devices.append(BleDevice(id: id, name: name, rssi: rssi, tiny: tiny))
             }
         }
+    }
+}
+
+/// Which of a peripheral's two names to show.
+///
+/// ⚠️ They are two different names and CoreBluetooth prefers the wrong one.
+/// `CBPeripheral.name` is the CACHED GAP device name: it can be older than the
+/// packet in hand, and it survives the board being renamed or reflashed. The
+/// advertised local name arrives in the packet being handled right now.
+///
+/// Measured on air 2026-08-04, three identical necklaces on one build:
+///
+///     cbname='tiny-d82b'   advname='tiny-d82b'
+///     cbname='MPY NIMBLE'  advname='tiny-b3d3'    <- the provisioned one
+///     cbname='tiny-ae1d'   advname='tiny-ae1d'
+///
+/// Only the board a central had ever CONNECTED to was wrong, because connecting
+/// is what fills the cache — so the necklace an owner had already set up, and is
+/// therefore most likely to go looking for by name, is the one that showed up as
+/// NimBLE's factory default. The firmware now sets its GAP name to match
+/// (strands-nicla `tiny_ble.start`), but a phone holding the old cache would keep
+/// showing it, so both halves are needed. FlipperGateway already reads them in
+/// this order.
+enum BleName {
+    static func pick(advertised: String?, cached: String?) -> String {
+        for candidate in [advertised, cached] {
+            if let s = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !s.isEmpty { return s }
+        }
+        return "Unnamed device"
     }
 }
 
@@ -251,22 +290,79 @@ enum BleSignal {
 /// "Scanning…" for the whole window, and a scan that had never run read as the
 /// flat, confident "No devices found yet.". Pure and separate so each claim can
 /// be pinned to the exact condition that earns it.
+///
+/// ⚠️ FOUR surfaces ask this question and only one of them used to ask HERE.
+/// `NearbyView` kept its own ternary — `scanning` first, no `unsupported` arm,
+/// no `completedScan`, i.e. the original bug preserved intact. `scanSummary`
+/// answered the AGENT with "No BLE devices discovered nearby.", a sentence the
+/// model repeats to the user as fact. `adopt()` told someone to go carry a
+/// necklace closer to a phone that had never looked for it. One question, four
+/// answers, three of them written against a radio state nobody had checked.
+///
+/// `situation` is the single decision now, and the radio-state STRINGS live in
+/// it and nowhere else. What a surface may still vary is the WORDS.
 enum BleEmptyState {
-    static func message(scanning: Bool, state: String, completedScan: Bool) -> String {
+    /// What is true about the search — the only thing a caller may branch on.
+    enum Situation: Equatable {
+        case noPermission, radioOff, noRadio, looking, lookedAndFoundNothing, neverLooked
+    }
+
+    static func situation(scanning: Bool, state: String, completedScan: Bool) -> Situation {
         // Radio trouble outranks everything: it is both the true answer and the
         // only one the user can act on.
         switch state {
-        case "unauthorized":
-            return "Bluetooth permission denied — enable it for tiny in Settings."
-        case "poweredOff":
-            return "Bluetooth is off. Turn it on and this list fills in by itself."
-        case "unsupported":
-            return "This device has no Bluetooth radio."
+        case "unauthorized": return .noPermission
+        case "poweredOff": return .radioOff
+        case "unsupported": return .noRadio
         default: break
         }
-        if scanning { return "Looking for devices nearby…" }
+        if scanning { return .looking }
         // Only a finished scan has earned the right to say nothing is there.
-        return completedScan ? "Nothing nearby yet. Wake the device and scan again."
-                            : "Ready to scan."
+        return completedScan ? .lookedAndFoundNothing : .neverLooked
+    }
+
+    /// The caption under an empty list.
+    static func message(scanning: Bool, state: String, completedScan: Bool) -> String {
+        switch situation(scanning: scanning, state: state, completedScan: completedScan) {
+        case .noPermission:
+            return "Bluetooth permission denied — enable it for tiny in Settings."
+        case .radioOff:
+            return "Bluetooth is off. Turn it on and this list fills in by itself."
+        case .noRadio:
+            return "This device has no Bluetooth radio."
+        case .looking:
+            return "Looking for devices nearby…"
+        case .lookedAndFoundNothing:
+            return "Nothing nearby yet. Wake the device and scan again."
+        case .neverLooked:
+            return "Ready to scan."
+        }
+    }
+
+    /// Why the phone could not answer what is nearby — or **nil when it really
+    /// did look**, in which case the answer is genuinely "nothing" and the caller
+    /// says so in its own words.
+    ///
+    /// That one case is the only sentence a surface still owns, because a
+    /// transcript and an instruction are different things: the agent reports
+    /// ("No BLE devices discovered nearby."), the adoption sheet asks for
+    /// something ("Bring it closer…"). Written as `obstacle(…) ?? <sentence>`,
+    /// the check sits in front of the claim — so a surface can no longer assert
+    /// an empty room by forgetting to ask.
+    static func obstacle(scanning: Bool, state: String, completedScan: Bool) -> String? {
+        switch situation(scanning: scanning, state: state, completedScan: completedScan) {
+        case .noPermission:
+            return "Bluetooth permission is denied for tiny on this phone."
+        case .radioOff:
+            return "Bluetooth is turned off on this phone."
+        case .noRadio:
+            return "This phone has no Bluetooth radio."
+        case .looking:
+            return "The phone is still scanning — ask again in a moment."
+        case .neverLooked:
+            return "The phone hasn't scanned yet, so nothing is known about what's nearby."
+        case .lookedAndFoundNothing:
+            return nil
+        }
     }
 }

@@ -283,6 +283,9 @@ final class TinyLive: NSObject, ObservableObject {
     @Published var frame: UIImage?
     @Published var stateText = "connecting…"
     @Published var lastError: String?
+    /// The fleet row's `name` for the necklace we aimed at (nil until found).
+    /// Read by the overlay's caption and by TinyUITests (`tiny-live-device`).
+    @Published private(set) var deviceName: String?
     @Published var audioOn = true
     @Published var running = false
     /// .lan = direct MJPEG (~20fps, home WiFi); .remote = relay frame polling
@@ -401,6 +404,7 @@ final class TinyLive: NSObject, ObservableObject {
     private static let minSegmentChars = 4
 
     private static let cachedURLKey = "tinyLive.streamBase"   // "http://ip:8080"
+    private static let cachedNameKey = "tinyLive.deviceName"  // fleet row name beside the cached base
 
     // ---- lifecycle -----------------------------------------------------------
 
@@ -452,6 +456,7 @@ final class TinyLive: NSObject, ObservableObject {
         // Fast path: on the same WiFi a cached base answers in <2s → 20fps LAN.
         if let base = UserDefaults.standard.string(forKey: Self.cachedURLKey) {
             if await probe(base: base) {
+                deviceName = UserDefaults.standard.string(forKey: Self.cachedNameKey)
                 mode = .lan
                 open(base: base); return
             }
@@ -479,6 +484,8 @@ final class TinyLive: NSObject, ObservableObject {
             fail(why); return
         }
         let id = found.id
+        deviceName = found.name
+        UserDefaults.standard.set(found.name, forKey: Self.cachedNameKey)
         // The board's OWN address, off its heartbeat — no discovery round trip.
         //
         // This is the fix for "says connecting through the cloud but i'm at the
@@ -526,7 +533,16 @@ final class TinyLive: NSObject, ObservableObject {
     /// worse than none: DHCP reassigns it, so dialing it would mean waiting out a
     /// timeout against whatever machine holds it now before falling back — slower
     /// than never having tried.
-    struct FoundDevice: Equatable { let id: String; let lanURL: String? }
+    struct FoundDevice: Equatable {
+        let id: String
+        let lanURL: String?
+        /// The row's `name` (e.g. "tiny-99c9") for the overlay caption. Defaulted
+        /// so the existing fixtures (TinyLiveLanBaseTests) keep their shape.
+        let name: String?
+        init(id: String, lanURL: String?, name: String? = nil) {
+            self.id = id; self.lanURL = lanURL; self.name = name
+        }
+    }
 
     /// What asking the fleet for a necklace actually returned.
     ///
@@ -613,7 +629,7 @@ final class TinyLive: NSObject, ObservableObject {
             guard raw.hasPrefix("http://"), let u = URL(string: raw), u.host != nil else { return nil }
             return raw
         }
-        return FoundDevice(id: id, lanURL: lan)
+        return FoundDevice(id: id, lanURL: lan, name: best["name"] as? String)
     }
 
     // ---- remote mode: relay `frame` polling — works from anywhere ------------
@@ -824,13 +840,35 @@ final class TinyLive: NSObject, ObservableObject {
     /// carry an `images` array, so it lands in `.words` either way — and
     /// `RelayReply.text`, which does the unwrapping, passes the option itself.
     nonisolated static func readFrameAnswer(_ payload: String) -> FrameAnswer {
-        guard let obj = try? JSONSerialization.jsonObject(
+        if let obj = try? JSONSerialization.jsonObject(
                 with: Data(payload.utf8)) as? [String: Any],
-              let images = obj["images"] as? [[String: Any]],
-              let urlStr = images.first?["url"] as? String,
-              let url = URL(string: urlStr), url.scheme != nil
-        else { return .words(RelayReply.text(payload)) }
-        return .imageURL(url)
+           let images = obj["images"] as? [[String: Any]],
+           let urlStr = images.first?["url"] as? String,
+           let url = URL(string: urlStr), url.scheme != nil {
+            return .imageURL(url)
+        }
+        let words = RelayReply.text(payload)
+        // The Sticky (grammar ≤8) answers `screenshot` in prose:
+        // "screenshot: https://…" — an image answer in words' clothing. The
+        // firmware fix (images[] alongside result — docs/ANSWERS.md
+        // 2026-08-26) makes the branch above catch it; until that OTA is on
+        // every device, recognize the documented prose shape too. Narrow on
+        // purpose: only the `screenshot:` prefix + one https URL and nothing
+        // after it — free-text that merely MENTIONS a link stays words.
+        if let url = screenshotProseURL(words) { return .imageURL(url) }
+        return .words(words)
+    }
+
+    /// "screenshot: <https url>" (surrounding whitespace ok) → that URL.
+    /// Anything else — other prefixes, http, trailing prose — is nil.
+    nonisolated static func screenshotProseURL(_ words: String) -> URL? {
+        let trimmed = words.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("screenshot:") else { return nil }
+        let rest = trimmed.dropFirst("screenshot:".count)
+            .trimmingCharacters(in: .whitespaces)
+        guard rest.hasPrefix("https://"), !rest.contains(" "),
+              let url = URL(string: rest) else { return nil }
+        return url
     }
 
     /// One relay round-trip: invoke `frame`, await the reply, fetch the R2 URL.
@@ -943,24 +981,79 @@ final class TinyLive: NSObject, ObservableObject {
         return false
     }
 
+    private static let streamPollTries = 8
+    private static let streamPollEvery = 4.0
+
+    /// The board's own address out of whatever it said.
+    ///
+    /// ⚠️ The regex is shared with Android's `TinyLive.discoverBase` and the two
+    /// must stay identical — the same board, the same reply, two clients. The port
+    /// is REQUIRED (`:\d+`): the necklace serves MJPEG on 8080 and a match without
+    /// one would hand `open(base:)` a bare host, so it would dial :80 and fail the
+    /// probe, which is slower than never having tried.
+    nonisolated static func lanBase(in text: String) -> String? {
+        guard let range = text.range(of: #"http://[0-9.]+:\d+"#, options: .regularExpression)
+        else { return nil }
+        return String(text[range])
+    }
+
     /// Relay `stream` invoke → reply text contains "video http://ip:8080/stream".
+    ///
+    /// The LAST hand-rolled relay round trip in this file, and it had every defect
+    /// the other two were fixed for — costing not a wrong sentence but the fast
+    /// path itself. Its whole job is to find a LAN base; failing silently means
+    /// ~2fps cloud polling for the rest of the session while the necklace serves
+    /// ~16fps one hop away, which is the "connecting through the cloud but i'm at
+    /// the same wifi" report. Four ways it lost that race:
+    ///
+    ///   * `try? await Api.post` — a refused SEND became "no LAN base", then the
+    ///     loop below still spent 32s waiting for a reply to a message nobody
+    ///     ever accepted.
+    ///   * `else { continue }` on the poll — a TERMINAL refusal (401 from a
+    ///     session that lapsed mid-poll, 403, 404) burned the whole 32s budget.
+    ///     `RelayPoll.isTerminal` exists for exactly this.
+    ///   * the poll GET had no cache policy. Its URL is constant for the whole
+    ///     loop and its body is `{reply: null}` until the board answers, so a
+    ///     cached "not yet" can be re-read eight times — 32s spent on one
+    ///     response. `RelayPoll.read` states that rule and obeys it.
+    ///   * `obj["result"] as? String` after a plain `jsonObject` — so a payload
+    ///     that is NOT a JSON object was dropped on the floor even when it
+    ///     carried the address. `lib/chat/tools/nicla.ts` proves that shape is
+    ///     real (it does `JSON.parse`, then `catch { result: String(payload) }`),
+    ///     and `RelayReply.text` is this file's reader for it.
+    ///
+    /// Silent on a refusal, deliberately: `remoteLoop` is already running against
+    /// the same token and reports its own. A second sentence for one lapsed
+    /// session would be noise — but returning EARLY is not, because no amount of
+    /// polling makes a refused send succeed.
     private func discoverViaRelay(deviceId: String, token: String?) async -> String? {
-        guard let sent: [String: Any] = try? await Api.post("/api/devices/relay", token: token, body: [
-            "toDevice": deviceId, "payload": ["type": "invoke", "prompt": "stream"],
-        ]), let msgId = sent["id"] as? String else { return nil }
-        for _ in 0 ..< 8 {
-            try? await Task.sleep(for: .seconds(4))
-            guard let r: [String: Any] = try? await Api.get(
-                "/api/devices/relay?inReplyTo=\(msgId)", token: token),
-                let reply = r["reply"] as? [String: Any],
-                let payload = reply["payload"] as? String,
-                let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any],
-                let text = obj["result"] as? String
-            else { continue }
-            if let range = text.range(of: #"http://[0-9.]+:\d+"#, options: .regularExpression) {
-                return String(text[range])
-            }
+        let sent: [String: Any]
+        do {
+            sent = try await Api.post("/api/devices/relay", token: token, body: [
+                "toDevice": deviceId, "payload": ["type": "invoke", "prompt": "stream"],
+            ])
+        } catch {
             return nil
+        }
+        guard let msgId = sent["id"] as? String, !msgId.isEmpty else { return nil }
+        let query = msgId.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? msgId
+        for _ in 0 ..< Self.streamPollTries {
+            try? await Task.sleep(for: .seconds(Self.streamPollEvery))
+            // The user closed the view, or `remoteLoop` already upgraded us. Eight
+            // more relay GETs would answer a question nobody is asking.
+            guard running, mode == .remote else { return nil }
+            switch await RelayPoll.read(inReplyTo: query, token: token) {
+            case .empty:
+                continue
+            case .unreadable(_, let status):
+                if RelayPoll.isTerminal(status: status) { return nil }
+                continue
+            case .answered(let payload):
+                // The board spoke: one answer, then done either way. A reply with
+                // no address in it means this board isn't serving a LAN stream,
+                // and asking the same question seven more times won't change that.
+                return Self.lanBase(in: RelayReply.text(payload))
+            }
         }
         return nil
     }
@@ -1036,11 +1129,18 @@ final class TinyLive: NSObject, ObservableObject {
         else { return }
         buf.frameLength = AVAudioFrameCount(sampleCount)
         // Decode, and remove the mic's DC offset in the same pass. The board's
-        // PDM path sits ~500-800 counts above zero and DRIFTS, so a fixed
+        // PDM path sits ~8500 counts above zero and DRIFTS, so a fixed
         // correction would be wrong within seconds; the running mean of each
         // chunk tracks it. Left in, the offset is a fat sub-20Hz tone under
-        // everything — inaudible, but it is 40% of the "quiet" spectrum measured
-        // on the board and it eats the headroom the gain below needs.
+        // everything — inaudible, but it is a quarter of full scale and it eats
+        // the headroom the gain below needs.
+        //
+        // Measured on 9.2s of this board's /audio: mean 8479 counts, drifting
+        // 8303→8663 across one-second windows. The figure is a function of the
+        // firmware's GAIN_DB, which digitally multiplies the decimated sample —
+        // strands-nicla firmware/tiny_audio.py records dc 812 at gain_db=24 and
+        // dc 11,496 at the 48 it now ships. So this number moves if that knob
+        // moves, and the running mean is what makes that safe to ignore.
         var mean: Float = 0
         pcmRemainder.withUnsafeBytes { raw in
             let int16 = raw.bindMemory(to: Int16.self)
@@ -1064,10 +1164,14 @@ final class TinyLive: NSObject, ObservableObject {
         // across the room". A level sweep put the usable window at -15 to -30 dB
         // and total failure at the native level.
         //
-        // DC removal above is a prerequisite, not a nicety: with the board's ~886
-        // count offset left in, a chunk's RMS is dominated by the constant (0.024
-        // vs 0.0004 of actual signal) and every level measurement reads the same
-        // number whether someone is speaking or not.
+        // DC removal above is a prerequisite, not a nicety: with the board's
+        // ~8500 count offset left in, a chunk's RMS is dominated by the constant
+        // (0.259 of DC against 0.071 of actual signal) and every level
+        // measurement reads nearly the same number whether someone is speaking
+        // or not. Measured over the same capture: chunk RMS spans 0.249–0.286
+        // with the offset in — a 15% relative swing — against 0.045–0.105 once
+        // it is gone, which is 133%. That collapsed dynamic range is why the
+        // energy gate mentioned below was inert rather than merely unhelpful.
         applyGain(to: buf)
         player.scheduleBuffer(buf)
 
@@ -1450,6 +1554,8 @@ struct TinyLiveOverlay: View {
                     Image(uiImage: frame)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
+                        .accessibilityLabel("live picture from \(live.deviceName ?? "the necklace")")
+                        .accessibilityIdentifier("tiny-live-frame")
                 } else {
                     Rectangle().fill(.black.opacity(0.85))
                     VStack(spacing: 6) {
@@ -1457,6 +1563,7 @@ struct TinyLiveOverlay: View {
                         Text(live.lastError ?? live.stateText)
                             .font(.caption2).foregroundStyle(.secondary)
                             .multilineTextAlignment(.center).padding(.horizontal, 8)
+                            .accessibilityIdentifier("tiny-live-state")
                     }
                 }
             }
@@ -1504,10 +1611,11 @@ struct TinyLiveOverlay: View {
                         }
                     }
                 }
-                Text(live.running
-                     ? (live.mode == .lan ? "tiny necklace · live" : "tiny necklace · remote")
-                     : "tiny necklace")
+                Text((live.deviceName ?? "tiny necklace")
+                     + (live.running ? (live.mode == .lan ? " · live" : " · remote") : ""))
                     .font(.caption2)
+                    .lineLimit(1)
+                    .accessibilityIdentifier("tiny-live-device")
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .foregroundStyle(.secondary)
                 Button {
@@ -1524,6 +1632,8 @@ struct TinyLiveOverlay: View {
         .shadow(radius: 12)
         .padding(.top, 8)
         .padding(.trailing, 8)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("tiny-live-overlay")
         .onAppear { live.start(token: session.token) }
         .onDisappear { live.stop() }
     }

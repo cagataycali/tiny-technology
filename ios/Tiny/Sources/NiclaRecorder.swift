@@ -19,15 +19,25 @@
  * After a take: audio saved under Documents/nicla-transcripts/ and uploaded
  * to /api/media (audio/mp4, 6MB cap ≈ 25min of 32kbps mono AAC — far above
  * the 120s clamp), transcript POSTed to /api/devices/transcript with the
- * NECKLACE's device token (attribution: the necklace heard it). If that
- * route isn't deployed yet, falls back to the `device_note` event kind —
- * already allowlisted — so transcripts join the agent's context either way.
+ * NECKLACE's device token (attribution: the necklace heard it). If that POST
+ * fails, falls back to the `device_note` event kind — already allowlisted —
+ * so transcripts join the agent's context either way.
+ *
+ * ⚠️ The fallback is the EXCEPTION. This header said "if that route isn't
+ * deployed yet" and three other files repeated it as production fact; probed
+ * 2026-08-02, the POST answers 401 `unknown device` — the worker's device-auth
+ * declining an unenrolled probe, which is unreachable unless the route is live.
+ * It matters which rail a take rode: a `nicla_transcript` row carries a
+ * fetchable id, a `device_note` carries a 300-char preview and nothing to
+ * fetch, so "either way" is about the WORDS arriving, not about them being
+ * equally useful to the agent.
  *
  * House crash rules obeyed: fresh AVAudioEngine per take, format guard
  * before installTap, tap + recognizer closures born in nonisolated statics
  * (the c9 rule), one mic — refuses to start while VoiceMode owns the input.
  */
 import AVFoundation
+import MediaPlayer
 import Speech
 import SwiftUI
 
@@ -40,15 +50,32 @@ struct NiclaRecordResult: Sendable {
     let audioUrl: String?
     let seconds: Int
     let error: String?
+    /// Which microphone actually heard this take — `"bluetooth"` (the glasses or
+    /// a paired headset) or `"phone"` (the built-in mic).
+    ///
+    /// ⚠️ CARRIED ON THE RESULT, NOT READ WHERE THE REPLY IS BUILT. The take
+    /// deactivates its `AVAudioSession` before returning, and once it does the
+    /// route reverts — so a `currentRoute` read at reply time would answer
+    /// `"phone"` for every take, including the ones the glasses heard.
+    /// `WearablesLive.listenOnce` can read it live because it still holds its
+    /// session; a take has to remember. Android's `PhoneRecorder.Take.micRoute`
+    /// carries it for the same reason.
+    ///
+    /// Nil on the failure paths: a take that never opened a microphone has no
+    /// route, and naming one it never used would be worse than saying nothing.
+    let micRoute: String?
 
     static func failure(_ message: String) -> NiclaRecordResult {
         NiclaRecordResult(ok: false, transcript: "", transcriptId: "",
-                          audioUrl: nil, seconds: 0, error: message)
+                          audioUrl: nil, seconds: 0, error: message, micRoute: nil)
     }
 }
 
 struct NiclaTranscript: Identifiable, Codable, Equatable {
-    let id: String
+    /// The SERVER's transcript id once the row has been filed, the local UUID
+    /// until then. `var`, because those are two different strings and the row
+    /// has to end up holding the server's — see `adoptServerId(rows:local:server:)`.
+    var id: String
     let at: Date
     let seconds: Int
     let label: String
@@ -69,6 +96,47 @@ struct NiclaTranscript: Identifiable, Codable, Equatable {
     /// Decodes to false for rows written by an older build — see the extension
     /// below, because the default value alone does NOT survive decoding.
     var isPreview: Bool = false
+    /// True when this row HAD local audio and `pruneAndSave` deleted it to stay
+    /// under `liveAudioBudget`.
+    ///
+    /// Eviction sets `audioFile = nil` — the same value a text-only row and a row
+    /// whose file write failed have always carried. So the three became one state:
+    /// `playable()` went false and the Play button simply disappeared, leaving a
+    /// row that looked like it had never been recorded. Same failure as the
+    /// `isPreview` ellipsis above, one field over: absence and loss were the same
+    /// pixels.
+    ///
+    /// It matters beyond the pixels, because `nicla_voice_transcripts` instructs
+    /// the agent from this exact assumption — "a necklace-live row has no audio
+    /// URL, but that does NOT mean the recording is gone … say 'open the tiny app
+    /// to listen', never 'there is no audio'". For an evicted segment that advice
+    /// sends the user to a row with no button on it. This flag is how the app can
+    /// tell them what actually happened.
+    ///
+    /// Set only by `applyEvictions`, so the flag and the deletion cannot drift.
+    var audioFreed: Bool = false
+    /// True once the server has filed this row (`id` is the worker's id).
+    ///
+    /// `postToServer` is one-shot: it is awaited once, right after the take, and
+    /// nothing ever tried again. So a memo recorded in the subway — or with the
+    /// session signed out, or while the worker was mid-deploy — stayed on the
+    /// phone forever and never joined the agent's context, which is the entire
+    /// point of recording it. Nothing said so, either: an unfiled row lists,
+    /// plays and shares exactly like a filed one, and `refreshFromServer` only
+    /// ever pulls DOWN, so no later open could notice the row was missing
+    /// upstream. The failure is silent on both ends.
+    ///
+    /// A row that fell through to the `device_note` event rail is NOT filed:
+    /// that preview reaches one context block and is fetchable by nobody.
+    ///
+    /// Decodes to false for rows written by an older build, which is the honest
+    /// answer — the phone never recorded whether those landed. It is NOT a
+    /// licence to re-post them blind: a re-post mints a fresh server row, so
+    /// doing that to a row that did land would duplicate it upstream. So the
+    /// server gets to answer first: `mergeFetched` sets this true on every row it
+    /// recognizes as one the server already holds, and `syncUnfiled` runs only
+    /// from `refreshFromServer`, after that confirmation pass.
+    var filed: Bool = false
 }
 
 extension NiclaTranscript {
@@ -96,6 +164,16 @@ extension NiclaTranscript {
         audioFile = try c.decodeIfPresent(String.self, forKey: .audioFile)
         audioUrl = try c.decodeIfPresent(String.self, forKey: .audioUrl)
         isPreview = try c.decodeIfPresent(Bool.self, forKey: .isPreview) ?? false
+        // Same reason as isPreview, and the same cost if it is ever written as a
+        // plain `decode`: every row on the phone predates this key, so a throw
+        // here is loadIndex() returning [] — the whole transcript history gone on
+        // first launch after the update.
+        audioFreed = try c.decodeIfPresent(Bool.self, forKey: .audioFreed) ?? false
+        // Third field with this comment on it, same reason: `decodeIfPresent` is
+        // not caution here, it is the migration. A plain `decode` throws
+        // `.keyNotFound` on every row already on the phone and loadIndex() turns
+        // that into [] — the whole history gone on first launch after the update.
+        filed = try c.decodeIfPresent(Bool.self, forKey: .filed) ?? false
     }
 }
 
@@ -256,7 +334,10 @@ final class NiclaRecorder: ObservableObject {
     /// minutes of speech. Empty until the first partial arrives.
     @Published private(set) var partial = ""
 
-    private static let indexCap = 50
+    /// `nonisolated` so `partitionForPrune` — a pure rule, testable without a disk
+    /// — can read it. Internal for the same reason the tests read it: an assertion
+    /// that hardcodes 50 stops testing the rule the day the number changes.
+    nonisolated static let indexCap = 50
 
     /// Floor between recognizer restarts inside one take.
     ///
@@ -281,6 +362,54 @@ final class NiclaRecorder: ObservableObject {
     /// — an extended take must never be able to outlast a take that asked for the
     /// maximum outright.
     nonisolated static let maxSeconds = 120
+
+    /// The events ring's own cap on `detail` (worker events.ts emitEvent, the ONE
+    /// writer). Named here because postToServer's fallback rail has to BUDGET
+    /// against it: that rail files no transcript row, so anything the worker
+    /// truncates is gone with no id to fetch the rest with.
+    ///
+    /// It was previously assumed to be 240 in a comment, while the emitted detail
+    /// reached 269 chars with a short label and 335 with the 80-char label the
+    /// worker's own TRANSCRIPT_LABEL_MAX allows. Over 300 the tail is cut — and
+    /// the tail is the audio URL, the one part of the line that cannot be
+    /// reconstructed from what survives.
+    nonisolated static let noteDetailMax = 300
+
+    /// Labels on the fallback rail are bounded well under the worker's 80 so the
+    /// URL is never the thing a long label pushes out. Labels here are short by
+    /// construction ("memo", "wake: hey tiny", "necklace-live"); an agent-supplied
+    /// `reason` is the one that can run long, and it is the least valuable part
+    /// of the line.
+    nonisolated static let notePreviewLabelMax = 40
+
+    /// The `device_note` line for the fallback rail, budgeted to survive the ring.
+    ///
+    /// This rail is the one with the LEAST slack and the only one whose loss is
+    /// unrecoverable: it files no transcript row, so whatever the worker truncates
+    /// is simply gone — there is no id to fetch the rest with. So the budget is
+    /// spent here deliberately rather than hoped for:
+    ///
+    ///   - the audio URL is RESERVED first. It is the one part of the line that
+    ///     cannot be reconstructed from what survives; a cut preview still reads
+    ///     as words, a cut URL is a dead link or nothing at all.
+    ///   - the label is bounded (notePreviewLabelMax). An agent-supplied `reason`
+    ///     is the only label that runs long and the least valuable part of the line.
+    ///   - the preview takes whatever is left, with a floor so a pathological
+    ///     label/URL can never squeeze the actual speech out entirely.
+    ///
+    /// Previously this was `text.prefix(180)` plus the URL against a cap assumed to
+    /// be 240: 269 chars with a short label, 335 with the 80-char label the worker
+    /// allows, and at 335 emitEvent cut the tail — the URL — at write time.
+    nonisolated static func noteDetail(label: String, text: String, audioUrl: String?) -> String {
+        let bounded = String(label.prefix(notePreviewLabelMax))
+        let tail = audioUrl.map { " \($0)" } ?? ""
+        // Measured on the real thing, not counted by hand: the emoji and the
+        // curly quotes are multi-byte, and `detail` is capped in CHARACTERS by
+        // the worker's String.slice, so this must agree with it.
+        let shell = "🎙️ \(bounded): “”" + tail
+        let room = max(40, noteDetailMax - shell.count)
+        return "🎙️ \(bounded): “\(String(text.prefix(room)))”" + tail
+    }
 
     /// Set by stopEarly() to end the take in progress before its deadline.
     /// Reset when a take CLAIMS the mic, not when one finishes: a stopEarly()
@@ -582,6 +711,11 @@ final class NiclaRecorder: ObservableObject {
         engine.stop()
         input.removeTap(onBus: 0)
         release()
+        // Read the route BEFORE deactivating — one line earlier is the last moment
+        // it is still a fact. See `NiclaRecordResult.micRoute`: after the line
+        // below, `currentRoute` describes whatever the system falls back to, which
+        // is the built-in mic, for a take the glasses may well have heard.
+        let heardVia = MicRoute.current()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
 
         // fullText, not transcript: `transcript` is only the LIVE task's value,
@@ -637,10 +771,14 @@ final class NiclaRecorder: ObservableObject {
 
         transcripts.insert(entry, at: 0)
         pruneAndSave()
-        await postToServer(entry)
+        // The FILED id, not the local one: a relay take's reply carries this back
+        // as `transcriptId` for the agent to fetch with, and the local UUID names
+        // no row the server can look up.
+        let filed = await postToServer(entry)
 
-        return NiclaRecordResult(ok: true, transcript: heard, transcriptId: id,
-                                 audioUrl: entry.audioUrl, seconds: actualSeconds, error: nil)
+        return NiclaRecordResult(ok: true, transcript: heard, transcriptId: filed ?? id,
+                                 audioUrl: entry.audioUrl, seconds: actualSeconds, error: nil,
+                                 micRoute: heardVia)
     }
 
     /// Store speech that was transcribed somewhere OTHER than a phone-mic take.
@@ -682,30 +820,57 @@ final class NiclaRecorder: ObservableObject {
 
     /// POST to /api/devices/transcript as the NECKLACE (device-token auth);
     /// falls back to the phone's own device identity, and to the allowlisted
-    /// `device_note` event kind while the transcript route isn't deployed.
-    private func postToServer(_ t: NiclaTranscript, asVoiceNecklace: Bool = true) async {
+    /// `device_note` event kind if that POST does not succeed (see the file
+    /// header: the route IS deployed, so this rail means a real failure).
+    ///
+    /// - Returns: the id the server filed the transcript under, or nil if it never
+    ///   landed there (no credentials, or the request fell through to the event
+    ///   ring). Callers use it to address the row server-side; see adoptServerId.
+    @discardableResult
+    private func postToServer(_ t: NiclaTranscript, asVoiceNecklace: Bool = true) async -> String? {
         let phone = Keychain.get("tiny_device_id").flatMap { did in
             Keychain.get("tiny_device_token").map { (deviceId: did, token: $0) }
         }
         let creds = asVoiceNecklace
             ? (NiclaVoiceGateway.shared.credentials ?? phone)
             : phone
-        guard let creds else { return }
+        guard let creds else { return nil }
         var body: [String: Any] = [
             "deviceId": creds.deviceId, "token": creds.token,
             "text": t.text, "label": t.label, "durationS": t.seconds,
         ]
         if let u = t.audioUrl { body["audioUrl"] = u }
         if let r = try? await Api.postRaw("/api/devices/transcript", body: body),
-           r["ok"] as? Bool == true { return }
-        // Fallback rail: a short preview on the event ring (detail ≤240 chars
-        // worker-side) still lands in the next chat turn's context block.
-        let preview = String(t.text.prefix(180))
+           r["ok"] as? Bool == true {
+            // Take the server's id, don't just check `ok`. The row is already in
+            // `transcripts` under a local UUID (both callers insert before posting),
+            // and every server-facing use of `t.id` — the dedupe in
+            // refreshFromServer, `?id=` in fetchFullText, the relay's transcriptId —
+            // needs the id the worker actually filed it under. See adoptServerId.
+            guard let sid = r["id"] as? String, !sid.isEmpty else { return nil }
+            // One call, because taking the server's id and recording that the row
+            // IS filed are one fact — see adoptFiling. Written separately here, the
+            // `filed` half sat in a place no test could reach: a mutation that
+            // deleted it left all 19 tests green, and the cost of losing it is a
+            // second server row for every take.
+            transcripts = Self.adoptFiling(rows: transcripts, local: t.id, server: sid)
+            pruneAndSave()
+            // Returned whether or not the rewrite happened: the row may have been
+            // pruned out from under this call, but the transcript IS filed under
+            // `sid` and that is what a waiting caller has to be told.
+            return sid
+        }
+        // Fallback rail: a short preview on the event ring still lands in the next
+        // chat turn's context block. The line is built by noteDetail so the budget
+        // is testable without a microphone or a network — see NiclaNoteDetailTests.
         _ = try? await Api.postRaw("/api/devices/event", body: [
             "deviceId": creds.deviceId, "token": creds.token,
             "kind": "device_note",
-            "detail": "🎙️ \(t.label): “\(preview)”" + (t.audioUrl.map { " \($0)" } ?? ""),
+            "detail": Self.noteDetail(label: t.label, text: t.text, audioUrl: t.audioUrl),
         ])
+        // The event ring is not the transcript store — nothing here is fetchable by
+        // id, so there is no filed id to report.
+        return nil
     }
 
     // ── Reading the durable copy back ─────────────────────────────────────
@@ -722,14 +887,18 @@ final class NiclaRecorder: ObservableObject {
     /// Local rows WIN on id collision: only they know about the downloaded audio
     /// file, and overwriting one with the server's preview would replace the
     /// full text with 200 chars and strip its offline playback.
+    ///
+    /// Matching is `mergeFetched`'s job, not a `Set` of ids: the phone's own rows
+    /// carry local UUIDs and the server's copies carry the worker's, so id equality
+    /// alone listed every synced take twice — with the duplicate being the shorter,
+    /// unplayable one.
     func refreshFromServer() async {
         guard let list: [String: Any] = try? await Api.get(
-            "/api/devices/transcript?limit=50", token: Keychain.get("tiny_token")),
+            "/api/devices/transcript?limit=\(Self.serverListLimit)", token: Keychain.get("tiny_token")),
             let rows = list["transcripts"] as? [[String: Any]]
         else { return }
-        let known = Set(transcripts.map(\.id))
         let fetched: [NiclaTranscript] = rows.compactMap { r in
-            guard let id = r["id"] as? String, !known.contains(id) else { return nil }
+            guard let id = r["id"] as? String else { return nil }
             // The list endpoint returns `preview` — literally `substr(text, 1, 200)`
             // — so a row built from it is a STUB, and `isPreview` says so. The old
             // comment here said "a tap can fetch the full text by id later", which
@@ -754,10 +923,93 @@ final class NiclaRecorder: ObservableObject {
                         ?? (((r["preview"] as? String)?.count ?? 0) >= Self.previewChars))
             )
         }
-        guard !fetched.isEmpty else { return }
-        transcripts = (transcripts + fetched).sorted { $0.at > $1.at }
-        pruneAndSave()
+        // NOT `guard !fetched.isEmpty`: an empty answer is exactly the state a
+        // first-ever sync sees, and it used to return before the retry below could
+        // run. mergeFetched on an empty list is a no-op, so this is safe to fall
+        // through — and it is the case where every local row needs re-posting.
+        if !fetched.isEmpty {
+            transcripts = Self.mergeFetched(local: transcripts, fetched: fetched)
+                .sorted { $0.at > $1.at }
+            pruneAndSave()
+        }
+        await syncUnfiled(serverReturned: fetched.count)
     }
+
+    /// How many rows `refreshFromServer` asks for. Named because `syncUnfiled`
+    /// reasons about it: a FULL page means the server's answer was cut off, so a
+    /// local row's absence from it proves nothing.
+    static let serverListLimit = 50
+
+    /// Re-post the transcripts that never reached the server.
+    ///
+    /// `postToServer` was one-shot — awaited once after the take, and if it failed
+    /// nothing ever tried again. The row stayed on the phone, looking exactly like
+    /// a synced one, and never entered the agent's context. Offline is the ordinary
+    /// case for a wearable, not an edge case: a wake take fires while the phone is
+    /// in a pocket on the subway, and `refreshFromServer` only ever pulls DOWN, so
+    /// no later open could notice the gap.
+    ///
+    /// Ordering is the safety property here, not an optimization. This runs only
+    /// from `refreshFromServer`, AFTER the merge, because a re-post mints a NEW
+    /// server row: doing it before the server had a chance to say "I already have
+    /// this take" would duplicate every row that predates the `filed` field.
+    ///
+    /// Two more guards on the same hazard:
+    ///  - A full page (`serverReturned == serverListLimit`) means the answer was
+    ///    truncated, so rows older than the oldest one returned may well be filed
+    ///    and simply out of frame. Only rows NEWER than that watermark are retried.
+    ///  - A row still inside the audio-upload/clock window `sameTake` uses is left
+    ///    alone: its own POST may be in flight right now.
+    private func syncUnfiled(serverReturned: Int) async {
+        let oldestSeen = transcripts.filter(\.filed).map(\.at).min()
+        let truncated = serverReturned >= Self.serverListLimit
+        let due = Self.unfiled(rows: transcripts, now: Date(),
+                               olderThan: truncated ? oldestSeen : nil)
+        guard !due.isEmpty else { return }
+        for t in due {
+            // Sequential, not a task group: each POST mutates `transcripts` (id
+            // adoption + the `filed` write), and the `asVoiceNecklace` decision
+            // reads the gateway's live credentials. One at a time also keeps a
+            // backlog of 50 from arriving at the worker as a burst.
+            //
+            // Re-read the row by id rather than posting the captured copy: an
+            // earlier iteration may have pruned or rewritten it.
+            guard let cur = transcripts.first(where: { $0.id == t.id }), !cur.filed else { continue }
+            // asVoiceNecklace mirrors the producer: a necklace-heard segment is
+            // signed by the phone (storeHeard's rule), everything else by the
+            // necklace when its credentials are there. Deriving it from the label
+            // rather than storing it keeps one rule in one place.
+            await postToServer(cur, asVoiceNecklace: cur.label != Self.liveLabel)
+        }
+    }
+
+    /// Which rows are due for a re-post. Pure, so the window and watermark rules
+    /// are testable without a network.
+    ///
+    /// - Parameters:
+    ///   - olderThan: when the server's page was truncated, the oldest row it
+    ///     confirmed. Rows at or before it are skipped — their absence from a cut
+    ///     -off answer is not evidence they are missing. nil means the answer was
+    ///     complete, so absence IS evidence.
+    nonisolated static func unfiled(
+        rows: [NiclaTranscript], now: Date, olderThan: Date?
+    ) -> [NiclaTranscript] {
+        rows.filter { t in
+            guard !t.filed else { return false }
+            // Its own POST may still be running (a 6MB audio upload precedes it).
+            guard now.timeIntervalSince(t.at) > postSettleSeconds else { return false }
+            if let cut = olderThan, t.at <= cut { return false }
+            return true
+        }
+    }
+
+    /// How long after a take a row is assumed to have finished its own POST.
+    ///
+    /// This IS `mergeWindowAhead`, not a copy of it: that window exists for the
+    /// same fact (the audio upload sits between `at` and the server's `created`,
+    /// and a 6MB clip on a bad link is the slow case). Two constants spelling one
+    /// measurement is how they drift, so there is only ever one number.
+    nonisolated static var postSettleSeconds: TimeInterval { mergeWindowAhead }
 
     /// Server-side `TRANSCRIPT_PREVIEW_CHARS`. A list row exactly this long is
     /// assumed cut rather than coincidentally that length; being wrong costs one
@@ -820,6 +1072,178 @@ final class NiclaRecorder: ObservableObject {
     /// permanent, which is the exact failure the rule exists to prevent.
     nonisolated static let liveLabel = "necklace-live"
 
+    /// Prefix NiclaVoiceGateway files a wake-triggered take under. Shared for the
+    /// same reason as `liveLabel`: the eviction rule keys off it.
+    nonisolated static let wakeLabelPrefix = "wake: "
+
+    /// Rewrite one row's local UUID to the id the server filed it under.
+    ///
+    /// The phone mints a UUID for every take and POSTs the take WITHOUT it: the
+    /// worker does `const id = crypto.randomUUID()` and returns `{ok, id}`. That
+    /// is the right call server-side — a client-chosen primary key lets one device
+    /// overwrite another's row — but it means each transcript has two ids, and the
+    /// phone was throwing the server's away (`r["ok"] as? Bool == true` and no
+    /// more). Two things broke, from the one cause:
+    ///
+    ///  1. `refreshFromServer()` dedupes on `Set(transcripts.map(\.id))`, so a row
+    ///     the phone recorded ITSELF could never match its own server copy. Every
+    ///     synced take came back as a second row on the next refresh — and since
+    ///     `.task` runs that on every open of the list, it was routine, not rare.
+    ///     The twin is the worse copy, too: merged rows carry `audioFile: nil` and
+    ///     a 200-char preview, so the duplicate showed up shorter and unplayable
+    ///     next to the original.
+    ///  2. `fetchFullText` and the relay's `transcriptId` both address the server
+    ///     by `t.id`. Under the local UUID, `?id=` matched no row — the agent was
+    ///     handed a fetchable-looking id that resolved to nothing, and a truncated
+    ///     row could never pull its own remainder.
+    ///
+    /// Returns the rewritten array, or nil if nothing needed changing — so the
+    /// caller can skip a save. Deliberately narrow: it rewrites the row whose id is
+    /// `local` and refuses if `server` is empty or already present under a
+    /// different row, because colliding two rows onto one id would make one of them
+    /// unreachable by `firstIndex(where:)`.
+    nonisolated static func adoptServerId(
+        rows: [NiclaTranscript], local: String, server: String
+    ) -> [NiclaTranscript]? {
+        guard !server.isEmpty, server != local else { return nil }
+        guard let i = rows.firstIndex(where: { $0.id == local }) else { return nil }
+        guard !rows.contains(where: { $0.id == server }) else { return nil }
+        var out = rows
+        out[i].id = server
+        return out
+    }
+
+    /// A successful POST, applied to the index: take the server's id AND record
+    /// that the row is filed.
+    ///
+    /// These are one fact — "the worker has this take, under `server`" — and they
+    /// were two statements in `postToServer`, where the `filed` half was reachable
+    /// by no test at all: deleting it left the whole suite green while costing a
+    /// duplicate server row per take. Same reason `applyEvictions` exists: the
+    /// mutation and the reason for it belong in one place that can be checked.
+    ///
+    /// `adoptServerId` refuses in several cases (a `server` id already present, a
+    /// `local` row that was pruned mid-flight), and `filed` must be set anyway
+    /// wherever the row can be found — the POST did land regardless of whether the
+    /// rename was possible. Returns the rows unchanged when neither id matches
+    /// anything, which is the pruned-out case.
+    nonisolated static func adoptFiling(
+        rows: [NiclaTranscript], local: String, server: String
+    ) -> [NiclaTranscript] {
+        var out = adoptServerId(rows: rows, local: local, server: server) ?? rows
+        // `local` FIRST, and the order is the whole correctness of this function.
+        // After a successful rename no row carries `local` any more, so it falls
+        // through to `server` — the renamed row. When the rename was REFUSED
+        // (`server` already sits on another row) the local row is still there and is
+        // the one whose POST landed; marking the other row instead leaves this one
+        // unfiled forever, re-posted on every refresh. Checking `server` first did
+        // exactly that, and the test for the refused path is what caught it.
+        if let i = out.firstIndex(where: { $0.id == local }) ?? out.firstIndex(where: { $0.id == server }) {
+            out[i].filed = true
+        }
+        return out
+    }
+
+    /// Merge server rows into local ones, matching by CONTENT when the ids differ.
+    ///
+    /// Id adoption at POST time (above) keeps new takes from double-listing, but it
+    /// cannot help the rows already on a phone: every transcript recorded before it
+    /// sits in index.json under a local UUID, and the server's copy carries a
+    /// different one. Deduping on id alone, those all come back as a second row the
+    /// first time the list is opened. So the id is the fast path, not the only one.
+    ///
+    /// A server row is judged the SAME TAKE as a local row when the label matches,
+    /// the duration matches to the second, and the local text starts with what the
+    /// server sent (the list route returns `substr(text, 1, 200)`, so the server's
+    /// copy is a prefix of the local one by construction) — inside a time window,
+    /// since `created` is stamped when the POST lands and `at` when the take ended,
+    /// and the audio upload sits between them.
+    ///
+    /// Local rows win the merge, as before: only they know the downloaded audio file
+    /// and the untruncated text. All the server contributes is its id, which is the
+    /// one thing the local row was missing.
+    ///
+    /// Each local row absorbs at most one server row. Two takes that are identical
+    /// in label, duration and first 200 characters within the window — two silent
+    /// 10s memos, say — could have their ids swapped between them; the rows are
+    /// interchangeable in content and duration, so nothing the user or the agent
+    /// reads back changes. Listing one take twice is the failure worth avoiding.
+    nonisolated static func mergeFetched(
+        local: [NiclaTranscript], fetched: [NiclaTranscript]
+    ) -> [NiclaTranscript] {
+        var rows = local
+        var claimed = Set<Int>()
+        var append: [NiclaTranscript] = []
+        for f in fetched {
+            // `filed`, on both branches below and here: the server is answering
+            // with rows it holds, so a local row it matches is CONFIRMED upstream.
+            // That confirmation is what `syncUnfiled` needs before it dares
+            // re-post anything — every row already on a phone decodes `filed:
+            // false`, and re-posting one that did land would duplicate it.
+            if let i = rows.firstIndex(where: { $0.id == f.id }) {
+                rows[i].filed = true
+                continue
+            }
+            let candidates = rows.indices.filter { i in
+                !claimed.contains(i) && sameTake(local: rows[i], server: f)
+            }
+            // Closest in time, so a run of look-alike takes pairs off in order
+            // instead of every server row landing on the same local one.
+            guard let i = candidates.min(by: {
+                abs(rows[$0].at.timeIntervalSince(f.at)) < abs(rows[$1].at.timeIntervalSince(f.at))
+            }) else {
+                // A row that came FROM the server is filed by definition.
+                var row = f
+                row.filed = true
+                append.append(row)
+                continue
+            }
+            claimed.insert(i)
+            rows[i].id = f.id
+            rows[i].filed = true
+        }
+        return rows + append
+    }
+
+    /// Forward window for `mergeFetched`: `created` is stamped when the POST lands,
+    /// `at` when the take ended, and the audio upload runs between them — a 6MB clip
+    /// on a bad link is the slow case. Backward is clock skew between phone and
+    /// worker, which is small but not zero.
+    /// Not private: `postSettleSeconds` is this same number under the name the
+    /// retry path needs, rather than a second copy of it.
+    nonisolated static let mergeWindowAhead: TimeInterval = 300
+    private nonisolated static let mergeWindowBehind: TimeInterval = 60
+
+    private nonisolated static func sameTake(
+        local: NiclaTranscript, server: NiclaTranscript
+    ) -> Bool {
+        guard local.label == server.label, local.seconds == server.seconds else { return false }
+        // Never match on nothing: an empty server text would prefix-match every row.
+        guard !server.text.isEmpty, local.text.hasPrefix(server.text) else { return false }
+        let delta = server.at.timeIntervalSince(local.at)
+        return delta >= -mergeWindowBehind && delta <= mergeWindowAhead
+    }
+
+    /// Audio the user did not ask for, take by take — the set the byte budget bounds.
+    ///
+    /// Two producers, and only one of them was recognized here. `necklace-live` is
+    /// the obvious one. The other is a WAKE take: `Config.recordOnWake` defaults to
+    /// TRUE, so saying the wake word records up to `maxSeconds` (120s, since wake
+    /// takes pass `extendWhileSpeaking: true`) with nobody touching the phone. That
+    /// is the same unbounded-growth shape the budget was written for — a necklace
+    /// on a chest all day mints these on its own — and it was exempt.
+    ///
+    /// A hand-made take ("memo", "manual") stays exempt: the user pressed a button
+    /// for it and may hold the only copy. So does a relay take, whose label is the
+    /// agent's arbitrary `reason` string and cannot be classified from text at all;
+    /// something was waiting on that recording, which makes it a deliberate ask
+    /// rather than ambient capture. A `reason` that happens to start with "wake: "
+    /// would be treated as automatic — it loses the file and keeps the words, which
+    /// is the mild direction to be wrong in.
+    nonisolated static func isAutomaticAudio(label: String) -> Bool {
+        label == liveLabel || label.hasPrefix(wakeLabelPrefix)
+    }
+
     /// Byte budget for AUTOMATIC audio: 6.2h of listening, MEASURED not computed.
     ///
     /// A 45s segment encoded exactly the way SegmentAudio encodes one (16kHz mono
@@ -855,9 +1279,9 @@ final class NiclaRecorder: ObservableObject {
         // `used + 0 <= budget` is always true. A `r.bytes > 0` filter here read as
         // load-bearing and could not be broken by any mutation.
         for r in rows {
-            // A manual take is never counted and never evicted, so a phone full of
-            // live segments cannot push a memo off the disk.
-            guard r.label == liveLabel else { continue }
+            // A hand-made or agent-asked take is never counted and never evicted, so
+            // a phone full of automatic audio cannot push a memo off the disk.
+            guard isAutomaticAudio(label: r.label) else { continue }
             if used + r.bytes <= budget {
                 used += r.bytes
             } else {
@@ -865,6 +1289,91 @@ final class NiclaRecorder: ObservableObject {
             }
         }
         return evict
+    }
+
+    /// Whether the row should say its recording was freed for space.
+    ///
+    /// Not simply `t.audioFreed`: eviction only ever deletes the LOCAL file, and an
+    /// uploaded row still plays from `audioUrl`. Saying "freed" beside a working
+    /// Play button would be a second wrong answer to the same question, so the tell
+    /// is shown only when there is nothing left to play. `hasLocalAudio` is passed
+    /// in rather than checked here because it needs the filesystem, and this rule
+    /// should not.
+    nonisolated static func showsAudioFreed(_ t: NiclaTranscript, hasLocalAudio: Bool) -> Bool {
+        t.audioFreed && !hasLocalAudio && t.audioUrl == nil
+    }
+
+    /// Whether the row should say it hasn't reached the agent yet.
+    ///
+    /// Same class of defect as `showsAudioFreed`, one field over again: a row whose
+    /// POST failed lists, plays and shares exactly like a synced one, so the user
+    /// believes the agent can read a memo it has never seen. The retry is silent
+    /// and eventual — this is the only thing on screen that says which rows it is
+    /// still waiting on.
+    ///
+    /// Gated on the same settle window as the retry, so a take from four seconds
+    /// ago does not flash "not synced" while its own POST is in flight. `now` is a
+    /// parameter for testability, and because a view reading the clock itself
+    /// cannot be checked without waiting.
+    nonisolated static func showsUnsynced(_ t: NiclaTranscript, now: Date) -> Bool {
+        !t.filed && now.timeIntervalSince(t.at) > postSettleSeconds
+    }
+
+    /// Split the index into what survives the `indexCap` and what is dropped.
+    ///
+    /// Two exemptions, and they are not the same kind of thing:
+    ///
+    ///  - A row with LOCAL AUDIO is kept because dropping it deletes the only
+    ///    offline copy of a recording the user can still play (the original rule —
+    ///    server rows sort by date and can push a real recording past the cap).
+    ///  - A row that is NOT FILED is kept because the server has no copy at all:
+    ///    dropping it destroys the words themselves and the last chance for them
+    ///    to reach the agent. A filed row is re-fetchable forever, so dropping one
+    ///    costs nothing.
+    ///
+    /// Both are bounded — `indexCap` is a floor on what is kept, not a ceiling, and
+    /// the exempt sets are: local audio by `liveAudioBudget`, unfiled by
+    /// `syncUnfiled` emptying it on the next successful refresh. A phone that is
+    /// offline for a month grows past the cap on purpose; that is the point.
+    ///
+    /// Pure and static so both rules are testable without a disk — `hasLocalAudio`
+    /// is injected for exactly that reason.
+    nonisolated static func partitionForPrune(
+        rows: [NiclaTranscript], hasLocalAudio: (NiclaTranscript) -> Bool
+    ) -> (kept: [NiclaTranscript], dropped: [NiclaTranscript]) {
+        var kept: [NiclaTranscript] = []
+        var dropped: [NiclaTranscript] = []
+        for t in rows {
+            if kept.count < indexCap || hasLocalAudio(t) || !t.filed { kept.append(t) }
+            else { dropped.append(t) }
+        }
+        return (kept, dropped)
+    }
+
+    /// Mark the rows `audioEvictions` chose: clear `audioFile`, remember the loss.
+    ///
+    /// Split out of `pruneAndSave` so the bookkeeping is testable without a disk.
+    /// The two writes belong together — the whole defect was that eviction cleared
+    /// `audioFile` and recorded nothing, making a freed recording indistinguishable
+    /// from a row that never had one. Doing them in one place is what keeps a
+    /// future edit from separating them again.
+    ///
+    /// A row whose `audioFile` is ALREADY nil is not marked. Eviction picks by id
+    /// from a sized list, and a text-only row measures 0 bytes, so it can be handed
+    /// an id that owns no file (`used + 0 <= budget` keeps that from happening
+    /// today, but the guard costs nothing and this function should be true on its
+    /// own terms): nothing was freed, so claiming otherwise would tell the user
+    /// their words used to have audio.
+    nonisolated static func applyEvictions(
+        rows: [NiclaTranscript], evict: Set<String>
+    ) -> [NiclaTranscript] {
+        var out = rows
+        for i in out.indices where evict.contains(out[i].id) {
+            guard out[i].audioFile != nil else { continue }
+            out[i].audioFile = nil
+            out[i].audioFreed = true
+        }
+        return out
     }
 
     /// Files in storeDir() that no row claims, so they can be deleted at launch.
@@ -929,10 +1438,15 @@ final class NiclaRecorder: ObservableObject {
         let hasLocalAudio = { (t: NiclaTranscript) -> Bool in
             Self.audioURL(for: t).map { FileManager.default.fileExists(atPath: $0.path) } == true
         }
-        var kept: [NiclaTranscript] = []
-        var dropped: [NiclaTranscript] = []
-        for t in transcripts {
-            if kept.count < Self.indexCap || hasLocalAudio(t) { kept.append(t) } else { dropped.append(t) }
+        let (kept0, dropped) = Self.partitionForPrune(
+            rows: transcripts, hasLocalAudio: hasLocalAudio)
+        var kept = kept0
+        // Dropping a row the server never received destroys the only copy of those
+        // words, so say so rather than doing it quietly — a silent cap reads as
+        // "everything is synced" when it is the opposite.
+        let lostUnsynced = dropped.filter { !$0.filed }.count
+        if lostUnsynced > 0 {
+            print("🎙️ pruned \(lostUnsynced) transcript(s) that never reached the server")
         }
         for d in dropped {
             if let url = Self.audioURL(for: d) { try? FileManager.default.removeItem(at: url) }
@@ -951,8 +1465,9 @@ final class NiclaRecorder: ObservableObject {
         if !evict.isEmpty {
             for i in kept.indices where evict.contains(kept[i].id) {
                 if let u = Self.audioURL(for: kept[i]) { try? FileManager.default.removeItem(at: u) }
-                kept[i].audioFile = nil
             }
+            // Deleting the file and recording WHY are one step — see applyEvictions.
+            kept = Self.applyEvictions(rows: kept, evict: evict)
         }
         transcripts = kept
         let url = Self.storeDir().appendingPathComponent("index.json")
@@ -1065,14 +1580,96 @@ private final class RequestSlot: @unchecked Sendable {
 
 // ── Transcripts UI (CallRecordingsView's shape, local-first) ──────────────
 
+/// 🔇 Why a take won't play, in the language of the person who tapped Play.
+///
+/// ⚠️ THIRD TIME THIS APP HAS PAID FOR THE SAME MISSING CHANNEL. `/voice/recording`
+/// learned it ("iOS won't play call recordings") and `CallRecordingRefusal` +
+/// `observe(\.status)` were the fix; `tests/voice-playback-refusal.test.ts` even
+/// states the rule. The Range half of that lesson later reached `/media/:key`
+/// too, because NiclaRecorder uploads every take there — and the ERROR half did
+/// not. So this screen kept the original defect verbatim: `AVPlayer(url:)` with
+/// one `.AVPlayerItemDidPlayToEndTime` observer, which is the notification a
+/// refusal CANNOT fire (the item never begins playing, it fails at LOAD). The
+/// result was a row whose button read "Stop" forever, over a take that never
+/// made a sound, with nothing on screen saying why.
+///
+/// Keyed on `media.ts`'s own literals — `MediaGetCall.handle` refuses exactly two
+/// ways (424 `media store not provisioned`, 404 `not found`) — and pinned against
+/// the worker source by `tests/nicla-playback-refusal.test.ts`, so a third
+/// refusal added upstream fails a suite instead of quietly becoming `unknown`.
+///
+/// Shares `CallRecordingRefusal`'s sentence for "we don't know", because that IS
+/// the same fact, and the cross-platform pin asserts all three clients agree on it.
+enum NiclaPlaybackRefusal {
+    /// The generic answer for a refusal we can't read — and for a player error
+    /// with no readable body, which is the normal `AVPlayer` case.
+    static let unknown = CallRecordingRefusal.unknown
+
+    /// ⚠️ REMOTE-ONLY, and that is the whole point of the `remote` flag below.
+    /// An offline phone plays a local m4a perfectly well, so blaming the network
+    /// for a local failure would be a confident wrong answer — the exact class of
+    /// defect this enum exists to remove.
+    static let offline = "you're offline — this take's audio is on the server"
+
+    private static let refusals: [(String, String)] = [
+        // 424: R2 isn't bound to the worker. Same sentence as the call route's
+        // identical refusal, deliberately: it is the same outage.
+        ("media store not provisioned", "recordings are unavailable right now"),
+        // 404: the key is malformed, or the object isn't there. The words survive
+        // (they're in this list), so say what was lost rather than "couldn't play".
+        ("not found", "this recording is no longer on the server"),
+    ]
+
+    /// What to say when a take won't play. ALWAYS a sentence.
+    ///
+    /// - Parameters:
+    ///   - error: `AVPlayerItem.error?.localizedDescription`, which EMBEDS the
+    ///     origin's body rather than equalling it — hence `contains` below.
+    ///   - online: `Net.shared.online`.
+    ///   - remote: whether this row played from `audioUrl` rather than a local
+    ///     file. Never inferred from the error: a missing local file and a 404
+    ///     produce descriptions nothing can reliably tell apart.
+    static func text(_ error: String?, online: Bool, remote: Bool) -> String {
+        // First, because an offline failure's description ("The Internet
+        // connection appears to be offline.") matches none of the needles and
+        // would otherwise land on the generic line while the cause was both
+        // knowable and fixable.
+        if remote && !online { return offline }
+        let reason = (error ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reason.isEmpty else { return unknown }
+        for (needle, sentence) in refusals where reason.contains(needle) { return sentence }
+        return unknown
+    }
+}
+
 struct NiclaTranscriptsView: View {
     @ObservedObject private var rec = NiclaRecorder.shared
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var net = Net.shared
     @State private var player: AVPlayer?
     @State private var playingId: String?
     /// End-of-playback observer, torn down in stopPlayback() so a second play
     /// does not stack another one on the same notification.
     @State private var endObserver: NSObjectProtocol?
+    /// ⚠️ THE ERROR CHANNEL, missing until now. A refusal from /media/:key fails
+    /// the item at LOAD, so `.AVPlayerItemDidPlayToEndTime` never fires and the
+    /// row sat reading "Stop" over silence. `observe(\.status)` is the only
+    /// channel a load failure uses — see NiclaPlaybackRefusal.
+    @State private var failObserver: NSKeyValueObservation?
+    /// Why a row's playback failed, by id. Rendered under the row; cleared when
+    /// that row is played again.
+    @State private var playError: [String: String] = [:]
+    /// Transport for the row that is playing, so a 90-second memo can be scrubbed
+    /// instead of only started. `total` starts from the row's own `seconds` and is
+    /// refined from the asset once it loads — a remote m4a's real duration can
+    /// differ from what the take recorded.
+    @State private var elapsed: Double = 0
+    @State private var total: Double = 0
+    @State private var scrubbing = false
+    @State private var timeObserver: Any?
+    /// The row currently playing, so the lock screen can name it. Held rather
+    /// than looked up: `pruneAndSave` can drop a row mid-playback.
+    @State private var nowPlaying: NiclaTranscript?
     /// Surfaced, not swallowed: record() explains every refusal in words
     /// ("voice mode is using the microphone — stop it first"), and a Record
     /// button that silently does nothing is the worst version of that.
@@ -1182,10 +1779,23 @@ struct NiclaTranscriptsView: View {
                                         Button {
                                             toggle(t)
                                         } label: {
-                                            Label(playingId == t.id ? "Stop" : "Play \(t.seconds)s",
+                                            Label(playingId == t.id ? "Stop" : "Play \(clock(Double(t.seconds)))",
                                                   systemImage: playingId == t.id ? "stop.circle.fill" : "play.circle")
                                         }
                                         .font(.caption)
+                                    // hasLocalAudio: false is not an assumption —
+                                    // reaching this branch means playable(t) was
+                                    // false, which is exactly "no local file and no
+                                    // audioUrl".
+                                    } else if NiclaRecorder.showsAudioFreed(t, hasLocalAudio: false) {
+                                        // The words are still here; the audio was
+                                        // deleted to stay under the disk budget.
+                                        // Without this the row is identical to one
+                                        // that was never recorded — no button, no
+                                        // trace — and the agent is meanwhile telling
+                                        // the user to open the app and listen.
+                                        Label("audio freed for space", systemImage: "externaldrive.badge.minus")
+                                            .font(.caption2).foregroundStyle(.secondary)
                                     }
                                     ShareLink(item: "\(t.label) — \(t.text)") {
                                         Label("Share", systemImage: "square.and.arrow.up")
@@ -1195,6 +1805,49 @@ struct NiclaTranscriptsView: View {
                                         Label("uploaded", systemImage: "checkmark.icloud")
                                             .font(.caption2).foregroundStyle(.secondary)
                                     }
+                                    // The words are safe on this phone but the
+                                    // agent cannot read them yet. Without this the
+                                    // row is identical to a synced one, and the
+                                    // user has no way to know the agent is missing
+                                    // it — the retry runs on the next refresh.
+                                    if NiclaRecorder.showsUnsynced(t, now: .now) {
+                                        Label("not synced yet", systemImage: "arrow.triangle.2.circlepath")
+                                            .font(.caption2).foregroundStyle(.secondary)
+                                    }
+                                }
+                                // ▶️ Scrub the take that is playing. A 120-second
+                                // memo could only be started from the beginning:
+                                // to re-hear one sentence you listened to the
+                                // whole thing again, which is the difference
+                                // between "the audio is here" and "you can
+                                // listen to it".
+                                if playingId == t.id, total > 0 {
+                                    HStack(spacing: 8) {
+                                        Text(clock(elapsed))
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                        Slider(value: $elapsed, in: 0 ... total) { editing in
+                                            scrubbing = editing
+                                            if !editing {
+                                                player?.seek(to: CMTime(seconds: elapsed,
+                                                                        preferredTimescale: 600))
+                                            }
+                                        }
+                                        .tint(.green)
+                                        .accessibilityLabel("Playback position")
+                                        Text(clock(total))
+                                            .font(.caption2.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                                // ⚠️ The captured reason, DRAWN. A row that
+                                // recorded why it failed and rendered nothing is
+                                // the same silence with more code in it.
+                                if let why = playError[t.id] {
+                                    Text("⚠️ \(why)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
                             }
                             .padding(.vertical, 2)
@@ -1269,6 +1922,16 @@ struct NiclaTranscriptsView: View {
             || t.audioUrl != nil
     }
 
+    /// "1:58" — the take's length, and the transport's two ends.
+    ///
+    /// Seconds alone ("Play 118s") is a number the reader has to divide; every
+    /// other recording surface in this app already speaks clock time (VoiceCall's
+    /// `clock`, Android's `sizeLine`).
+    private func clock(_ t: Double) -> String {
+        let s = max(0, Int(t))
+        return "\(s / 60):\(String(format: "%02d", s % 60))"
+    }
+
     private func toggle(_ t: NiclaTranscript) {
         if playingId == t.id { stopPlayback(); return }
         stopPlayback()
@@ -1280,6 +1943,31 @@ struct NiclaTranscriptsView: View {
         let p = AVPlayer(url: url)
         player = p
         playingId = t.id
+        nowPlaying = t
+        playError[t.id] = nil
+        elapsed = 0
+        // From the row, so the transport is drawn on the first tick instead of
+        // appearing a moment later — refined below once the asset reports.
+        total = Double(t.seconds)
+        // ⚠️ THE CHANNEL A REFUSAL ACTUALLY USES. `/media/:key` answers 424 (R2
+        // unbound) and 404 (gone, or a malformed key) with a JSON body, and an
+        // offline phone fails a remote play outright. All of those fail the item
+        // at LOAD, so the end-of-play notification below CANNOT fire — the row
+        // kept reading "Stop" over silence with nothing to say. `remote:` is
+        // passed rather than derived: only this scope knows whether the URL we
+        // handed the player was a file or the server.
+        let remote = local == nil
+        failObserver = p.currentItem?.observe(\.status, options: [.new]) { item, _ in
+            guard item.status == .failed else { return }
+            let described = (item.error as NSError?)?.localizedDescription
+            Task { @MainActor in
+                playError[t.id] = NiclaPlaybackRefusal.text(described, online: net.online,
+                                                            remote: remote)
+                // Stop claiming it is playing. A "Stop" button over a transport
+                // frozen at 0:00 is half of what made this invisible.
+                if playingId == t.id { stopPlayback() }
+            }
+        }
         // Reset the row when the clip ends on its own. Without this nothing ever
         // clears playingId except another tap, so a finished clip left the button
         // reading "Stop" forever and the audio session held active — and the next
@@ -1289,7 +1977,23 @@ struct NiclaTranscriptsView: View {
         ) { _ in
             Task { @MainActor in stopPlayback() }
         }
+        // Half-second transport ticks, skipped mid-scrub so the thumb stays under
+        // the finger. The asset's own duration wins once it loads: a remote m4a's
+        // real length can differ from the seconds the take recorded, and a slider
+        // whose end is wrong seeks to the wrong place.
+        timeObserver = p.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main
+        ) { time in
+            Task { @MainActor in
+                guard !scrubbing else { return }
+                elapsed = time.seconds
+                if let d = p.currentItem?.duration.seconds, d.isFinite, d > 0 { total = d }
+                updateNowPlaying()
+            }
+        }
         p.play()
+        installRemoteCommands()
+        updateNowPlaying()
     }
 
     private func stopPlayback() {
@@ -1297,9 +2001,72 @@ struct NiclaTranscriptsView: View {
             NotificationCenter.default.removeObserver(o)
             endObserver = nil
         }
+        // The undo of its own setup: a KVO observation writing @State into a
+        // dismissed view is a leak, and a second play would stack another one on
+        // the same row.
+        failObserver?.invalidate()
+        failObserver = nil
+        if let timeObserver {
+            player?.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
         player?.pause()
         player = nil
         playingId = nil
+        nowPlaying = nil
+        elapsed = 0
+        total = 0
+        scrubbing = false
+        clearNowPlaying()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
+    // ── Lock screen / control centre (the CallRecordingsView idiom) ────────
+    //
+    // The app already runs the `audio` background mode, so a playing take keeps
+    // going when the phone locks. Without these it is a mystery sound with no
+    // pause button and no name: the person is listening to a recording of their
+    // own room and the lock screen says nothing about which one.
+
+    private func installRemoteCommands() {
+        let c = MPRemoteCommandCenter.shared()
+        c.playCommand.removeTarget(nil)
+        c.pauseCommand.removeTarget(nil)
+        c.changePlaybackPositionCommand.removeTarget(nil)
+        // The command centre invokes these on its own queue, and player/elapsed
+        // are MainActor view state — hop, never touch them here.
+        c.playCommand.addTarget { _ in
+            Task { @MainActor in player?.play() }
+            return .success
+        }
+        c.pauseCommand.addTarget { _ in
+            Task { @MainActor in player?.pause() }
+            return .success
+        }
+        c.changePlaybackPositionCommand.addTarget { event in
+            guard let e = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
+            let pos = e.positionTime
+            Task { @MainActor in player?.seek(to: CMTime(seconds: pos, preferredTimescale: 600)) }
+            return .success
+        }
+    }
+
+    private func updateNowPlaying() {
+        guard let t = nowPlaying else { return }
+        // The words, not the label: "wake: hey tiny" names the trigger and tells
+        // you nothing about which of six takes this is. The transcript's opening
+        // clause is what a person recognises their own recording by.
+        var info: [String: Any] = [
+            MPMediaItemPropertyTitle: String(t.text.prefix(60)),
+            MPMediaItemPropertyArtist: t.label,
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
+            MPNowPlayingInfoPropertyPlaybackRate: player?.rate ?? 0,
+        ]
+        if total > 0 { info[MPMediaItemPropertyPlaybackDuration] = total }
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+    }
+
+    private func clearNowPlaying() {
+        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
 }

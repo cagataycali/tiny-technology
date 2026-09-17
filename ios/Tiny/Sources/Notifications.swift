@@ -126,6 +126,35 @@ enum HarnessRun {
 }
 
 enum Notify {
+    /// 🔔 Tag prefixes that arrive WITHOUT sound or a screen wake — the Swift
+    /// twin of `lib/push/loudness.ts`'s `AMBIENT_TAG_PREFIXES` and of
+    /// `RelayNotifier.AMBIENT_TAG_PREFIXES` on Android. Closed, and short for
+    /// the same reason: listing a prefix here makes that push kind silent on
+    /// this phone forever, so the bar is the one `tiny-visit-` clears — a
+    /// nicety, repeats often (the worker throttles it to one per 5 min per
+    /// tiny), and missing one costs nothing.
+    static let ambientTagPrefixes = ["tiny-visit-"]
+
+    /// How loudly a push with this tag should arrive.
+    ///
+    /// ⚠️ HAVING NO LADDER IS NOT NEUTRAL — IT IS THE LOUD END, PINNED. This
+    /// used to be no decision at all: `post` set `.sound = .default` for all
+    /// nine of its callers, so `tiny-visit-` ("someone visited your tiny")
+    /// interrupted exactly as hard as `money-refunded`. Android had the mirror
+    /// defect with the polarity reversed — it enumerated the loud tags and let
+    /// everything new fall to its silent channel, which is how the whole point
+    /// of fire-and-forget `use_device` (`task-result-`) arrived as a soundless
+    /// chip there. Same missing decision; opposite end.
+    ///
+    /// Defaults LOUD, deliberately: an unrecognised tag is a push kind this
+    /// build was never taught, and the honest assumption about something the
+    /// user's own account generated is that they want to know. A wrong heads-up
+    /// is a mild annoyance they can silence in Settings; a wrong silence is the
+    /// feature appearing not to work, with nothing on screen to complain about.
+    nonisolated static func isAmbient(tag: String) -> Bool {
+        ambientTagPrefixes.contains { tag.hasPrefix($0) }
+    }
+
     /// Ask once (no-op after the user decides). Called post-login and on
     /// bootstrap for already-enrolled devices that predate this build.
     /// Registers categories always; asks only when a human could answer.
@@ -148,8 +177,15 @@ enum Notify {
         _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
     }
 
-    /// Fire-and-forget local notification (skips silently when denied)
-    static func post(title: String, body: String, category: String? = nil, userInfo: [String: String] = [:]) async {
+    /// Fire-and-forget local notification (skips silently when denied).
+    ///
+    /// `ambient: true` posts a record instead of an interruption — it still
+    /// lands in the shade and on the lock screen, but makes no sound and does
+    /// not wake the screen. Callers pass it for traces of something the phone
+    /// did on its own (see `isAmbient(tag:)`); everything a person asked for or
+    /// needs to know stays on the default, loud path.
+    static func post(title: String, body: String, category: String? = nil,
+                     userInfo: [String: String] = [:], ambient: Bool = false) async {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .authorized
@@ -157,7 +193,12 @@ enum Notify {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.sound = .default
+        // ⚠️ BOTH properties, not just the level: `.passive` still plays a sound
+        // when one is attached, so leaving `.sound = .default` here would be
+        // quiet in every respect except the one the user actually notices.
+        // Android gets both from the channel; iOS must set them separately.
+        content.interruptionLevel = ambient ? .passive : .active
+        content.sound = ambient ? nil : .default
         if let category { content.categoryIdentifier = category }
         if !userInfo.isEmpty { content.userInfo = userInfo }
         try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))

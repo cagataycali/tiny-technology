@@ -322,9 +322,12 @@ final class NiclaVoiceGateway: NSObject, ObservableObject, @unchecked Sendable {
                 // first ten, and nothing in the stored row said it had been cut.
                 // Nobody is waiting on a deadline for a wake take, so this is the
                 // path that extends — see record(extendWhileSpeaking:).
+                // The prefix is the shared constant, not a literal: the byte budget
+                // classifies a wake take as automatic audio by matching it, and a
+                // typo here would silently make these files permanent.
                 _ = await NiclaRecorder.shared.record(
-                    seconds: 10, label: "wake: \(wake.label)", token: nil,
-                    extendWhileSpeaking: true)
+                    seconds: 10, label: "\(NiclaRecorder.wakeLabelPrefix)\(wake.label)",
+                    token: nil, extendWhileSpeaking: true)
             }
         }
     }

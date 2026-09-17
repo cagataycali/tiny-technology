@@ -123,6 +123,35 @@ import Foundation
         #expect(EndpointTelemetry.readings(["layer": 7, "total_layers": 0]).isEmpty)
     }
 
+    // ── the arm's payload ────────────────────────────────────────────────────
+
+    /// fomo-the-arm's live /api/telemetry (2026-09-05). Shares no key with the
+    /// printer's, so before the arm branch this rendered NOTHING under its camera.
+    private func armPayload() -> [String: Any] {
+        ["pose": "taught", "torque": false, "job": NSNull(), "bus": true, "camera": "usb",
+         "tof_mm": 55, "rssi": NSNull(), "detect": NSNull(), "agent_busy": false,
+         "joints_deg": ["shoulder_pan": 179.6, "wrist_roll": 176.6, "tilt": 95.4],
+         "look": ["pan": [-60.0, 60.0], "tilt": [-60.0, 60.0]]]
+    }
+
+    @Test func armPayloadRendersArmReadings() {
+        let r = EndpointTelemetry.readings(armPayload())
+        #expect(r.first?.label == "pose")
+        #expect(r.map(\.label).contains("head"))
+        #expect(r.map(\.label).contains("distance"))
+        // and none of the printer rows leak in
+        #expect(!r.map(\.label).contains("state"))
+        #expect(!r.map(\.label).contains("nozzle"))
+    }
+
+    @Test func armIsRunningWhenTorqueHeldOrJobNamed() {
+        #expect(!EndpointTelemetry.isRunning(armPayload()))
+        var held = armPayload(); held["torque"] = true
+        #expect(EndpointTelemetry.isRunning(held))
+        var job = armPayload(); job["job"] = ["kind": "shot", "name": "orbit"]
+        #expect(EndpointTelemetry.isRunning(job))
+    }
+
     // ── isRunning ────────────────────────────────────────────────────────────
 
     @Test("running is a state, not a guess")

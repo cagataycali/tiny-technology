@@ -52,6 +52,14 @@ struct DmMsg: Identifiable, Equatable {
     let body: String
     let created: Int
     let viaTiny: String?
+    /// 📷 photos / 🎥 clips / 🎤 voice notes (migration 0031). Empty for every
+    /// row written before it and for a text-only message — see DmMedia.swift.
+    var attachments: [DmAttachment] = []
+
+    /// A media-only DM has an empty body, and that IS the message: a
+    /// caption-less photo is the commonest thing anyone sends from a phone. The
+    /// bubble must not render an empty text pill under it.
+    var hasText: Bool { !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 @MainActor
@@ -199,7 +207,8 @@ final class MessagesModel: ObservableObject {
                 direction: $0["direction"] as? String ?? "received",
                 body: $0["body"] as? String ?? "",
                 created: $0["created"] as? Int ?? 0,
-                viaTiny: $0["viaTiny"] as? String
+                viaTiny: $0["viaTiny"] as? String,
+                attachments: dmAttachments(from: $0["attachments"])
             )
         }
     }
@@ -208,16 +217,45 @@ final class MessagesModel: ObservableObject {
     /// text in the field — a `try?` that swallowed the throw (with the draft
     /// already cleared) meant a dropped connection or a worker 5xx silently ate
     /// the user's message with zero feedback, on the standing-priority DM path.
+    ///
+    /// `attachments` carries media-store URLs only (they are uploaded from the
+    /// composer before this runs, DmComposer.upload) — never bytes: the send
+    /// endpoint stores JSON on a polled read path, and the worker refuses any
+    /// url that isn't ours (`decideDmAttachments`).
     @discardableResult
-    func send(to peer: DmThread, text: String, token: String?) async -> Bool {
+    func send(to peer: DmThread, text: String, attachments: [DmAttachment] = [], token: String?) async -> Bool {
         do {
-            _ = try await Api.post("/api/messages", token: token, body: ["to": peer.login, "message": text]) as [String: Any]
+            // The body is assembled by a nonisolated helper (DmMedia.swift) and
+            // not by a `var` here for a Swift-6 reason: `[String: Any]` is not
+            // Sendable, so a dictionary built inside this @MainActor model
+            // belongs to the main actor's region and can't be handed to the
+            // nonisolated Api.post — "sending 'body' risks causing data races".
+            _ = try await Api.post(
+                "/api/messages", token: token,
+                body: dmSendBody(to: peer.login, text: text, attachments: attachments)
+            ) as [String: Any]
             sendError = nil
             await loadThread(peer, token: token)
             return true
         } catch {
             sendError = (error as? LocalizedError)?.errorDescription ?? "Couldn't send — try again."
             return false
+        }
+    }
+
+    /// Delete a message you sent (long-press → Delete). Worker enforces
+    /// sender-only (`DELETE FROM messages WHERE id = ? AND from_user = ?`), so
+    /// the menu offers this on `sent` bubbles only — a received message isn't
+    /// yours to unsay. Optimistic removal + reload: the row vanishes at once,
+    /// and the reload reconciles if the server refused (e.g. already gone).
+    func deleteMessage(_ m: DmMsg, in peer: DmThread, token: String?) async {
+        let keep = msgs
+        msgs.removeAll { $0.id == m.id }
+        do {
+            _ = try await Api.deleteJson("/api/messages", token: token, body: ["id": "\(m.id)"])
+        } catch {
+            msgs = keep
+            sendError = (error as? LocalizedError)?.errorDescription ?? "Couldn't delete — try again."
         }
     }
 }
@@ -238,6 +276,10 @@ struct MessagesView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model = MessagesModel()
+    /// 📷🎥🎤 Staged attachments + the voice recorder (DmMedia.swift). Keyed by
+    /// peer inside, so a photo picked for one thread can't ride a send to
+    /// another.
+    @StateObject private var composer = DmComposer()
     @State private var peer: DmThread?
     @State private var draft = ""
     @State private var sending = false
@@ -257,8 +299,13 @@ struct MessagesView: View {
                 ToolbarItem(placement: .topBarLeading) {
                     if peer != nil {
                         Button {
+                            // Leaving the thread must not leave the microphone
+                            // open (or the red recording indicator lit) — the
+                            // half-recorded note is discarded with it.
+                            composer.stopRecording(discard: true)
                             peer = nil
                             model.sendError = nil
+                            composer.error = nil
                             Task { await model.loadInbox(token: session.token) }
                         } label: { Image(systemName: "chevron.left") }
                     } else {
@@ -268,7 +315,12 @@ struct MessagesView: View {
             }
             .task { await model.loadInbox(token: session.token) }
             // Opening a thread marks it read server-side — sync the badge
-            .onDisappear { Task { await session.refreshUnread() } }
+            .onDisappear {
+                // Same reason as the back button: a sheet dismissed mid-recording
+                // must hand the mic back.
+                composer.stopRecording(discard: true)
+                Task { await session.refreshUnread() }
+            }
         }
     }
 
@@ -379,19 +431,51 @@ struct MessagesView: View {
                     }
                     LazyVStack(spacing: 8) {
                         ForEach(model.msgs) { m in
-                            VStack(alignment: m.direction == "sent" ? .trailing : .leading, spacing: 2) {
-                                Text(m.body)
-                                    .font(.subheadline)
-                                    .padding(.horizontal, 12).padding(.vertical, 8)
-                                    .background(
-                                        m.direction == "sent" ? Color.green.opacity(0.22) : Color(.secondarySystemBackground),
-                                        in: RoundedRectangle(cornerRadius: 14)
-                                    )
+                            VStack(alignment: m.direction == "sent" ? .trailing : .leading, spacing: 4) {
+                                // Media above the caption (web parity), and the
+                                // text pill is skipped entirely when there is no
+                                // caption — an empty bubble under a photo reads
+                                // as a message that failed to say something.
+                                if !m.attachments.isEmpty {
+                                    DmMediaBubble(attachments: m.attachments, mine: m.direction == "sent")
+                                }
+                                if m.hasText {
+                                    Text(m.body)
+                                        .font(.subheadline)
+                                        .padding(.horizontal, 12).padding(.vertical, 8)
+                                        .background(
+                                            m.direction == "sent" ? Color.green.opacity(0.22) : Color(.secondarySystemBackground),
+                                            in: RoundedRectangle(cornerRadius: 14)
+                                        )
+                                }
                                 Text("\(dmAgo(m.created))\(m.viaTiny.map { " · via \($0)" } ?? "")")
                                     .font(.caption2).foregroundStyle(.tertiary)
                             }
                             .frame(maxWidth: .infinity, alignment: m.direction == "sent" ? .trailing : .leading)
                             .id(m.id)
+                            // Long-press menu (web HUD parity + the native idiom).
+                            // Copy: any bubble with text. Edit/Delete: SENT only —
+                            // the worker's DELETE is sender-scoped, and "edit" is
+                            // delete + re-draft (DMs have no PATCH: an edit the
+                            // recipient may already have read is a new message).
+                            .contextMenu {
+                                if m.hasText {
+                                    Button {
+                                        UIPasteboard.general.string = m.body
+                                    } label: { Label("Copy", systemImage: "doc.on.doc") }
+                                }
+                                if m.direction == "sent" {
+                                    if m.hasText && m.attachments.isEmpty {
+                                        Button {
+                                            draft = m.body
+                                            Task { await model.deleteMessage(m, in: peer, token: session.token) }
+                                        } label: { Label("Edit", systemImage: "pencil") }
+                                    }
+                                    Button(role: .destructive) {
+                                        Task { await model.deleteMessage(m, in: peer, token: session.token) }
+                                    } label: { Label("Delete", systemImage: "trash") }
+                                }
+                            }
                         }
                     }
                     .padding()
@@ -411,22 +495,52 @@ struct MessagesView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal).padding(.top, 4)
             }
-            HStack(spacing: 8) {
-                TextField("Message @\(peer.login)", text: $draft)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    // Hardware-keyboard Return sends, matching the main chat
-                    // composer (Views.swift onSubmit) — before this, an iPad
-                    // keyboard's Return did nothing and only the tap button sent.
-                    .onSubmit { sendDraft(to: peer) }
-                Button { sendDraft(to: peer) } label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(sending ? .gray : .green)
-                }
-                .disabled(sending)
+            // An attach refusal shows its own sentence verbatim — each one names
+            // the file, the limit it broke and the way round it. Tap to dismiss.
+            if let why = composer.error {
+                Text(why)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal).padding(.top, 4)
+                    .onTapGesture { composer.error = nil }
             }
-            .padding()
+            if composer.recording {
+                // The recorder OWNS the composer row while it runs: there is no
+                // send to make yet, and the only two useful actions are Stop and
+                // Discard.
+                DmRecordingBar(composer: composer)
+            } else {
+                let staged = composer.list(peer.login)
+                if !staged.isEmpty {
+                    DmStagedStrip(
+                        items: staged,
+                        onRemove: { composer.remove($0, from: peer.login) },
+                        onRetry: { id in
+                            Task { await composer.retry(id, login: peer.login, token: session.token) }
+                        }
+                    )
+                }
+                HStack(spacing: 10) {
+                    DmAttachControls(composer: composer, login: peer.login, token: session.token)
+                    TextField("Message @\(peer.login)", text: $draft)
+                        .padding(.horizontal, 12).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        // Hardware-keyboard Return sends, matching the main chat
+                        // composer (Views.swift onSubmit) — before this, an iPad
+                        // keyboard's Return did nothing and only the tap button sent.
+                        .onSubmit { sendDraft(to: peer) }
+                    Button { sendDraft(to: peer) } label: {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .font(.system(size: 28))
+                            .foregroundStyle(sending ? .gray : .green)
+                    }
+                    // A caption-less photo is a real message, so an empty field
+                    // with something staged must still be sendable.
+                    .disabled(sending || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && staged.isEmpty))
+                }
+                .padding()
+            }
         }
     }
 
@@ -436,17 +550,37 @@ struct MessagesView: View {
     /// the draft stays put + sendError shows, so the message is never lost.
     private func sendDraft(to peer: DmThread) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !sending else { return }
+        let staged = composer.list(peer.login)
+        guard !sending else { return }
+        // Nothing to deliver. Blank text alone is still a misfire — but blank
+        // text WITH a photo is the commonest message there is (decideDmPayload
+        // allows exactly that), so emptiness is only fatal when nothing else is
+        // going either.
+        guard !text.isEmpty || !staged.isEmpty else { return }
+        // 🔴 Never deliver PART of what's staged: a DM can't be unsent, so a send
+        // that leaves while an upload is in flight (or after one failed) would
+        // arrive permanently missing the photo the sender watched themselves
+        // attach. Say so and keep everything.
+        if let why = composer.blockingReason(peer.login) {
+            model.sendError = why
+            return
+        }
         // Say why before the round-trip: the server's refusal arrives as a bare
         // "HTTP 400", and the draft has to survive either way.
         if let refusal = dmSendRefusal(text) {
             model.sendError = refusal
             return
         }
+        let attachments = composer.ready(peer.login)
         sending = true
         Task {
-            let ok = await model.send(to: peer, text: text, token: session.token)
-            if ok { draft = "" }
+            let ok = await model.send(to: peer, text: text, attachments: attachments, token: session.token)
+            if ok {
+                draft = ""
+                // Cleared for the peer we SENT to, not for whoever is on screen
+                // when the POST resolves.
+                composer.clear(peer.login)
+            }
             sending = false
         }
     }

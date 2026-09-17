@@ -163,7 +163,7 @@ final class Screenshot {
 
     /// Ask for consent and run the capture for a REMOTE ask — the web agent
     /// reached this phone through use_device, so there is no chat view on
-    /// screen to host the prompt, so the executor presents it itself.
+    /// screen to host the prompt (docs/remote-screenshot-consent-design-2026-08-02).
     ///
     /// Three things make this deliberately unlike the chat path:
     ///

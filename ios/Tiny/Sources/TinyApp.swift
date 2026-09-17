@@ -82,7 +82,18 @@ struct TinyApp: App {
             // Design harness: `simctl launch … technology.tiny.app --map-ambient-harness`
             // renders JUST the ambient map + wash + sample chat chrome, no auth —
             // the visual iteration loop for map-as-chat-background work.
-            if ProcessInfo.processInfo.arguments.contains("--map-ambient-harness") {
+            if ProcessInfo.processInfo.arguments.contains("--fomo-offline-harness") {
+                // No discovery or client: inspect the real empty/offline surface
+                // without a session, a camera request or a motion-capable endpoint.
+                FomoScreen()
+                    .environmentObject(session)
+                    .preferredColorScheme(.dark)
+            } else if ProcessInfo.processInfo.arguments.contains("--pineapple-harness") {
+                // Dedicated offline-safe UI fixture: real DevicesView navigation,
+                // no session seeding, network calls or capture execution.
+                DevicesView(token: nil, myDeviceId: nil)
+                    .preferredColorScheme(.dark)
+            } else if ProcessInfo.processInfo.arguments.contains("--map-ambient-harness") {
                 AmbientMapHarness()
                     .preferredColorScheme(.dark)
             } else {
@@ -97,6 +108,9 @@ struct TinyApp: App {
             #endif
         }
         .onChange(of: scenePhase) { _, phase in
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--fomo-offline-harness") { return }
+            #endif
             switch phase {
             case .active:
                 // Fresh loops = instant heartbeat → 🟢 the moment we're back
@@ -113,6 +127,8 @@ struct TinyApp: App {
                 // when none is paired, so a user without one never even sees
                 // the Bluetooth prompt from here.
                 NiclaVoiceGateway.shared.start()
+                // 🌡️ Same for a registered Nicla Sense ME.
+                NiclaSenseGateway.shared.start()
             case .background:
                 // The OS would suspend the 5s poll mid-request anyway; stop
                 // cleanly and hand persistence to BGAppRefresh

@@ -23,8 +23,23 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Files this repo deliberately changed for open-sourcing (template hygiene,
 # layout fixes, scrubbed fixtures). Extend when a cycle adds one ON PURPOSE.
-DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|TinyTests\.swift$|Attachments\.swift$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$'
+DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$'
 JUNK='\.gradle|/build/|node_modules|\.wrangler'
+
+# SCRUB — the mechanical part of open-sourcing, applied to every upstream blob
+# BEFORE comparing (the port applies the same rules, so a scrubbed file is not
+# drift). The rules are a sed script kept OUTSIDE the repo ($SYNC_SCRUB,
+# default ~/.tiny/sync-scrub.sed): they name the private hostnames, SSIDs and
+# fixture values they replace, so committing them would publish exactly what
+# they exist to remove. Without the file nothing is scrubbed and every
+# substituted fixture reports as DIFF — loud, not wrong. Binaries pass through
+# untouched (sed would eat their bytes).
+SCRUB="${SYNC_SCRUB:-$HOME/.tiny/sync-scrub.sed}"
+BINARY='\.(png|jpe?g|gif|ico|webp|heic|pdf|mp4|mov|wav|mp3|ipa|apk|aab|jar|woff2?|ttf|otf|glb|stl|zip|p12|mobileprovision|bin|dat)$'
+scrub() { # scrub <path>
+  if [ ! -f "$SCRUB" ] || echo "$1" | grep -qiE "$BINARY"; then cat; return; fi
+  sed -f "$SCRUB"
+}
 
 drift=0
 
@@ -41,7 +56,7 @@ scan() { # scan <upstream-git-dir> <upstream-prefix> <local-prefix>
     if [ ! -f "$local_path" ]; then
       echo "NEW-AT-HEAD: $loc$rel"
       drift=1
-    elif ! git -C "$src" show "HEAD:$f" 2>/dev/null | diff -q - "$local_path" >/dev/null 2>&1; then
+    elif ! git -C "$src" show "HEAD:$f" 2>/dev/null | scrub "$f" | diff -q - "$local_path" >/dev/null 2>&1; then
       if echo "$loc$rel" | grep -qE "$DELIBERATE"; then
         : # pinned divergence — expected
       else

@@ -30,6 +30,10 @@ enum WearablesCaptureError: LocalizedError {
     case noStream
     case sessionEnded
     case timedOut
+    /// SESSION_ALREADY_EXISTS, answered with WHO is holding the camera.
+    /// Built by `WearablesManager.cameraBusyMessage` — see it for the
+    /// measurements behind the wording.
+    case cameraBusy(String)
 
     var errorDescription: String? {
         switch self {
@@ -40,6 +44,7 @@ enum WearablesCaptureError: LocalizedError {
         case .noStream: return "The glasses session could not open a camera stream."
         case .sessionEnded: return "The glasses session ended before a photo arrived."
         case .timedOut: return "Timed out waiting for the glasses."
+        case .cameraBusy(let reason): return reason
         }
     }
 }
@@ -67,6 +72,17 @@ final class WearablesManager: ObservableObject {
     private var selector: AutoDeviceSelector?
 
     var isLinked: Bool { registration == .registered }
+
+    /// Are the glasses actually on the head right now? DAT reports a device as
+    /// `.connected` while it is worn/awake and Bluetooth-linked, `.disconnected`
+    /// when folded in the case — so this, not `isLinked`, is what "when I put
+    /// the glasses on, the tile shows up" (owner, 2026-09-17) means. A plain
+    /// property read (no stream), cheap enough for BodyPresence's 1 Hz tick.
+    var isConnected: Bool {
+        guard configured, isLinked else { return false }
+        let w = Wearables.shared
+        return w.devices.contains { w.deviceForIdentifier($0)?.linkState == .connected }
+    }
 
     var statusText: String {
         switch registration {
@@ -335,6 +351,74 @@ final class WearablesManager: ObservableObject {
         return status == .granted
     }
 
+    /// Who is holding the one glasses camera, in the user's words — the answer
+    /// to `sessionAlreadyExists`. Android twin: `WearablesBridge
+    /// .cameraBusyMessage`, same three arms, same wording.
+    ///
+    /// ⚠️ MEASURED in DAT 0.8.0 (Android bytecode, `WearablesImpl
+    /// .createSession`, and the same session model here): ONE session per
+    /// device, and any ask while the existing one's state is anything but
+    /// stopped is refused. The entry is registered AT createSession, in state
+    /// `.idle`, before `start()` — so the collision window is the whole 25s
+    /// walk to `.started` plus the holder's entire lifetime, and the live HUD
+    /// holds it for as long as its card is on screen. Both teardown paths
+    /// (`stop()`, and the glasses being folded) clear it synchronously, so a
+    /// busy camera is exactly and only a busy camera — never a stuck one.
+    ///
+    /// `Wearables` exposes `createSession` and no accessor for the session
+    /// already open, so the second rail cannot take it over: the remedy
+    /// belongs to the USER. Which is why the answer has to NAME the holder.
+    ///
+    /// `DeviceSessionError` is a `DatError`, hence `LocalizedError`, so the old
+    /// answer WAS a sentence — "A session already exists for this device".
+    /// True, and useless to someone who asked for a photo of what they are
+    /// looking at WHILE watching the live feed, the most natural moment there
+    /// is to ask. `statusFacts()` publishes both of these flags a few
+    /// functions up, and the context lines tell the agent "the user has the
+    /// live glasses feed OPEN" in the same breath the capture dead-ends.
+    ///
+    /// Derived, never claimed: a flag we set ourselves could be left on by a
+    /// rail that died, and then the camera would read as busy forever — worse
+    /// than the sentence it replaced.
+    /// `nonisolated` deliberately: it is pure, both arguments and the result are
+    /// Sendable, and the tests would otherwise have to hop to the main actor to
+    /// read a string that depends on nothing but its inputs.
+    nonisolated static func cameraBusyMessage(liveOpen: Bool, recording: Bool) -> String {
+        if liveOpen {
+            return "The live glasses feed is open on the phone and it holds the glasses camera — "
+                + "close the live card there, then ask again."
+        }
+        if recording {
+            return "The glasses are recording a video right now, which holds their camera — "
+                + "wait for that clip to finish, then ask again."
+        }
+        // Nothing we own says it is busy: another capture asked for moments ago
+        // is still walking up to its session, or finishing. It ends on its own.
+        return "Another glasses capture is still finishing on the phone — "
+            + "give it a few seconds and ask again."
+    }
+
+    /// One `createSession` attempt with `sessionAlreadyExists` translated into
+    /// the holder. `noEligibleDevice` is deliberately left to propagate — that
+    /// is the caller's retry, and the only error a second attempt can fix.
+    ///
+    /// ⚠️ It exists because the mapping is needed at BOTH attempts. Mapping
+    /// only the first would leave the retry throwing the raw SDK error, i.e.
+    /// the exact bug this fixes, reachable whenever eligibility flickers first.
+    private func createSessionNamingTheHolder(
+        _ wearables: any WearablesInterface,
+        _ selector: AutoDeviceSelector
+    ) throws -> DeviceSession {
+        do {
+            return try wearables.createSession(deviceSelector: selector)
+        } catch DeviceSessionError.sessionAlreadyExists {
+            throw WearablesCaptureError.cameraBusy(Self.cameraBusyMessage(
+                liveOpen: GlassesLive.shared.running,
+                recording: GlassesRecorder.shared.isRecording
+            ))
+        }
+    }
+
     /// A STARTED DeviceSession against the active glasses, or a thrown
     /// reason. Callers own stop(). Handles the two live-QA-found races:
     /// waits for the long-lived selector to see an active device (≤15s),
@@ -351,11 +435,11 @@ final class WearablesManager: ObservableObject {
         let wearables = Wearables.shared
         let session: DeviceSession
         do {
-            session = try wearables.createSession(deviceSelector: selector)
+            session = try createSessionNamingTheHolder(wearables, selector)
         } catch DeviceSessionError.noEligibleDevice {
             try await Task.sleep(nanoseconds: 2_000_000_000)
             do {
-                session = try wearables.createSession(deviceSelector: selector)
+                session = try createSessionNamingTheHolder(wearables, selector)
             } catch DeviceSessionError.noEligibleDevice {
                 throw WearablesCaptureError.notConnected
             }

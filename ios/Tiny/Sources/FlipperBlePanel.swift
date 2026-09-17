@@ -82,6 +82,17 @@ struct FlipperBlePanel: View {
                 if let asOf = ReadingAge.asOf(flipper.infoAt) {
                     Text(asOf).font(.caption2).foregroundStyle(.secondary)
                 }
+                // ⚠️ Live off the stored reading, not off the last tap. Every bit of
+                // `summary` is conditional, so a reading that came back without the
+                // battery just draws a shorter line — and the age line above then
+                // dates that short line as current. `note` cannot cover this: the
+                // refresh after a link comes up is the gateway's own
+                // (`finishLink`), so the first line this row ever shows is one
+                // nobody tapped for.
+                if let missing = FlipperGateway.missingLine(info.gaps) {
+                    Text(missing).font(.caption2).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if !flipper.activity.isEmpty {
                 Text(flipper.activity).font(.caption2).foregroundStyle(.blue)
@@ -89,7 +100,9 @@ struct FlipperBlePanel: View {
             HStack(spacing: 6) {
                 Button("Refresh") { Task { await refresh() } }
                 // Find-my-Flipper, and the friendliest proof the link is real —
-                // the board beeps and blinks in the user's hand.
+                // the board makes itself heard in the user's hand. What comes back
+                // is the board's ACKNOWLEDGEMENT, though, never a sound anyone
+                // heard: see `FlipperGateway.alertSent(for:)`.
                 Button("Beep") { Task { await beep() } }
                 Button("Files") { showFiles = true }
                 // The half of this feature the cable has no answer for at all.
@@ -100,7 +113,16 @@ struct FlipperBlePanel: View {
         } else {
             // "Out of range" is the normal state of something in a bag, not an
             // error. Say what it means rather than colouring it red.
-            Text("Not connected — bring the Flipper nearby and make sure Bluetooth is on in its settings.")
+            //
+            // ⚠️ It used to say "make sure Bluetooth is on in its settings" — the
+            // BOARD's Settings → Bluetooth, one row above "Forget all paired
+            // devices" — and this branch renders ONLY when `unit != nil`, so the
+            // advice was given exactly when there was a pairing to lose. The
+            // pairing sheet says the same thing legitimately: there, no bond
+            // exists yet. `outageLine(for:)` is shared with the relay reply and
+            // `statusLine()`, and it names THIS phone's radio when that is the
+            // reason, which is the one cause with a one-tap fix.
+            Text(flipper.outageLine(for: .panelSheet))
                 .font(.caption2).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 6) {
@@ -121,9 +143,33 @@ struct FlipperBlePanel: View {
         // request timed out then relabelled the old battery figure "as of" the
         // moment the user tapped: the one mechanism in the app for admitting a
         // reading's age, certifying a stale one instead.
-        let learned = await flipper.refresh()
-        if !learned {
-            note = "Couldn't read the Flipper just now — the link is up but it didn't answer. The figures above are the last ones that worked."
+        // ⚠️ The CAUSE comes from the reading, not from this method. This note used
+        // to say "the link is up but it didn't answer" for every failure, which is
+        // the one thing it could not know: `linked` may have gone false during the
+        // read, and an out-of-range board is the commonest way this button fails.
+        // `whyNoReading` puts the board's own words here when the board spoke
+        // (`.status(17)`, "close it on the device first") and this phone's radio in
+        // the frame when it was the radio — hazard 21, one fact, one sentence, both
+        // surfaces.
+        // ⚠️ And it is asked of the READING, not of one error out of it. This call
+        // passes no budget, so no read here can ever be skipped: "this phone ran out
+        // of its own time before it could ask" was, on this rail, only ever printed
+        // when it was false.
+        let reading = await flipper.refresh()
+        if !reading.didLearn {
+            let why = FlipperGateway.whyNoReading(reading, for: .panelSheet)
+            // "The figures above" only exist when there are figures — the sheet
+            // renders them under `if let info = flipper.info`.
+            note = flipper.info == nil
+                ? "Couldn't read the Flipper just now. \(why)"
+                : "Couldn't read the Flipper just now. \(why) The figures above are the last ones that worked."
+        } else {
+            // A partial reading is not a failed one, so it must not be noted as
+            // one — but this tap made the row SHORTER and reset its age, and the
+            // reason belongs to the tap. The row above says what is missing for as
+            // long as the reading stands; this says why it is missing, once.
+            let gap = FlipperGateway.gapClause(reading, for: .panelSheet)
+            if !gap.isEmpty { note = "Read the Flipper, but not all of it.\(gap)" }
         }
     }
 
@@ -133,9 +179,15 @@ struct FlipperBlePanel: View {
         note = nil
         do {
             try await flipper.alert()
-            note = "🔔 the Flipper beeped."
+            note = FlipperGateway.alertSent(for: .panelSheet)
         } catch {
-            note = error.localizedDescription
+            // Not a bare `localizedDescription`. A timeout whose request reached
+            // the board may have sounded the alert already, and the person
+            // reading this is holding the phone next to it — so the one sentence
+            // worth adding is "listen before you tap again". Shared with the
+            // relay reply through `actionFailed`, so the agent and the room
+            // cannot be told different things about the same beep.
+            note = FlipperGateway.actionFailed(error, action: "alert", for: .panelSheet)
         }
     }
 }
@@ -307,7 +359,10 @@ struct FlipperFilesSheet: View {
             // value, so `error = error.localizedDescription` assigns to the
             // immutable binding and never reaches the @State the view reads.
             entries = []
-            error = err.localizedDescription
+            // A listing changes nothing on the card, and this reader can walk the
+            // board closer — the one remedy the relay's copy of this sentence
+            // cannot offer. Both come out of `actionFailed`.
+            error = FlipperGateway.actionFailed(err, action: "list", for: .panelSheet)
         }
     }
 
@@ -321,18 +376,39 @@ struct FlipperFilesSheet: View {
         defer { loading = false }
         error = nil
         let full = path.hasSuffix("/") ? path + e.name : path + "/" + e.name
+        // The row that was just tapped already showed this size, so the refusal
+        // owes nobody a round trip: `read()` would spend a stat over Bluetooth to
+        // learn a number that is on screen, then refuse. read() keeps its own
+        // check — the relay has no listing to learn the size from, and a listing
+        // is not an authority anyway (the card can change under it).
+        if e.size > UInt64(FlipperGateway.maxReadBytes) {
+            error = FlipperGateway.tooBig(full, size: e.size,
+                                         limit: FlipperGateway.maxReadBytes, for: .panelSheet)
+            return
+        }
         do {
-            let data = try await flipper.read(full)
+            let data = try await flipper.read(full, for: .panelSheet)
             let text = String(data: data, encoding: .utf8)
             // A .nfc or .sub dump that isn't UTF-8 shows as hex rather than as
-            // replacement characters pretending to be content.
-            preview = (e.name, text?.contains("\u{FFFD}") == false
-                ? text!
-                : data.prefix(512).map { String(format: "%02x", $0) }.joined())
+            // replacement characters pretending to be content — through the same
+            // helper the relay reply uses, because this sheet used to cut its own
+            // bare `prefix(512)` and say nothing about it. A 2 KB .fap then read
+            // one way here and another way through the agent, and this one looked
+            // like the whole file. The window and the admission that it IS a
+            // window are the helper's, not this view's.
+            if let t = text, !t.contains("\u{FFFD}") {
+                preview = (e.name, t)
+            } else {
+                let p = FlipperGateway.hexPreview(data)
+                preview = (e.name, p.hex + p.cut)
+            }
         } catch let err {
             // The credential guard's refusal lands here, in the user's own words
-            // — it is a sentence, not a failure code.
-            error = err.localizedDescription
+            // — it is a sentence, not a failure code. `actionFailed` passes every
+            // non-timeout through unchanged for exactly that reason: appending
+            // "it may have happened anyway" to a refusal would invent a read that
+            // was declined.
+            error = FlipperGateway.actionFailed(err, action: "read", for: .panelSheet)
         }
     }
 
@@ -467,7 +543,7 @@ struct FlipperScreenSheet: View {
         do {
             try await flipper.startScreenStream()
         } catch let err {
-            error = err.localizedDescription
+            error = FlipperGateway.actionFailed(err, action: "screen", for: .panelSheet)
         }
     }
 
@@ -478,7 +554,17 @@ struct FlipperScreenSheet: View {
             } catch let err {
                 // Bound explicitly — a bare `catch` shadows the @State `error`
                 // with the thrown value, and the assignment then goes nowhere.
-                error = err.localizedDescription
+                //
+                // ⚠️ And a press is the site where "didn't answer" reads most
+                // wrongly as "didn't happen". `send(_:hold:)`'s own doc already
+                // says it — *"a FAILED press is not a press that didn't land:
+                // `.timeout` means the reply never came back, and the frame may
+                // well have been delivered and acted on"* — which is why it sends
+                // the RELEASE regardless. That fact was written down for the next
+                // programmer and never for the person watching the mirror, who
+                // sees "the Flipper didn't answer OK in time", presses again, and
+                // sends a second OK to a board that already took the first.
+                error = FlipperGateway.actionFailed(err, action: "press", for: .panelSheet)
             }
         }
     }

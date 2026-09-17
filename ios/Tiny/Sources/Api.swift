@@ -146,7 +146,8 @@ enum Api {
     /// relay poll needs. Defaulted, so every other verb is untouched.
     private static func request(_ path: String, method: String = "GET", token: String? = nil,
                                body: [String: Any]? = nil,
-                               cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy) async throws -> Data {
+                               cachePolicy: URLRequest.CachePolicy = .useProtocolCachePolicy,
+                               timeoutSeconds: TimeInterval = 30) async throws -> Data {
         var req = URLRequest(url: URL(string: base + path)!)
         req.httpMethod = method
         req.cachePolicy = cachePolicy
@@ -154,8 +155,12 @@ enum Api {
         // URLSession default is 60s/7-day; without this, a stalled half-open
         // connection leaves the panels that await this (.loading in Universe/
         // Jobs/Devices/Memory/Messages) spinning with no escape to .failed +
-        // Retry. 30s is generous for a JSON call yet still surfaces a hang.
-        req.timeoutInterval = 30
+        // Retry. 30s is generous for a JSON call yet still surfaces a hang —
+        // but a MEDIA upload carries megabytes of base64 that a cellular
+        // uplink can't move in 30s, so callers that upload pass a longer bound
+        // (DmComposer.upload: 120s). Timing out a body mid-flight was exactly
+        // the "can't send a photo/voice note" failure users hit on LTE.
+        req.timeoutInterval = timeoutSeconds
         if body != nil { req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body) }
@@ -206,8 +211,8 @@ enum Api {
         try await request(path, token: token)
     }
 
-    static func post<T>(_ path: String, token: String?, body: [String: Any]) async throws -> T {
-        let data = try await request(path, method: "POST", token: token, body: body)
+    static func post<T>(_ path: String, token: String?, body: [String: Any], timeoutSeconds: TimeInterval = 30) async throws -> T {
+        let data = try await request(path, method: "POST", token: token, body: body, timeoutSeconds: timeoutSeconds)
         guard let obj = try JSONSerialization.jsonObject(with: data) as? T else { throw ApiError.badResponse }
         return obj
     }
@@ -263,15 +268,31 @@ enum Api {
 
     /// Authenticated PUT that returns the parsed body EVEN on non-2xx (like the
     /// wallet POST helper). The x402 execute route answers 402/409/410 with an
-    /// `error` string the UI must show, so we must NOT throw those away. nil on
-    /// a transport failure (no response at all).
+    /// `error` string the UI must show, so we must NOT throw those away.
+    ///
+    /// nil means "no readable answer", which is TWO different things and neither
+    /// is "nothing was sent": a transport failure/timeout (the PUT may well have
+    /// been delivered and acted on), or a response whose body wasn't JSON (the
+    /// server definitely answered — a platform 502 page, a captive portal). Its
+    /// one caller is the x402 settlement, so PayQuote must not turn this into a
+    /// claim about the payment not happening.
+    ///
+    /// 195s, not 120: `/api/x402/pay` declares `maxDuration = 180` and spends a
+    /// SEQUENTIAL budget under it (re-probe 30s → sign → paid fetch 90s →
+    /// reconcile-log → 202). `timeoutInterval` is an idle timer and that route
+    /// sends nothing until it decides, so a 120s cap hung up right as the route
+    /// was returning the **202 pending_confirmation** — the one reply that exists
+    /// to stop a double-pay. Hanging up cancels nothing; it only costs us the
+    /// answer. Web uses 195s for the same call (`lib/deadlines.ts`); pinned
+    /// against the route's own `maxDuration` in
+    /// tests/pay-deadline-above-route.test.ts.
     static func putBody(_ path: String, token: String?, body: [String: Any]) async -> [String: Any]? {
         var req = URLRequest(url: URL(string: base + path)!)
         req.httpMethod = "PUT"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let token { req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
-        req.timeoutInterval = 120 // settlement can take a while on-chain
+        req.timeoutInterval = 195
         guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
         return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }

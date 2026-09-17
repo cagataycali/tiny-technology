@@ -213,11 +213,52 @@ private func flipperStatusText(_ code: UInt64) -> String {
 }
 
 enum FlipperError: LocalizedError {
+    /// Asked with no link at all: `writeFrame` found no characteristic to write
+    /// to, so nothing left the phone and nothing can have happened.
+    ///
+    /// ⚠️ NOT the error for a link that dropped with a request already in flight.
+    /// That is `.linkDropped`, and keeping the two apart is the whole of c31: this
+    /// sentence is a promise that the board is untouched, and only a request that
+    /// never reached the write can keep it.
     case notLinked
-    case timeout(String)
+    /// An answer that never came — and, second, whether the question did.
+    ///
+    /// ⚠️ `sent` is the fact this case used to leave out, and it is the one the
+    /// reader needs. The timeout timer in `request(_:timeout:label:)` runs
+    /// independently of the write queue, so it can fire in two completely
+    /// different worlds: the frame was still queued behind another command (the
+    /// board never saw it, `writeFrame`'s `pending[id]` guard then drops it
+    /// unsent), or the bytes went out and only the reply is missing. For a read
+    /// those are the same story. For anything that CHANGES the board they are
+    /// opposite ones, and "the Flipper didn't answer" reads as "it didn't
+    /// happen" — which is how a beep that sounded gets reported as a dead link,
+    /// and asked for again. `.noRoom` has said "the command wasn't sent" since
+    /// P1 precisely because that distinction decides what to do next; this case
+    /// simply never carried it.
+    case timeout(String, sent: Bool)
+    /// The link went away with this request in flight — the phone walked out of
+    /// range, Bluetooth was switched off, the board was powered down, or `stop()`
+    /// tore the link down on purpose.
+    ///
+    /// ⚠️ Carries `sent` for the same reason `.timeout` does, and it is the same
+    /// bug one terminator over: c30 taught the timer to say which of the two
+    /// worlds it was in, and this — the terminator P5's own acceptance run walks
+    /// into, because walking away from the board IS the disconnect — went on
+    /// answering with `.notLinked`, i.e. "no Flipper is linked to this phone", a
+    /// sentence whose only reading is "so nothing happened". For a beep already
+    /// sounding in the next room that is false, and the remedy it suggests is the
+    /// pairing screen, one row away from "Forget all paired devices".
+    case linkDropped(sent: Bool)
     case status(UInt64)
     case refused(String)
     case malformed(String)
+    /// The inbound stream lost its place, so this request's answer can never be
+    /// read even if the bytes are sitting in the buffer (see `desync(_:)`).
+    ///
+    /// Distinct from `.malformed`, which is an answer that DID arrive whole and
+    /// then failed to parse — there the board is known to have acted; here, as
+    /// with `.timeout` and `.linkDropped`, only `sent` knows.
+    case desynced(sent: Bool)
     /// The board's receive buffer never drained enough to take the whole
     /// command. Its own error, not a timeout, because the cause and the cure are
     /// different: nothing was sent, and retrying in a moment usually works.
@@ -227,16 +268,56 @@ enum FlipperError: LocalizedError {
         switch self {
         case .notLinked:
             return "No Flipper is linked to this phone over Bluetooth."
-        case .timeout(let what):
-            return "The Flipper didn't answer \(what) in time."
+        case .timeout(let what, let sent):
+            return sent
+                ? "The Flipper didn't answer \(what) in time, though the request did reach it."
+                : "The Flipper never received \(what) — the request was still queued behind another command when time ran out."
+        case .linkDropped(let sent):
+            return sent
+                ? "The Bluetooth link to the Flipper dropped before its answer came back, though the request did reach the board."
+                : "The Bluetooth link to the Flipper dropped while the request was still queued, so the board never saw it."
         case .status(let code):
             return flipperStatusText(code)
         case .refused(let why):
             return why
         case .malformed(let what):
             return "The Flipper's answer to \(what) didn't parse."
+        case .desynced(let sent):
+            return sent
+                ? "The Flipper's Bluetooth stream lost its place, so its answer can no longer be read, though the request did reach the board."
+                : "The Flipper's Bluetooth stream lost its place while the request was still queued, so the board never saw it."
         case .noRoom:
             return "The Flipper's Bluetooth buffer stayed full, so the command wasn't sent. Try again in a moment."
+        }
+    }
+
+    /// Whether the board may have carried the command out in spite of this error.
+    ///
+    /// The one fact that decides what the reader should do next, and the reason
+    /// three of these cases carry `sent` at all: a request that reached the board
+    /// may already have beeped, pressed a button or written a file, so "ask
+    /// again" is a second effect rather than a second answer.
+    ///
+    /// ⚠️ Exhaustive on purpose — no `default:`. A case added later cannot compile
+    /// until somebody decides which side of this line it falls on, which is a
+    /// guarantee no test in this repo can make: what let c31 exist is that c30
+    /// answered the question for `.timeout` in an `if case` at the call site, so
+    /// the other two terminators were never asked.
+    var mayHaveRun: Bool {
+        switch self {
+        // The three that end a request with no answer. Only the flag recorded at
+        // the commit point in `writeFrame` knows, so ask it rather than guess.
+        case .timeout(_, let sent): return sent
+        case .linkDropped(let sent): return sent
+        case .desynced(let sent): return sent
+        // An answer came back and would not parse. Whatever the board did, it did
+        // — the frame was written, acknowledged, and reassembled this far.
+        case .malformed: return true
+        // Definite noes, each from a different party: the board itself reported it
+        // did not do it (`.status`); its buffer never took the frame (`.noRoom`);
+        // there was no link to write to (`.notLinked`); the phone's own credential
+        // guard turned the command down before any of this (`.refused`).
+        case .status, .noRoom, .notLinked, .refused: return false
         }
     }
 }
@@ -248,6 +329,58 @@ struct FlipperEntry: Identifiable, Equatable {
     let name: String
     let size: UInt64
     let md5: String?
+}
+
+/// The three independent reads one `refresh()` makes, so a reading that came back
+/// short can say WHICH part is missing.
+///
+/// ⚠️ Every bit of `FlipperInfo.summary` is conditional, which means a read that
+/// never landed does not show up as an error or a gap — the line simply gets
+/// shorter. "unlshd-075 · Flipper C2" is what a board that answered DeviceInfo and
+/// nothing else looks like, and it is indistinguishable from a Flipper with no
+/// battery and no SD card, on a line stamped "read just now".
+enum FlipperRead: String, CaseIterable {
+    case device, power, storage
+
+    /// What the reader loses when this read leaves nothing behind. No "its" — the
+    /// frame in `missingLine(_:)` supplies one, so three gaps read as one list
+    /// rather than three claims.
+    var subject: String {
+        switch self {
+        case .device: return "firmware and model"
+        case .power: return "battery level"
+        case .storage: return "SD card"
+        }
+    }
+}
+
+/// How one read ENDED — recorded while it is still knowable, because nothing in
+/// the values can tell these three apart afterwards.
+///
+/// ⚠️ This exists because the sentence that explained a gap was true of one road
+/// to it and said so for all three. A read this phone never issued, a read that
+/// failed, and a read the board ANSWERED WITHOUT THE FIELD take exactly the same
+/// words out of `FlipperInfo.summary`, and only the first of them is this phone's
+/// clock running out. Blaming the clock for the other two is c31's `.notLinked`
+/// over a frame that went out, one layer up: a cause invented for a state nobody
+/// recorded.
+enum FlipperReadOutcome {
+    /// Never issued: `allow()` had less than `minRequestS` of the budget left, so
+    /// this phone ran out of its own time. ⚠️ Only reachable on a rail that passes
+    /// a budget at all — the panel's `refresh()` and `finishLink`'s pass none, so
+    /// on those rails a gap is NEVER this.
+    case unasked
+    /// Issued, and it failed — with the board's or the link's own words, which are
+    /// the only words about it worth printing (`.status(17)` is an app open on the
+    /// board's screen, said by the board).
+    case failed(Error)
+    /// Issued, and the board answered — the value simply was not in the answer.
+    /// `keyValues` returns an empty dictionary rather than throwing when no frame
+    /// carries a key, and `p["charge_level"].flatMap { Int($0) }` is nil for a key
+    /// that is absent OR that does not parse (`Int("94.5")` is nil). Nothing
+    /// throws, nothing was skipped, and there is nothing for the reader to fix on
+    /// this side.
+    case answered
 }
 
 /// What the phone can say about the Flipper without touching the SD card.
@@ -273,6 +406,26 @@ struct FlipperInfo: Equatable {
             bits.append(String(format: "%.2f GB free", Double(free) / 1_000_000_000))
         }
         return bits.isEmpty ? "linked over Bluetooth" : bits.joined(separator: " · ")
+    }
+
+    /// Which reads left nothing in this reading — asked of the VALUES, not of the
+    /// requests.
+    ///
+    /// It has to be the values, because the values are what the reader sees: a read
+    /// that failed, a read this phone never got round to asking, and a board that
+    /// answered without the field all take the same words out of `summary` above.
+    /// Deriving it from the same properties `summary` tests is what keeps the line
+    /// and the sentence that explains it from disagreeing (hazard 21).
+    ///
+    /// `deviceName` is deliberately not here: `summary` never prints it, so nothing
+    /// is missing from the reader's line when it is absent.
+    var gaps: [FlipperRead] {
+        var out: [FlipperRead] = []
+        // One read fills both, so either one present means DeviceInfo answered.
+        if firmware.isEmpty && model.isEmpty { out.append(.device) }
+        if batteryPct == nil { out.append(.power) }
+        if freeBytes == nil { out.append(.storage) }
+        return out
     }
 }
 
@@ -370,8 +523,29 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// percentage and a free-space figure are exactly the kind of fact that reads
     /// as current, so a stale one presented plainly is not a small inaccuracy —
     /// it is the app saying a dead board is at 100%.
+    ///
+    /// ⚠️ A reading is replaced WHOLE, never merged field by field, so everything in
+    /// `info` was read at `infoAt` and one date can speak for all of it. The price is
+    /// that a partial reading drops values nothing refuted (yesterday's battery is
+    /// gone when only DeviceInfo answers today) — paid deliberately: carrying them
+    /// forward under this one timestamp is exactly the "🔋 100% charged" lie above,
+    /// and `FlipperInfo.gaps` says what is absent instead of quietly filling it in.
     @Published private(set) var infoAt: Date?
     @Published private(set) var lastError: String?
+    /// THIS PHONE's Bluetooth radio, as CoreBluetooth last reported it.
+    ///
+    /// ⚠️ Published, and not merely readable off `central?.state`, because a
+    /// sentence on a screen that depends on a value needs that value to be
+    /// observable. `outage(radio:unit:for:)` is that sentence: with the radio off
+    /// it says the phone is the reason. A `central.state` read behind a
+    /// non-`@Published` `private var` cannot move that row when the user switches
+    /// the radio back on, and `connectIfPossible()` may then sit in a connection
+    /// that never calls back — leaving the panel accusing a radio that is on.
+    ///
+    /// ⚠️ Read THIS, never `lastError`, when deciding what is wrong now: a stored
+    /// diagnosis proves its writer ran, not that it is still true. `lastError`
+    /// survives until `didConnect` clears it, so it is a description of the past.
+    @Published private(set) var radio: CBManagerState = .unknown
     @Published private(set) var scanning = false
     @Published private(set) var found: [Found] = []
     /// Set while a relay envelope is being served, so the devices panel can show
@@ -403,7 +577,15 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// Guards the permission prompt: merely instantiating CBCentralManager asks
     /// for Bluetooth, and a user with no Flipper should never be asked because of
     /// this file.
-    private var wanted = false
+    ///
+    /// ⚠️ Also the difference between "not connected" and "not coming back".
+    /// `scheduleReconnect()` returns at this flag, so with it clear NOTHING
+    /// re-dials — and `stop()` clears it in exactly one situation that leaves a
+    /// board still remembered: a TX subscription that failed, i.e. a pairing that
+    /// did not hold. `outage(radio:unit:dialling:for:)` reads it, which is why it
+    /// is `@Published` (same reason as `radio`): a plain `private var` cannot move
+    /// the row when the phone gives up or when Reconnect starts it again.
+    @Published private var wanted = false
     /// `wanted`'s counterpart for the mirror: a view is on screen showing it.
     /// Distinct from `streaming`, which is whether the BOARD is pushing frames —
     /// the two diverge on purpose while the app is in the background, where the
@@ -447,6 +629,12 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     private struct Pending {
         var frames: [PBMsg] = []
         var cont: CheckedContinuation<[PBMsg], Error>?
+        /// True once the last chunk of this request's frame is on the wire, so a
+        /// timeout can say whether the board ever got the command. Lives here
+        /// rather than in a set beside `pending` because it dies with the entry:
+        /// `fail` clears the id, and anything asking afterwards would read the
+        /// default and report a sent command as never sent.
+        var sent = false
     }
     private var pending: [UInt32: Pending] = [:]
     /// Free bytes in the board's RX buffer, as the flow-control characteristic
@@ -459,11 +647,333 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     private static let reconnectMaxS: TimeInterval = 32
     /// A link this long counts as having worked and earns a backoff reset.
     private static let goodLinkS: TimeInterval = 30
-    /// Largest file the phone will pull off the SD card. The relay caps an
-    /// envelope at 8KB and truncates a reply at 7000 characters, so anything
-    /// bigger cannot be delivered — refuse it by SIZE before reading it, rather
-    /// than spending the transfer and then throwing the bytes away.
+    /// Largest file the phone will pull off the SD card — refused by SIZE before
+    /// reading, rather than spending the transfer and then throwing the bytes away.
+    ///
+    /// ⚠️ ONE number, TWO readers, and only one of them is a relay. Both stop at
+    /// 6000 for reasons that happen to agree: the relay cannot deliver more (an
+    /// 8 KB envelope, a reply truncated at 7000 characters), and the Files sheet
+    /// would spend a slow Bluetooth link pulling a 90 KB `.fap` in order to render
+    /// `hexPreviewBytes` of it. The NUMBER is shared on purpose — a private copy
+    /// per surface is the exact drift that once made one file read two ways — but
+    /// the SENTENCE cannot be, because the two remedies belong to different
+    /// people. See `ReadAudience`.
     static let maxReadBytes = 6000
+
+    /// Who the bytes are for, which decides what to say when they will not fit.
+    ///
+    /// ⚠️ There was one refusal and it was the relay's, so the only caller that
+    /// actually reads files got the wrong one. Tap `/ext/Manifest` — 78745 bytes
+    /// on this board, measured over the cable, in the first folder the SD browser
+    /// opens — and the app answered *"too big to carry back over the relay (limit
+    /// 6000). Ask for a smaller file, or read it on the Flipper."* The person
+    /// holding the phone is not using a relay, cannot "ask" anyone for a smaller
+    /// file, and never mentioned one; two thirds of that sentence was addressed to
+    /// somebody else. Nor is it a corner case — **6 of the 26 files in this
+    /// board's non-sensitive folders are over the ceiling**, and 5 of those live
+    /// in one folder of installed apps.
+    enum ReadAudience {
+        /// Bound for a relay reply, read by the agent (`Session.swift`).
+        case relayReply
+        /// Bound for this phone's own screen, read by the person holding it.
+        case panelSheet
+    }
+
+    /// The refusal for a file that will not fit, in the words of whoever asked.
+    static func tooBig(_ path: String, size: UInt64, limit: Int,
+                       for audience: ReadAudience) -> String {
+        switch audience {
+        case .relayReply:
+            return "\(path) is \(size) bytes — too big to carry back over the relay (limit \(limit)). Ask for a smaller file, or read it on the Flipper."
+        case .panelSheet:
+            // No relay in this sentence, and a remedy the reader can act on with
+            // the board in their other hand. It deliberately does NOT offer a
+            // preview instead: a text file under the limit is shown WHOLE here, so
+            // "you would only see the first 1024 bytes" would be false for exactly
+            // the files this sheet reads best.
+            return "\(path) is \(size) bytes — more than this phone will pull over Bluetooth (limit \(limit)). Open it on the Flipper itself."
+        }
+    }
+
+    /// What an `alert()` that came back OK actually proves — in the words of
+    /// whoever asked for it.
+    ///
+    /// ⚠️ NOT "it beeped". `Gui.PlayAudiovisualAlert` hands the board a
+    /// notification and the BOARD decides what that turns into. Measured on the
+    /// user's own C2 (unlshd-075) by reading `/int/.notification.settings` over
+    /// the cable — 24 bytes, version 2: display 1.0 · LED 1.0 · speaker 1.0 ·
+    /// display-off 1800000ms · **vibro_on 0**. So the sentence this replaced
+    /// ("beeped, blinked *and buzzed*") was already false on that very board in
+    /// the third of its three claims, and the RPC answers OK either way: the
+    /// protocol carries no acoustic feedback, so nothing on this side can ever
+    /// know what was heard. What an OK does prove is the LINK — so that is what
+    /// this says, and the rest is named as the board's own switches.
+    ///
+    /// This matters most where the loop leans on it hardest: `flipper_find` is
+    /// step one of the P5 acceptance run (docs/flipper-ble-ios-design.md §5)
+    /// *because* a noise from the board is the one answer nothing can fake. A
+    /// muted board must therefore not read as a dead link.
+    ///
+    /// The screen is named exactly as the board's own menu names it — `loader list`
+    /// on this board answers "LCD and Notifications" — and that row sits directly
+    /// BELOW "Bluetooth", so a vaguer "check its settings" aims the reader at the
+    /// menu holding **"Forget all paired devices"**. Hazard 4; c24 deleted a whole
+    /// sentence for pointing there.
+    static func alertSent(for audience: ReadAudience) -> String {
+        switch audience {
+        case .relayReply:
+            return "🔔 The Flipper accepted the alert over Bluetooth from this phone. That is the board acknowledging the command, not a sound anybody heard: it plays its own audiovisual alert, whose volume, vibration and LED are three separate switches on the board (Settings → LCD and Notifications), and it answers OK with any of them turned down. So this proves the Bluetooth link is live — if nobody found the Flipper, doubt that screen before the link."
+        case .panelSheet:
+            return "🔔 Sent — the Flipper acknowledged it. If you heard nothing, volume, vibration and the LED are separate switches on the board itself: Settings → LCD and Notifications."
+        }
+    }
+
+    /// Envelope actions that only ever LOOK at the board. Everything else is
+    /// assumed to have changed something.
+    ///
+    /// ⚠️ The polarity is the point, and it is the opposite of the obvious one. An
+    /// allow-list of *effects* would be wrong the first time an action is added —
+    /// the new verb would inherit "nothing on the board changed, so asking again
+    /// is free", which is the sentence you least want in front of a `delete` or a
+    /// `write`. Listing the reads instead means an unclassified action inherits
+    /// the careful sentence and the worst case is one turn of unnecessary caution.
+    /// Hazard 25(a): the side of a list that ages is the side that lies, so age it
+    /// toward silence, not toward reassurance.
+    ///
+    /// It is not a hypothetical either. `press` and `screen` — the panel's own
+    /// buttons — are in neither list and take the cautious arm today, which is
+    /// the correct sentence for both: a keypress whose reply was late was very
+    /// possibly taken by the board (`send(_:hold:)`'s doc, which is why it always
+    /// sends the RELEASE).
+    ///
+    /// `status`/`info` were listed here for a reader that did not exist yet, and
+    /// c30 said so: `statusLine()` wrapped its own three reads in `try?`, so no
+    /// status failure could reach a sentence at all. c32 handed it the failure, and
+    /// this classification is what turns it into "asking again costs nothing but
+    /// the wait" instead of a warning about a board that a read never touched.
+    /// Being a read is a property of the ACTION, which is exactly why it was right
+    /// to classify them before anything could ask.
+    static let readOnlyActions: Set<String> = ["status", "info", "files", "ls", "list", "read", "md5"]
+
+    /// The actions that make the board do something a person in the room can
+    /// perceive. Mirrors `handleFlipperEnvelope`'s alert case; `tests/flipper-ble.test.ts`
+    /// pins the two to each other, because a label added there and not here would
+    /// silently downgrade the beep to "nothing changed".
+    static let alertActions: Set<String> = ["alert", "beep", "find"]
+
+    /// What an unconfirmed command leaves undecided — the sentence that has to sit
+    /// beside any `FlipperError` whose `mayHaveRun` is true, in the words of
+    /// whoever asked.
+    ///
+    /// The fact itself is in the error: the request reached the board, so the
+    /// answer is what went missing. What that MEANS is per-action, and for one
+    /// action it is the whole point of the feature. `flipper_find` is step one of
+    /// the P5 acceptance run (docs/flipper-ble-ios-design.md §5) *because* a noise
+    /// from the board is the one answer nothing can fake — so a beep that sounded
+    /// while the reply was late must not come back looking like a dead link.
+    /// Whoever reads that will do the obvious thing and ask again, and on this
+    /// rail asking again is a SECOND ALERT, not a second answer.
+    ///
+    /// This is `lib/chat/tools/flipper.ts`'s `bleStillQueued` one layer down and
+    /// for a different reason: there the backend stopped waiting while the
+    /// envelope was still queued; here the phone waited, the board has the
+    /// command, and the reply is the only thing that did not arrive. Both are the
+    /// same omission — a give-up is not a cancel — and this is the layer that
+    /// knows it happened, so it is the layer that has to say so.
+    ///
+    /// ⚠️ Not just the timer, which is why this is no longer called
+    /// `afterTimeout`. THREE terminators end a request with no answer — the timer,
+    /// a link that dropped mid-flight (`linkLost`), and a stream that lost its
+    /// place (`desync`) — and the last two are the ones P5's acceptance run
+    /// actually walks into, because walking away from the board with a request in
+    /// flight is a disconnect. Naming this after the timer is what kept the other
+    /// two from being asked; `FlipperError.mayHaveRun` now decides, exhaustively.
+    ///
+    /// ONE `switch audience`, with the action classified ahead of it. Two
+    /// switches on this enum in one body make every by-label slice in
+    /// `tests/flipper-ble.test.ts` ambiguous — it would read the first arm it
+    /// found and cover the other for free (see `abandoned`, which exists for
+    /// that reason).
+    static func afterUnconfirmed(action: String, for audience: ReadAudience) -> String {
+        let a = action.lowercased()
+        let reads = readOnlyActions.contains(a)
+        let perceivable = alertActions.contains(a)
+        switch audience {
+        case .relayReply:
+            if reads {
+                return "Nothing on the board changed — this only reads it — so asking again costs nothing but the wait."
+            }
+            return perceivable
+                ? "The board has the alert, so it may well have sounded already — asking again sends a SECOND alert rather than getting a second answer. If somebody is near the Flipper, have them listen before this is retried."
+                : "The board has the command, so it may already have run. Repeating it is not a safe way to find out; read the board's own state first."
+        case .panelSheet:
+            if reads {
+                return "Nothing on the Flipper changed; try again when it is closer."
+            }
+            return perceivable
+                ? "It may have sounded already — listen for it before tapping again, since a second tap is a second alert rather than an answer."
+                : "The Flipper may have done it anyway — check the board before repeating it."
+        }
+    }
+
+    /// The sentence a failed Flipper action gets, for whoever asked — the single
+    /// place that decides when a failure needs `afterUnconfirmed`'s clause.
+    ///
+    /// Both readers of a thrown `FlipperError` go through here (the relay reply in
+    /// `Session.handleFlipperEnvelope`, the Beep button in `FlipperBlePanel`), so
+    /// the two cannot disagree about what a timeout meant — hazard 21: the fact
+    /// and the sentence that discloses it are ONE thing.
+    ///
+    /// ⚠️ The decision is `FlipperError.mayHaveRun`, asked of the error, not a
+    /// pattern match on one case. c30 wrote `if case .timeout(_, let sent)` here,
+    /// and the shape of that line is why c31 exists: it answers the question for
+    /// the case it names and silently answers "no" for every other terminator,
+    /// including the two that fail a request in flight without any timer. Asking
+    /// the error means a case added later has to have decided (that switch is
+    /// exhaustive, no `default:`) before it can compile at all.
+    ///
+    /// The errors that must keep their sentence word for word still do: `.noRoom`
+    /// says the command was *not* sent, `.refused` is the credential guard turning
+    /// down a folder of passports, and appending "it may already have run" to
+    /// either would be a lie in the one direction that matters.
+    static func actionFailed(_ error: Error, action: String,
+                             for audience: ReadAudience) -> String {
+        let text = error.localizedDescription
+        if let flip = error as? FlipperError, flip.mayHaveRun {
+            return "\(text) \(afterUnconfirmed(action: action, for: audience))"
+        }
+        return text
+    }
+
+    /// Why ONE read left nothing behind, in the words of whoever is asking.
+    ///
+    /// ⚠️ The three roads to a gap are three different parties, and the version of
+    /// this that took an `Error?` could only tell two of them apart: nil meant "this
+    /// phone ran out of time", so a board that answered WITHOUT the field — which
+    /// throws nothing — was reported as this phone being slow. On the panel rail
+    /// that was wrong every time: `refresh()` there is given no budget, so no read
+    /// can ever be skipped, and `.unasked` is unreachable (hazard 35(a): compute who
+    /// can reach a branch per rail, not from the constant). It also handed one read's
+    /// error to a read that was never made, because there was one cause for a whole
+    /// reading.
+    ///
+    /// ⚠️ No `switch audience` of its own, deliberately: `actionFailed` already owns
+    /// that decision, and a second `switch audience` in this file's status path makes
+    /// every by-label slice in `tests/flipper-ble.test.ts` ambiguous (31(c)). The
+    /// action is `"status"` — the `readOnlyActions` entry whose only reader is this —
+    /// so a read that may have landed says "asking again costs nothing but the wait".
+    static func whyGap(_ outcome: FlipperReadOutcome, for audience: ReadAudience) -> String {
+        switch outcome {
+        // Not the board's silence: `refresh`'s own budget ran out before it could
+        // spend `minRequestS` here. Blaming the Flipper for a request this phone
+        // never made is the same lie as `.notLinked` over a frame that went out
+        // (c31) — so say whose clock it was.
+        case .unasked: return "This phone ran out of its own time before it could ask."
+        // The board reports its own reasons and they were being thrown away by three
+        // `try?`s (c32), after which both surfaces invented one in the same words for
+        // every cause. A guess that is right sometimes is still a guess, and this
+        // one pointed at the board — which on P5's acceptance run is the thing the
+        // asker walked away from, one room and one dropped link ago.
+        case .failed(let error): return actionFailed(error, action: "status", for: audience)
+        // Nothing about this phone, the link or the clock is wrong, so no remedy is
+        // offered: what a reader can do about a board that answers without a field is
+        // not knowable from here, and pointing them at the board is 38(b). The one
+        // honest thing is that it ANSWERED — which rules out everything the other two
+        // sentences would have them chase.
+        case .answered: return "The Flipper answered; what is missing was not in what it said."
+        }
+    }
+
+    /// One clause per distinct reason, with the reads that share a reason grouped
+    /// under it, in the order the reads are made.
+    ///
+    /// Grouped by the SENTENCE rather than by the case: two reads that failed the
+    /// same way are one fact, and a reader handed the same sentence twice reads it as
+    /// two problems. It also means two reads that failed DIFFERENTLY each keep their
+    /// own words, which the single `because:` this replaces could not do.
+    static func gapReasons(_ reads: [FlipperRead], _ outcomes: [FlipperRead: FlipperReadOutcome],
+                           for audience: ReadAudience) -> [(reads: [FlipperRead], why: String)] {
+        var out: [(reads: [FlipperRead], why: String)] = []
+        for read in reads {
+            let why = whyGap(outcomes[read] ?? .unasked, for: audience)
+            if let i = out.firstIndex(where: { $0.why == why }) { out[i].reads.append(read) }
+            else { out.append((reads: [read], why: why)) }
+        }
+        return out
+    }
+
+    /// Why nothing usable came back, in the words of whoever is asking — the two
+    /// no-reading arms' clause.
+    ///
+    /// The same sentences a gap gets, because a total failure is every read leaving
+    /// nothing and one read leaving nothing is a gap (39(c)): a second maker is how
+    /// one reading ends up described two ways. No subjects are named here — the arm
+    /// that prints this has already said no reading came back at all.
+    static func whyNoReading(_ reading: Reading, for audience: ReadAudience) -> String {
+        gapReasons(reading.missing, reading.outcomes, for: audience)
+            .map(\.why).joined(separator: " ")
+    }
+
+    /// What a reading does not contain, in one sentence — nil when it contains
+    /// everything.
+    ///
+    /// ONE frame, and no audience: this is the same fact for the person holding the
+    /// phone and for a web chat. A second frame is how the same reading ends up
+    /// described two ways (hazard 21).
+    ///
+    /// Two kinds of caller, and the difference is WHICH reading: `gapClause` asks it
+    /// of the one a caller just took, while the panel row and `statusLine`'s
+    /// remembered-reading arm ask it of the one that is STORED — because a short line
+    /// stays short for as long as it is on screen or in a reply, long after the
+    /// refresh that took it is over. Anywhere `FlipperInfo.summary` is rendered, this
+    /// belongs beside it; the arm that quoted a remembered summary WITHOUT it was
+    /// found by counting the summary's renderers rather than this function's callers.
+    static func missingLine(_ gaps: [FlipperRead]) -> String? {
+        guard !gaps.isEmpty else { return nil }
+        return "Missing from this reading: its \(subjectList(gaps))."
+    }
+
+    /// Some reads as one list of subjects — "battery level and SD card".
+    ///
+    /// The ONLY place a read becomes words: the frame above and the per-reason
+    /// clauses below both build their lists here, so a surface cannot word its own
+    /// (39(f) — a count of MY frame's words is blind to a sentence that rewords, and
+    /// a mutant that had the panel row invent its own list survived exactly that).
+    ///
+    /// No verb — "its firmware and model" is one read but reads plural, so any
+    /// is/are agreement is wrong for one of the three cases. A label cannot be
+    /// conjugated wrongly.
+    static func subjectList(_ reads: [FlipperRead]) -> String {
+        let subjects = reads.map(\.subject)
+        return subjects.count == 1
+            ? subjects[0]
+            : subjects.dropLast().joined(separator: ", ") + " and " + (subjects.last ?? "")
+    }
+
+    /// The clause a PARTIAL reading gets appended to it — what is missing, then why,
+    /// in the words of whoever is asking. Empty when nothing is missing, so the
+    /// complete case is unchanged.
+    ///
+    /// The causes are `whyGap`'s, which is the point: a gap and a total failure have
+    /// exactly the same causes, and the board's own words about a running app
+    /// (`.status(17)`) explain a missing battery as well as they explain a missing
+    /// reading. What is NOT shared is one cause for a whole reading — each gap is
+    /// explained by what happened to ITS read.
+    ///
+    /// ⚠️ One reason for every gap and the sentence stands alone: the frame has just
+    /// named them all. Two or more and each names the gaps it accounts for, because a
+    /// cause that names no subject is read as the cause of all of them — which is how
+    /// "this phone ran out of time" came to be printed for a read the board had
+    /// answered.
+    static func gapClause(_ reading: Reading, for audience: ReadAudience) -> String {
+        guard let line = missingLine(reading.missing) else { return "" }
+        let reasons = gapReasons(reading.missing, reading.outcomes, for: audience)
+        let why = reasons
+            .map { reasons.count == 1 ? $0.why : "Its \(subjectList($0.reads)): \($0.why)" }
+            .joined(separator: " ")
+        return " \(line) \(why)"
+    }
+
     /// Folders holding the user's scanned credentials. Ported from
     /// tiny-tech/src/agent/flipper.ts SENSITIVE_DIRS — see `refuseSweep`.
     static let sensitiveDirs = ["/ext/nfc", "/ext/lfrfid", "/ext/ibutton", "/ext/u2f", "/ext/subghz"]
@@ -551,6 +1061,28 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         guard body.count > replyBudget else { return body }
         let note = "\n…\n(cut here — \(what) is longer than one reply can carry.)"
         return String(body.prefix(max(0, replyBudget - note.count))) + note
+    }
+
+    /// A non-text file as hex, with the sentence that says it is a preview.
+    ///
+    /// ⚠️ TWO surfaces render a Flipper file on this phone — the relay reply and
+    /// the panel's Files sheet — and they were free to disagree, so they did. The
+    /// reply used this window and named both numbers; the sheet cut a bare
+    /// `prefix(512)` and said nothing, which is the exact lie `fitReply` above
+    /// forbids its callers in writing. Same board, same file, same phone: a 2 KB
+    /// `.fap` read as "the first 1024 of 2048 bytes" through the agent and as a
+    /// complete-looking file in the user's hand, at a quarter of it.
+    ///
+    /// So the window and the admission live together, once. `cut` is empty when
+    /// the whole file fits — then the hex IS the file and there is nothing to
+    /// admit. Returned in two pieces because the reply wraps a header around it
+    /// and the sheet does not.
+    static func hexPreview(_ data: Data) -> (hex: String, cut: String) {
+        let window = min(data.count, hexPreviewBytes)
+        let hex = data.prefix(window).map { String(format: "%02x", $0) }.joined()
+        let cut = window < data.count
+            ? "…\n(preview: the first \(window) of \(data.count) bytes.)" : ""
+        return (hex, cut)
     }
 
     override private init() {
@@ -800,8 +1332,11 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         screenFrame = nil
         lock.withLock { credits = nil }
         // Anything mid-flight is gone with the link. Failing it now turns a
-        // 15-second wait into an immediate, accurate answer.
-        failAllPending(FlipperError.notLinked)
+        // 15-second wait into an immediate answer — and the answer has to say
+        // whether the board already had the command, because `.notLinked` ("no
+        // Flipper is linked to this phone") reads as "so nothing happened", which
+        // for a beep already sounding is false and asks for a second one.
+        failAllPending { FlipperError.linkDropped(sent: $0) }
         // Reset the backoff only for a link that LASTED — that is what tells
         // walking out of range apart from a board that drops us on sight.
         if let since = linkedAt, Date().timeIntervalSince(since) >= Self.goodLinkS {
@@ -924,7 +1459,7 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         let timer = Task { [weak self] in
             try? await Task.sleep(for: .seconds(timeout))
             guard !Task.isCancelled, let me = self else { return }
-            me.fail(id, FlipperError.timeout(label))
+            me.failTimedOut(id, label)
         }
         defer { timer.cancel() }
 
@@ -991,6 +1526,13 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
             fail(id, FlipperError.notLinked)
             return
         }
+        // Past the guard above, this frame is going out: the chunk loop below has
+        // no suspension point and nothing after it can call the send off. So this
+        // is the line where a timeout stops meaning "the board never saw it" and
+        // starts meaning "the answer is what's missing" — the one fact
+        // `FlipperError.timeout`'s reader needs, recorded at the moment it
+        // becomes true rather than inferred afterwards by somebody guessing.
+        lock.withLock { pending[id]?.sent = true }
         let mtu = max(20, p.maximumWriteValueLength(for: rxWriteType))
         var offset = 0
         while offset < data.count {
@@ -1061,7 +1603,10 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     private func desync(_ what: String) {
         inbox = []
         lastError = "The Flipper's Bluetooth stream lost sync (\(what)). The next command starts fresh."
-        failAllPending(FlipperError.malformed("the Bluetooth stream"))
+        // `.desynced`, not `.malformed`: a malformed answer is one that ARRIVED,
+        // which says the board acted. Here the answer may not exist yet, so the
+        // request's own `sent` is the only thing that knows.
+        failAllPending { FlipperError.desynced(sent: $0) }
     }
 
     private func deliver(_ msg: PBMsg) {
@@ -1101,6 +1646,17 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         resume?.resume(returning: frames)
     }
 
+    /// Time up: fail the request with the timeout that knows whether the board
+    /// got the command.
+    ///
+    /// The flag is read HERE, in the same call that ends the request, because
+    /// `fail` removes the id — a caller that asked afterwards would find nothing
+    /// pending and report every timeout as never sent.
+    private func failTimedOut(_ id: UInt32, _ label: String) {
+        let sent = lock.withLock { pending[id]?.sent ?? false }
+        fail(id, FlipperError.timeout(label, sent: sent))
+    }
+
     private func fail(_ id: UInt32, _ error: Error) {
         var cont: CheckedContinuation<[PBMsg], Error>?
         lock.withLock {
@@ -1110,13 +1666,28 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         cont?.resume(throwing: error)
     }
 
-    private func failAllPending(_ error: Error) {
-        var conts: [CheckedContinuation<[PBMsg], Error>] = []
+    /// End every request in flight, each with an error built from ITS OWN state.
+    ///
+    /// ⚠️ The parameter is a closure over `sent`, not an error value, and that is
+    /// the entire point of it. Whether the board got the command is a fact about
+    /// one request; this function ends several at once, so a single error value
+    /// here is a constant standing in for a variable — c7's shape (a heartbeat
+    /// posting a static capability list) at the error layer, and invisible for the
+    /// same reason: the call site reads perfectly well on its own. `Pending.sent`
+    /// sat in the dictionary being deleted, one line away, unread.
+    ///
+    /// What that cost: a beep the board had already run and a beep still queued
+    /// behind it were handed the same sentence, and it was the wrong one for
+    /// exactly the request that mattered.
+    private func failAllPending(_ error: (Bool) -> Error) {
+        var conts: [(CheckedContinuation<[PBMsg], Error>, Bool)] = []
         lock.withLock {
-            conts = pending.values.compactMap { $0.cont }
+            for p in pending.values {
+                if let c = p.cont { conts.append((c, p.sent)) }
+            }
             pending = [:]
         }
-        for c in conts { c.resume(throwing: error) }
+        for (c, sent) in conts { c.resume(throwing: error(sent)) }
     }
 
     /// Throw on a non-OK status. The status rides the LAST frame in practice, but
@@ -1169,8 +1740,13 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         return (r.num(1) ?? 0, r.num(2) ?? 0)
     }
 
-    /// One `alert` — the Flipper beeps, blinks and buzzes. Find-my-Flipper, and
-    /// the friendliest possible proof that the link is real.
+    /// One `alert` — the board plays its own audiovisual alert. Find-my-Flipper,
+    /// and the friendliest possible proof that the link is real.
+    ///
+    /// ⚠️ Do not describe what this DOES as a beep: the board decides that, and on
+    /// the user's own board vibration is already switched off. What it proves and
+    /// what it does not is `alertSent(for:)`'s whole job — every reader of this
+    /// call goes through that function.
     func alert() async throws {
         let frames = try await request(PB.empty(Cmd.alertReq), timeout: 10, label: "an alert")
         try checkStatus(frames)
@@ -1217,7 +1793,11 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
 
     /// Read one file. Chunked by the firmware — a 701-byte .ir came back in two
     /// frames — so the File.data of every frame concatenates into the content.
-    func read(_ path: String, maxBytes: Int = FlipperGateway.maxReadBytes) async throws -> Data {
+    ///
+    /// `audience` has no default: the sentence a refusal produces is addressed to
+    /// somebody, and a default is how the wrong somebody got it for sixteen cycles.
+    func read(_ path: String, maxBytes: Int = FlipperGateway.maxReadBytes,
+              for audience: ReadAudience) async throws -> Data {
         if let why = Self.refuseSweep(path) { throw FlipperError.refused(why) }
         // Size first. Reading and then discarding would spend the user's time and
         // the board's battery to deliver nothing.
@@ -1227,7 +1807,7 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         let size = stat.compactMap { $0.msg(Cmd.storageStatResp)?.msg(1) }.first?.num(3) ?? 0
         if size > UInt64(maxBytes) {
             throw FlipperError.refused(
-                "\(path) is \(size) bytes — too big to carry back over the relay (limit \(maxBytes)). Ask for a smaller file, or read it on the Flipper.")
+                Self.tooBig(path, size: size, limit: maxBytes, for: audience))
         }
         let frames = try await request(PB.sub(Cmd.storageReadReq, PB.str(1, path)),
                                       timeout: 30, label: "a file")
@@ -1451,24 +2031,122 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
 
     // MARK: - Status
 
+    /// What one `refresh` attempt came back with.
+    ///
+    /// A `Bool` here is the reason both status surfaces had to GUESS. `refresh`
+    /// wrapped all three reads in `try?`, so the board's own account of itself —
+    /// `.status(17)`, "an app is running on the Flipper — close it on the device
+    /// first" — was discarded at the same instant it arrived, along with the two
+    /// errors c31 had just taught to say which world they fired in
+    /// (`.linkDropped(sent:)`, `.desynced(sent:)`). All the caller was left with
+    /// was `false`, and it filled the gap with a sentence about an app being open
+    /// that no board had said.
+    /// ⚠️ And `.learned` was the same bug one step in. It answered "yes" for a
+    /// reading that came back with ONE of its three parts, dropped the cause of the
+    /// other two, and left every surface stamping "read just now" on a line that had
+    /// silently lost the battery and the SD card — the two facts anybody asks for.
+    /// The likeliest partial on this rail needs no broken board at all: DeviceInfo
+    /// alone may spend the whole `relayStatusBudgetS`, and then Power and Storage are
+    /// never asked (`allow` returns nil), nothing throws, and the answer is a short
+    /// line with a fresh timestamp.
+    /// ⚠️ And ONE cause for a whole reading was that bug a third time. A single
+    /// `because: Error?` cannot say which read it belongs to, so it was handed to
+    /// every gap — including the reads that were never issued, and the reads the
+    /// board ANSWERED without the field, where nil then meant "this phone ran out of
+    /// time" about a request it had made and had an answer to. Each read now carries
+    /// its own `FlipperReadOutcome` and the cause is derived from those, so no gap can
+    /// be explained by something that happened to a different read.
+    enum Reading {
+        /// At least one value came back. `info` and `infoAt` have moved.
+        ///
+        /// `missing` is empty when all three reads landed, and `outcomes` says how
+        /// each read ENDED — the fact no value can carry, and the only thing that
+        /// distinguishes a read this phone never made from one the board answered
+        /// without the field.
+        case learned(missing: [FlipperRead], outcomes: [FlipperRead: FlipperReadOutcome])
+        /// Nothing usable came back — every read left nothing, each for its own
+        /// recorded reason. A request this phone never made must not be reported as
+        /// the board's silence, and a request the board ANSWERED must not be reported
+        /// as this phone's clock; both are c31's `.notLinked`-over-a-sent-frame in
+        /// another costume.
+        case silent(outcomes: [FlipperRead: FlipperReadOutcome])
+
+        /// Named `didLearn` rather than `learned` so it cannot be confused with —
+        /// or shadow — the case of the same name.
+        var didLearn: Bool {
+            // No `default:`. A third outcome added later must decide which side of
+            // "did we learn anything" it is on before this compiles (c31's rule).
+            switch self {
+            case .learned: return true
+            case .silent: return false
+            }
+        }
+
+        /// How each read ended. Seeded off `FlipperRead.allCases` by `refresh`, so it
+        /// is total: a read with no entry would be answered `.unasked`, which is a
+        /// claim about this phone's clock that nobody recorded.
+        var outcomes: [FlipperRead: FlipperReadOutcome] {
+            switch self {
+            case .learned(_, let outcomes): return outcomes
+            case .silent(let outcomes): return outcomes
+            }
+        }
+
+        /// ⚠️ There is deliberately no `failure: Error?` here any more. One cause for
+        /// a whole reading is what handed a failed read's words to the two reads that
+        /// never ran, and an accessor that answers "the reason" for three independent
+        /// reads is an invitation to ask it again. Ask `outcomes` about a READ.
+        ///
+        /// What the reader did not get. Everything, when nothing came back: that is
+        /// literally true, and it keeps this accessor total without a special case.
+        /// The two no-reading sentences already say so in their own words, so
+        /// `gapClause` is only ever asked of a reading that learned something.
+        var missing: [FlipperRead] {
+            switch self {
+            case .learned(let gaps, _): return gaps
+            case .silent: return FlipperRead.allCases
+            }
+        }
+    }
+
     /// Fill `info` from the board. Each piece is independent: a Flipper that
     /// answers DeviceInfo but not Storage.Info (no SD card) should still show its
     /// firmware rather than one blanket failure.
     /// Read firmware, battery and free space.
     ///
-    /// Returns **whether this attempt actually learned anything**, which is the
-    /// half that used to be missing. Every read is `try?` on purpose — a board
-    /// that answers two of three is worth showing — but that also means total
-    /// failure looked exactly like success to every caller, and the previous
-    /// reading was then presented as the current one. `infoAt` moves only when
-    /// the reading does, so nothing downstream can date a memory as fresh.
+    /// Returns **what this attempt learned, what it did not, and why not**. All
+    /// three reads are attempted regardless of each other's failure, on purpose —
+    /// a board that answers two of three is worth showing — but a failure is now
+    /// KEPT rather than dropped by a `try?`, because total failure otherwise looked
+    /// identical to every caller no matter what the board said. `infoAt` moves only
+    /// when the reading does, so nothing downstream can date a memory as fresh.
+    ///
+    /// ⚠️ "Worth showing" is only true if the reader is told what is not in it.
+    /// Two of three came back as `.learned` with no way to ask what the third was,
+    /// so the shorter line went out stamped "read just now" — and `summary` prints
+    /// every field conditionally, so the missing battery left no trace at all.
+    /// `Reading.missing` is that trace, and `gapClause(_:for:)` is the sentence.
+    ///
+    /// ⚠️ And each read records HOW IT ENDED, which is a fact about the read that no
+    /// value and no single error can carry. `keyValues` returns an empty dictionary
+    /// rather than throwing when the board answers with no keys, and `Int("94.5")` is
+    /// nil — so "the board answered without it" throws nothing, was reported as the
+    /// same nil as "never asked", and came out as a sentence about this phone's clock.
+    /// On this method's OTHER two callers (`finishLink` and the panel button) there is
+    /// no budget at all, so nothing can ever be skipped and that sentence was wrong
+    /// every single time it appeared.
+    ///
+    /// Three reads that ended the SAME way are still one fact — `gapReasons` groups
+    /// them under one sentence, so a link that never came up says so once — but a
+    /// reading whose reads ended DIFFERENTLY now explains each of them by what
+    /// happened to it, in words that name whose gap they are.
     ///
     /// `budget` caps the WHOLE read, not each request: with three ceilings adding
     /// up to 52s, an unbounded refresh could outlive the relay caller waiting for
     /// it. Reads are dropped from the end when time runs short, so a slow board
     /// still yields firmware and battery rather than nothing at all.
     @discardableResult
-    func refresh(within budget: TimeInterval = .infinity) async -> Bool {
+    func refresh(within budget: TimeInterval = .infinity) async -> Reading {
         let started = Date()
         /// What this read may ask for, or nil when there is no point asking.
         func allow(_ want: TimeInterval) -> TimeInterval? {
@@ -1477,18 +2155,38 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
             return left >= Self.minRequestS ? min(want, left) : nil
         }
         var next = FlipperInfo()
-        if let t = allow(Self.deviceInfoS), let d = try? await deviceInfo(timeout: t) {
-            next.firmware = d["firmware_version"] ?? ""
-            next.model = d["hardware_model"] ?? ""
-            next.deviceName = d["hardware_name"] ?? ""
+        /// How each read ended. Seeded from `allCases` rather than left to grow keys,
+        /// so a read is `.unasked` because nothing overwrote it — a read missing from
+        /// this map would be answered "never asked" on a rail that cannot skip one.
+        var outcomes = Dictionary(uniqueKeysWithValues:
+            FlipperRead.allCases.map { ($0, FlipperReadOutcome.unasked) })
+        if let t = allow(Self.deviceInfoS) {
+            do {
+                let d = try await deviceInfo(timeout: t)
+                next.firmware = d["firmware_version"] ?? ""
+                next.model = d["hardware_model"] ?? ""
+                next.deviceName = d["hardware_name"] ?? ""
+                // `.answered` even when those keys were absent — the board DID answer,
+                // and an empty dictionary is exactly the road that used to be reported
+                // as this phone running out of time.
+                outcomes[.device] = .answered
+            } catch { outcomes[.device] = .failed(error) }
         }
-        if let t = allow(Self.powerInfoS), let p = try? await powerInfo(timeout: t) {
-            next.batteryPct = p["charge_level"].flatMap { Int($0) }
-            next.chargeState = p["charge_state"] ?? ""
+        if let t = allow(Self.powerInfoS) {
+            do {
+                let p = try await powerInfo(timeout: t)
+                next.batteryPct = p["charge_level"].flatMap { Int($0) }
+                next.chargeState = p["charge_state"] ?? ""
+                outcomes[.power] = .answered
+            } catch { outcomes[.power] = .failed(error) }
         }
-        if let t = allow(Self.storageInfoS), let s = try? await storageInfo(timeout: t) {
-            next.totalBytes = s.total
-            next.freeBytes = s.free
+        if let t = allow(Self.storageInfoS) {
+            do {
+                let s = try await storageInfo(timeout: t)
+                next.totalBytes = s.total
+                next.freeBytes = s.free
+                outcomes[.storage] = .answered
+            } catch { outcomes[.storage] = .failed(error) }
         }
         // `let` before the hop: a var captured by a concurrently-executing
         // closure is an error under Swift 6.
@@ -1497,6 +2195,10 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         // OK to DeviceInfo and hand back nothing usable, and treating that as
         // success would re-date the old line without replacing it.
         let learned = reading != FlipperInfo()
+        // Which parts are missing comes off the READING, not off which requests
+        // threw: `summary` prints every field conditionally, so a skipped read and a
+        // refused one take the same words away from whoever is looking.
+        let gaps = reading.gaps
         await MainActor.run {
             // Keep the last good reading if this attempt learned nothing — a
             // blank panel is worse than a stale line. What must NOT be kept is
@@ -1506,7 +2208,7 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
                 self.infoAt = Date()
             }
         }
-        return learned
+        return learned ? .learned(missing: gaps, outcomes: outcomes) : .silent(outcomes: outcomes)
     }
 
     /// How old a reading is, in words, for a reader who cannot see this phone's
@@ -1521,6 +2223,200 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
         return "\(Int((Double(s) / 3600).rounded()))h ago"
     }
 
+    /// Why nothing can reach the board right now — ONE source, in the words of
+    /// whoever is asking.
+    ///
+    /// ⚠️ There were three of these, worded three different ways, and the one under
+    /// the user's thumb sent them to the screen that can destroy their pairing. The
+    /// panel row said *"bring the Flipper nearby and make sure Bluetooth is on in
+    /// its settings"* — the BOARD's Settings → Bluetooth, which is where "Forget all
+    /// paired devices" lives — and it said it only in the state where a bond exists
+    /// to lose, because `FlipperBlePanel.paired` renders only when `unit != nil`.
+    /// The same advice is right in the pairing SHEET, where there is no bond yet.
+    /// It is right before a bond and harmful after one. `lib/chat/tools/flipper.ts`
+    /// was scrubbed of exactly this remedy for exactly this reason and a test pins
+    /// it dead there — while the phone, whose wording outranks the backend's (it
+    /// arrives as the tool RESULT, and on the panel it is under a thumb), went on
+    /// giving it.
+    ///
+    /// ⚠️ And none of the three could name the one cause with a one-tap fix.
+    /// `centralManagerDidUpdateState` diagnoses `.poweredOff` and `.unauthorized`
+    /// already — into `lastError`, whose only readers are this phone's own panel and
+    /// sheets. Nobody asking through the relay can see that screen: a phone in a
+    /// pocket and a browser somewhere else is the entire point of this rail. So a
+    /// Bluetooth switch flipped on the PHONE came back as a story about the BOARD.
+    ///
+    /// ⚠️ And a third reader was being told to WAIT for something switched off.
+    /// Both sentences below promised the phone was re-dialling with a backoff — true
+    /// in the ordinary out-of-range case, and false in the one state that is not
+    /// recoverable without a human: `didUpdateNotificationStateFor` calling `stop()`
+    /// after the TX subscription failed. That is a pairing that did not hold, and
+    /// `stop()` clears `wanted` on purpose (re-dialling would re-raise the system
+    /// prompt every couple of seconds at someone who just declined one), so nothing
+    /// re-dials, ever. The remote asker got "it returns by itself once it is near";
+    /// the one thing that could not work was waiting. `dialling` is that fact, and
+    /// like the audience it has NO default — a caller that forgets it would inherit
+    /// the promise, which is the bug.
+    ///
+    /// No default audience, deliberately — the same reason as
+    /// `tooBig(_:size:limit:for:)`. A default is how the wrong reader inherits the
+    /// wrong words.
+    static func outage(radio: CBManagerState, unit name: String?, dialling: Bool,
+                       for audience: ReadAudience) -> String {
+        // Nothing paired: the radio is not the story, and both readers need the same
+        // one thing — where the pairing sheet is. (The panel's `unit == nil` branch
+        // shows its own pitch and button, so in practice this arm is the relay's.)
+        guard let board = name else {
+            return "No Flipper is linked to this phone over Bluetooth. Pair it in the tiny app: Devices → this phone → Find my Flipper."
+        }
+        if let mine = radioProblem(radio, for: audience) { return mine }
+        // The radio is fine and the board is remembered, but the phone has stopped
+        // trying — so "wait for it" is the one answer that cannot come true. Asked
+        // AFTER the radio, because with Bluetooth off nobody can re-pair anything
+        // either and that has the one-tap fix.
+        if !dialling { return abandoned(board, for: audience) }
+        switch audience {
+        case .relayReply:
+            return "\(board) is paired with this phone but not connected right now — out of range, or powered off. The phone re-dials it on its own with a backoff, so it returns by itself once it is near; if it stays away, this phone stops offering the Flipper within a beat or two and you get a plain \"no route\" instead of this."
+        case .panelSheet:
+            return "Not connected — bring \(board) nearby, or tap Reconnect. It links again by itself once it is in range."
+        }
+    }
+
+    /// A board that is remembered but no longer being dialled: the pairing did not
+    /// hold, and only a person standing at this phone can start it again.
+    ///
+    /// Its own function rather than a second `switch audience` inside `outage`, for
+    /// the same reason `radioProblem` is one: two switches on the same enum in one
+    /// body make every slice of "the .relayReply arm" ambiguous — to a reader and to
+    /// the tests, which cut these arms by label.
+    ///
+    /// ⚠️ Names Reconnect and the 6-digit code, and NOT the Flipper's own
+    /// Settings → Bluetooth. This state is reached with a board the user still
+    /// believes is theirs, and that screen is one row above "Forget all paired
+    /// devices" — which would take their laptop and the official app with it. The
+    /// pairing prompt is the whole remedy: iOS raises it again on the next subscribe.
+    private static func abandoned(_ board: String, for audience: ReadAudience) -> String {
+        switch audience {
+        case .relayReply:
+            return "\(board) is remembered by this phone, but the Bluetooth pairing did not hold — a declined prompt, a mistyped code, or the board no longer recognising this phone. The phone has deliberately stopped re-dialling it (retrying would re-raise the pairing prompt every few seconds), so waiting will not bring it back: somebody has to open tiny on that phone and tap Reconnect on the Flipper row, then confirm the 6-digit code the board shows."
+        case .panelSheet:
+            return "Not connected — the pairing didn't hold, so this phone is no longer retrying. Tap Reconnect and confirm the 6-digit code the Flipper shows."
+        }
+    }
+
+    /// This PHONE's own radio, when IT is the reason — nil when the radio is fine
+    /// and the board is the story.
+    ///
+    /// `.resetting` and `.unknown` are transients, not verdicts: bluetoothd restarts
+    /// under us for half a second, and `.unknown` is simply the state before the
+    /// first callback. Blaming the user's radio over either would be a false
+    /// diagnosis in the one place a false diagnosis costs a pairing.
+    private static func radioProblem(_ radio: CBManagerState,
+                                     for audience: ReadAudience) -> String? {
+        switch (radio, audience) {
+        case (.poweredOff, .relayReply):
+            return "THIS PHONE's Bluetooth is switched off, so nothing running on it can reach the Flipper — that is the phone's radio, not the board's, and the board is probably fine. It goes back on from the phone itself, in Control Centre or Settings; ask again after that."
+        case (.poweredOff, .panelSheet):
+            return "Not connected — this phone's Bluetooth is off, so nothing can reconnect until it is back on."
+        case (.unauthorized, .relayReply):
+            return "This phone has not allowed the tiny app to use Bluetooth, so it cannot reach the Flipper at all. That is granted on the phone, in Settings → tiny → Bluetooth; ask again after that."
+        case (.unauthorized, .panelSheet):
+            return "Not connected — tiny hasn't been allowed to use this phone's Bluetooth. Settings → tiny → Bluetooth."
+        case (.unsupported, .relayReply):
+            return "This phone has no Bluetooth LE radio the app can use, so it can never hold the Flipper over Bluetooth — the USB cable route is the only one left."
+        case (.unsupported, .panelSheet):
+            return "Not connected — this phone has no Bluetooth LE radio the app can use."
+        default:
+            return nil
+        }
+    }
+
+    /// `outage(radio:unit:dialling:for:)` bound to this gateway's live state. Every
+    /// surface that has to explain an unreachable board calls this and nothing else.
+    func outageLine(for audience: ReadAudience) -> String {
+        Self.outage(radio: radio, unit: unit?.name, dialling: wanted, for: audience)
+    }
+
+    /// Where THIS phone stands as the SECOND route to the Flipper.
+    ///
+    /// Only ever read to finish a sentence about the FIRST one being unreachable,
+    /// so the cases are about what the phone can do for a reader who has just been
+    /// told to go and wake a laptop.
+    enum LocalRoute {
+        /// Holding the board right now. Waking anything is optional.
+        case holding
+        /// A pairing exists but the board is not connected. WHICH of the six
+        /// reasons applies belongs to the row that owns the link
+        /// (`outageLine(for: .panelSheet)` says all of them), so this arm states
+        /// the route is not the way in and sends the reader there.
+        case notReaching
+        /// No pairing yet, and a radio that could make one: one tap away.
+        case offerable
+        /// No pairing, and this phone's Bluetooth cannot make one — so the cable
+        /// really is the only route, and offering a tap that cannot work would be
+        /// worse than saying nothing.
+        case noRadio
+    }
+
+    /// What this phone can do about a Flipper whose CABLE HOST is asleep — the
+    /// clause that finishes `FlipperDevicePanel`'s "wake that machine" line.
+    ///
+    /// ⚠️ THE FIND: that panel is the surface this whole feature was built to
+    /// obsolete, and it had never heard of the second route. Its asleep branch
+    /// renders on a device row that still declares `flipper` (capabilities survive
+    /// an offline period — it is the same state the backend's own `!host.online`
+    /// arm exists for), and it answered with one remedy: *"wake that machine to
+    /// reach the Flipper."* Meanwhile this phone can be holding that very board
+    /// over Bluetooth, one row down, with `flipper_status` answering through it —
+    /// so the app told the user to go and wake a laptop for a board in their
+    /// pocket, and the agent and the panel disagreed about the same hardware.
+    ///
+    /// `lib/chat/tools/flipper.ts` already had exactly this clause for the agent
+    /// (`aboutTheOtherRoute`, three arms, appended to the same refusal) — hazard
+    /// 26(c): when a sibling rail has already worded a state, mirror it rather
+    /// than invent a second vocabulary. This is that clause for the person holding
+    /// the phone, so "capturing IR, Sub-GHz, RFID or iButton" is deliberately the
+    /// backend's own list of what the cable is still for.
+    ///
+    /// ONE reader, so no `ReadAudience`: the relay's copy of this fact is the
+    /// backend's, and no relay answer is ever built from a cable host's presence.
+    /// Adding an audience here would be inventing a second reader (hazard 22).
+    ///
+    /// ⚠️ Every arm leads with a space — it is appended to a finished sentence,
+    /// not returned on its own — and no arm names the Flipper's own
+    /// Settings → Bluetooth screen, one row above "Forget all paired devices"
+    /// (hazard 4). The radio it can talk about is THIS PHONE's.
+    static func otherRoute(_ route: LocalRoute) -> String {
+        switch route {
+        case .holding:
+            return " This phone is holding the Flipper over Bluetooth right now, though — tap Refresh on this phone's own row for its status. That machine is only needed for capturing IR, Sub-GHz, RFID or iButton, which Bluetooth cannot do."
+        case .notReaching:
+            return " The Bluetooth link on this phone isn't reaching it either — this phone's own Flipper row says why."
+        case .offerable:
+            return " Or skip the cable: this phone can hold the Flipper over Bluetooth — tap Find my Flipper on this phone's own row."
+        case .noRadio:
+            return " This phone could hold the Flipper over Bluetooth instead, but its own Bluetooth isn't available, so that machine is the way in for now."
+        }
+    }
+
+    /// The live facts, in the order that decides which one is the story: a link
+    /// that is up outranks everything, a pairing outranks the radio (the row it
+    /// points at diagnoses the radio itself), and only a phone with no pairing AND
+    /// no usable radio has nothing to offer.
+    ///
+    /// ⚠️ `linked`, `unit` and `radio` are all `@Published` — a sentence built from
+    /// a plain `private var` cannot move the row when the user switches Bluetooth
+    /// on (hazard 30(b), which cost `radio` its own fix).
+    var localRoute: LocalRoute {
+        if linked { return .holding }
+        if unit != nil { return .notReaching }
+        return radio == .poweredOn ? .offerable : .noRadio
+    }
+
+    /// `otherRoute(_:)` bound to this gateway's live state.
+    func otherRouteClause() -> String { Self.otherRoute(localRoute) }
+
     /// The one-line answer for `flipper_status` when the phone is the host.
     /// Names the transport, because "over Bluetooth from this phone" is the
     /// difference between a Flipper in the user's pocket and one on a desk.
@@ -1531,21 +2427,67 @@ final class FlipperGateway: NSObject, ObservableObject, @unchecked Sendable {
     /// moment an app opens on its screen. Every read then fails, `refresh()`
     /// keeps the last good `info`, and a line built from it states a remembered
     /// battery level in the present tense. The board can be flat, or not there.
+    ///
+    /// ⚠️ The cause comes from the READING — each read's own `FlipperReadOutcome` —
+    /// never from this method, and never from one error stood in for all three. Guessing
+    /// "something may be open on its screen" was right for one cause out of six and
+    /// pointed the reader at the board's own screen for all of them — including the
+    /// two that mean the opposite (this phone's radio went away, or the reader
+    /// walked out of range), where the board is the one thing they cannot reach.
+    /// `.status(17)` is what an open app actually looks like, and the board says it
+    /// in those words itself.
+    ///
+    /// ⚠️ And BOTH arms that quote a `summary` have to say what is not in it, not
+    /// just the fresh one. A reading is stored the moment it learns anything, so the
+    /// line this method remembers may itself be two of three — and the arm that hands
+    /// it over calls it "the last reading that worked", which reads as a whole one.
+    /// c33 gave the fresh arm its clause and the panel row its live frame; the
+    /// remembered line was the third renderer of the same conditional `summary`, and
+    /// the only one with nothing beside it. **Count the renderers of the VALUE, not
+    /// the callers of the disclosure.**
     func statusLine() async -> String {
         let name = unit?.name ?? "Flipper"
-        guard linked else {
-            return unit == nil
-                ? "No Flipper is paired with this phone."
-                : "\(name) is paired but not connected right now — it's out of range or powered off."
+        // Unreachable as things stand — `handleFlipperEnvelope` guards `fg.linked`
+        // before it dispatches, and that is this method's only caller. Kept, and
+        // routed through the shared sentence anyway: an arm that answers the same
+        // question in its own words is how the divergence this replaces got in.
+        guard linked else { return outageLine(for: .relayReply) }
+        let reading = await refresh(within: Self.relayStatusBudgetS)
+        if reading.didLearn, let i = info {
+            // ⚠️ The clause, not another sentence here. A reading that came back
+            // without its battery is still a reading taken just now — what it is not
+            // is the answer to the question that was asked, and "🔋" simply not being
+            // in the line is not something a reader can notice.
+            return "\(name) — \(i.summary) (over Bluetooth from this phone, read just now)\(Self.gapClause(reading, for: .relayReply))"
         }
-        let fresh = await refresh(within: Self.relayStatusBudgetS)
-        if fresh, let i = info {
-            return "\(name) — \(i.summary) (over Bluetooth from this phone, read just now)"
-        }
+        // ⚠️ Asked AGAIN, after the await. `linked` was last true up to
+        // relayStatusBudgetS (20s) ago, and P5's acceptance run — pair it, unplug
+        // the cable, walk away, ask from web chat — spends those seconds walking out
+        // of range. The arm below used to open with "the Bluetooth link is up" in
+        // exactly the case where the link dropping IS the answer. A stale `linked`
+        // is hazard 30(b) read the other way round: the value moved, the sentence
+        // did not.
+        guard linked else { return outageLine(for: .relayReply) }
+        let why = Self.whyNoReading(reading, for: .relayReply)
         if let i = info, let at = infoAt {
-            return "\(name) — the Bluetooth link is up, but it didn't answer a status request just now; something may be open on its screen. This is the last reading that worked, \(Self.age(of: at)): \(i.summary)"
+            // ⚠️ `i.gaps` — the STORED reading's own values, and NOT
+            // `reading.missing`, which belongs to the attempt that just failed and
+            // is already spoken for by `why`. The line quoted after the colon is an
+            // OLDER reading, and the likeliest one to be sitting here came back with
+            // two of its three parts: `deviceInfoS` (25s) outlasts this rail's whole
+            // budget, so the read that stored it may never have asked for the battery
+            // or the SD card. "The last reading that worked" is then a claim about
+            // completeness that nothing in the sentence could refute, and a remembered
+            // half-line reads as a Flipper with a flat battery and no card.
+            //
+            // The panel row has been refuting it live off these same values since c33
+            // — this is the surface with no second line to put it on, so it carries
+            // the frame inline (hazard 21: one fact, and the surface that keeps quiet
+            // is the one that diverges).
+            let short = Self.missingLine(i.gaps).map { " \($0)" } ?? ""
+            return "\(name) — the Bluetooth link is still up, but no reading came back just now. \(why) This is the last reading that worked, \(Self.age(of: at)): \(i.summary)\(short)"
         }
-        return "\(name) — connected over Bluetooth, but it hasn't answered a status request yet. If an app is open on its screen, close it and ask again."
+        return "\(name) — connected over Bluetooth, but no reading has come back yet. \(why)"
     }
 }
 
@@ -1582,6 +2524,11 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
     /// inflating the backoff for the reconnect that will actually matter. The
     /// `.poweredOn` arm below is the wake-up, and it is immediate.
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        // Before the switch, so EVERY arm publishes it — including `.poweredOn`,
+        // which reports no error and would otherwise leave the panel and the relay
+        // still saying the radio is off after the user has turned it back on. This
+        // is the fact `outage(radio:unit:for:)` reads.
+        radio = central.state
         switch central.state {
         case .poweredOn:
             if unit != nil { connectIfPossible() }
@@ -1747,6 +2694,12 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
     /// Why a subscription failed, in the user's terms. Pairing is the likely
     /// cause and the only one they can act on, so it gets named explicitly instead
     /// of arriving as "The operation couldn't be completed."
+    ///
+    /// ⚠️ It said "Tap Pair again", and there is no Pair button — not on the panel
+    /// row this renders under (Reconnect / Unlink), not in the pairing sheet, where
+    /// the control is the board's own name in a list. `FlipperLinkProblem` puts this
+    /// sentence on all four Flipper surfaces, so the action it names has to be one
+    /// that exists on the one where the link is resumed.
     static func subscribeFailureText(_ error: Error) -> String {
         let pairing: String
         if let att = error as? CBATTError {
@@ -1762,7 +2715,7 @@ extension FlipperGateway: CBCentralManagerDelegate, CBPeripheralDelegate {
             pairing = ""
         }
         guard pairing.isEmpty else {
-            return "\(pairing), so the Flipper won't talk over Bluetooth. Tap Pair again and enter the 6-digit code the Flipper shows — if it shows none, turn Bluetooth off and on in the Flipper's own settings first."
+            return "\(pairing), so the Flipper won't talk over Bluetooth. Tap Reconnect and enter the 6-digit code the Flipper shows — if it shows none, turn Bluetooth off and on in the Flipper's own settings first."
         }
         return "Couldn't subscribe to the Flipper's serial service: \(error.localizedDescription)"
     }
