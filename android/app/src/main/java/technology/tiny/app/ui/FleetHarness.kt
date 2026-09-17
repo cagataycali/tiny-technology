@@ -6,8 +6,8 @@ package technology.tiny.app.ui
  * ## Why this exists
  *
  * `play-05-devices.png` was sitting in the Play upload tree rendering the user's real
- * device fleet BY HOSTNAME — `cagataycali-iphone`, `cagataycali-pixel (this phone)`,
- * `cagatay-mac`, `cagataycali-ipad`, `cagatay-cagatay`, `thor` — each with its
+ * device fleet BY HOSTNAME — six rows, one per device they own (both phones, both
+ * laptops, the tablet and a node), each carrying its own real name plus its
  * online/last-seen state and a `revoke` button. The same raw also fed two Instagram
  * carousel slides (`ig-p1-5-devices`, `ig-p4-3-node`) that no cycle had ever listed.
  *

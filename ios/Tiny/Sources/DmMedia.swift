@@ -76,7 +76,7 @@ let kDmClipMaxSeconds: TimeInterval = 30
 let kDmMaxTranscriptChars = kDmMaxChars
 
 /// contentType → kind. THIS IS THE ALLOWLIST, and it is the media store's own
-/// (`EXT` in chatgpt-plugin-tinyai/src/media.ts) via
+/// (`EXT` in worker/src/media.ts) via
 /// `DM_ATTACHMENT_TYPES` — a type absent here is refused end to end.
 let kDmAttachmentTypes: [String: String] = [
     "image/jpeg": "image",

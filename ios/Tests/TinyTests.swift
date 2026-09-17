@@ -3414,7 +3414,7 @@ import SwiftUI
         // hand heartbeated 20s ago, the laptop 5s ago, so last_seen DESC put the
         // laptop first — in a list whose whole subject is "your devices".
         let phone = row("me", "owner-phone", online: true, seen: 1_000)
-        let laptop = row("mac", "cagatay-mac", online: true, seen: 2_000)
+        let laptop = row("mac", "studio-mac", online: true, seen: 2_000)
         let out = DeviceOrder.sorted([laptop, phone], myDeviceId: "me")
         #expect(out.map(\.id) == ["me", "mac"])
     }
@@ -3497,7 +3497,7 @@ import SwiftUI
     @Test func noRowRepeatsTheSectionHeaderAboveIt() {
         let rows = [
             row("me", "owner-phone", online: true, seen: 5, platform: "ios-arm64"),
-            row("on", "cagatay-mac", online: true, seen: 4),
+            row("on", "studio-mac", online: true, seen: 4),
             row("un", "bambu-p1s", online: nil, seen: nil, kind: "endpoint", platform: ""),
             row("off", "necklace", online: false, seen: 3, platform: "nicla-voice"),
         ]
@@ -3518,7 +3518,7 @@ import SwiftUI
                                 online: nil, lastSeen: nil,
                                 url: "https://p1s.ada.tiny.technology")
         #expect(DeviceOrder.rowLine(printer, isThisPhone: false) == "p1s.ada.tiny.technology")
-        let mac = row("m", "cagatay-mac", online: true, seen: 4)
+        let mac = row("m", "studio-mac", online: true, seen: 4)
         #expect(DeviceOrder.rowLine(mac, isThisPhone: false) == "Mac")
     }
 
@@ -3814,10 +3814,10 @@ import SwiftUI
     @Test func anOfflineRowSpeaksItsLastSeenNotTheWordOffline() {
         // The whole reason `DevicePresence.label` takes a date: "3 minutes ago"
         // and "in March" are both "offline" otherwise.
-        let old = row("cagatay-mac", "darwin-arm64", online: false, seen: 1_000,
+        let old = row("studio-mac", "darwin-arm64", online: false, seen: 1_000,
                       caps: ["flipper"])
         let spoken = DeviceOrder.spokenLabel(old, isThisPhone: false)
-        #expect(spoken.hasPrefix("cagatay-mac, Mac, seen "))
+        #expect(spoken.hasPrefix("studio-mac, Mac, seen "))
         #expect(spoken.hasSuffix(", can Flipper Zero"))
         #expect(!spoken.contains("offline"))
     }
@@ -3827,7 +3827,7 @@ import SwiftUI
         // a spoken row has no width, so all of them are read; and the raw tokens
         // must not be, or VoiceOver is the surface saying "bluetooth underscore
         // scan" out loud.
-        let node = row("cagatay-mac", "darwin-arm64",
+        let node = row("studio-mac", "darwin-arm64",
                        caps: ["mcp", "files", "shell", "flipper", "adb", "browse",
                               "bluetooth_scan"])
         let spoken = DeviceOrder.spokenLabel(node, isThisPhone: false)
@@ -3915,7 +3915,7 @@ import SwiftUI
     }
 
     @Test func theCapIsTheWorkersCap() {
-        // MAX_DEVICES_PER_USER in chatgpt-plugin-tinyai/src/devices.ts. A number
+        // MAX_DEVICES_PER_USER in worker/src/devices.ts. A number
         // this screen invented would be a promise no server keeps.
         #expect(DevicesFooter.cap == 20)
     }

@@ -146,7 +146,7 @@ internal const val DM_MAX_TRANSCRIPT_CHARS = DM_MAX_CHARS
 
 /**
  * contentType → kind. THIS IS THE ALLOWLIST, and it is the media store's own
- * (`EXT` in chatgpt-plugin-tinyai/src/media.ts) via `DM_ATTACHMENT_TYPES` — a
+ * (`EXT` in worker/src/media.ts) via `DM_ATTACHMENT_TYPES` — a
  * type absent here is refused end to end. Note `video/mp4` only, and no
  * `image/heic`: the picker hands out plenty this does not list, and each of those
  * is CONVERTED before upload or refused with the reason.

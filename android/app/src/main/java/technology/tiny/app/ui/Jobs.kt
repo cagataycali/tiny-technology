@@ -64,7 +64,7 @@ internal fun runStamp(started: String, nowMs: Long): String =
  *
  * 🔑 `!enabled` is NOT evidence that a job ran. The scheduler clears the flag
  * from two places and only one of them is a run (verified against the CURRENT
- * `chatgpt-plugin-tinyai/src/scheduler.ts`, since the line numbers the web and
+ * `worker/src/scheduler.ts`, since the line numbers the web and
  * iOS quote have both moved since):
  *
  *   • after a successful fire — `UPDATE jobs SET enabled = 0` (:239), preceded

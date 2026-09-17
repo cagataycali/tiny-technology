@@ -121,7 +121,7 @@ final class GlassesRecorder: ObservableObject {
     /// has to close), but uploading is not — and the START call was already
     /// answered, so at park time nobody has asked for these bytes. Uploading
     /// then meant a clip nobody ever collected sat in R2 forever: the worker has
-    /// `MEDIA.put/head/get` and **no delete** (`chatgpt-plugin-tinyai/src/media.ts`),
+    /// `MEDIA.put/head/get` and **no delete** (`worker/src/media.ts`),
     /// so there was no reclaim path even in principle. Now the bytes go up when
     /// (and only when) the second call collects them.
     /// `failure` is a finalize that produced nothing worth uploading — parked so

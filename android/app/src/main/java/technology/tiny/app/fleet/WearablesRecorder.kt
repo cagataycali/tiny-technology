@@ -68,7 +68,7 @@ object GlassesRecorderBridge {
      * has to close), but uploading is not — and the START call was already
      * answered, so at park time nobody has asked for these bytes. Uploading
      * then meant a clip nobody collected sat in R2 forever: the worker has
-     * MEDIA.put/head/get and **no delete** (chatgpt-plugin-tinyai/src/media.ts),
+     * MEDIA.put/head/get and **no delete** (worker/src/media.ts),
      * so there was no reclaim path even in principle.
      */
     sealed class Parked {

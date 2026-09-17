@@ -533,7 +533,7 @@ object WearablesBridge {
      *
      * ⚠️ Which is not cosmetic: the upload is base64 inside a JSON body and
      * `/media/upload` gates at 6MB DECODED (MEDIA_MAX_BYTES in
-     * `chatgpt-plugin-tinyai/src/media.ts`), answering 400 `data must be valid
+     * `worker/src/media.ts`), answering 400 `data must be valid
      * base64 ≤6MB` — a string [photoPayload] then hands the user verbatim as
      * the reason their photo failed. iOS never reaches that gate because it
      * caps first, and neither does any other Android image rail

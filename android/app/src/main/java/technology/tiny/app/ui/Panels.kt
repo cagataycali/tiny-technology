@@ -504,7 +504,7 @@ internal fun presenceLine(d: DeviceRow, nowSec: Long): String {
  * when it may not?
  *
  * The worker's own definition of a dial-in device answers it. `PULL_KINDS`
- * (chatgpt-plugin-tinyai/src/devices.ts) is documented as the kinds that "hold a
+ * (worker/src/devices.ts) is documented as the kinds that "hold a
  * `tind_` token, heartbeat, poll the relay" — one loop, both jobs. A device
  * outside the 60s `PRESENCE_WINDOW_S` is therefore not reading the relay either,
  * so an invoke posted to it can only wait out the caller's own poll budget.
@@ -568,7 +568,7 @@ internal fun presenceLine(d: DeviceRow, nowSec: Long): String {
  *
  * It is REACHABLE, not theoretical, and the chain is worth keeping written down:
  * the worker answers `404 {error:"peer not found"}` for a peer it can't resolve
- * (`chatgpt-plugin-tinyai/src/messages.ts:300`), and `/api/messages` forwards the
+ * (`worker/src/messages.ts:300`), and `/api/messages` forwards the
  * worker's status **verbatim** (`route.ts:34` — `new Response(await res.text(),
  * { status: res.status })`, as do `/api/jobs:21` and `/api/graph:31`). So opening a
  * thread with a peer the worker no longer resolves says "that tiny doesn't exist"

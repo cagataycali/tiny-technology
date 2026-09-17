@@ -65,7 +65,7 @@ class GlassesPhotoEncodeTest {
     }
 
     @Test fun `the capped photo fits the worker's upload gate with room to spare`() {
-        // MEDIA_MAX_BYTES in chatgpt-plugin-tinyai/src/media.ts is 6MB decoded.
+        // MEDIA_MAX_BYTES in worker/src/media.ts is 6MB decoded.
         // A 1600-long-side JPEG at q80 lands in the low hundreds of KB; the
         // pin is the ceiling that makes that true — 1600×1600 pixels can't
         // exceed 6MB even at a pessimistic 1 byte per pixel, whereas the

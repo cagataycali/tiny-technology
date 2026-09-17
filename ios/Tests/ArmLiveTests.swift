@@ -43,7 +43,7 @@ import CoreGraphics
         let rows: [[String: Any]] = [
             ["id": "f4a8", "name": "3D printer", "kind": "endpoint", "platform": "bambu-x2d",
              "url": "https://printer.example", "capabilities": "[\"chat\",\"telemetry\",\"print\",\"cad\"]"],
-            ["id": "2b7f", "name": "cagatay-mac", "kind": "cli", "platform": "darwin-arm64", "capabilities": ["arm"]],
+            ["id": "2b7f", "name": "studio-mac", "kind": "cli", "platform": "darwin-arm64", "capabilities": ["arm"]],
             ["id": "70e1", "name": "fomo-the-arm", "kind": "endpoint", "platform": "strands-arm",
              "url": "https://arm.example/", "capabilities": "[\"chat\",\"telemetry\",\"camera\",\"arm\",\"look\"]"],
         ]

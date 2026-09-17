@@ -22,7 +22,7 @@ enum LoadState { case loading, loaded, failed(String) }
  *
  *  1. **The Toolbox invented its cap.** `"\(tools.count)/20 forged tools"` — and
  *     there is no cap of 20 anywhere. The worker's is `MAX_TOOLS = 10000`
- *     (chatgpt-plugin-tinyai/src/tools.ts:15) and its list query has no LIMIT, so
+ *     (worker/src/tools.ts:15) and its list query has no LIMIT, so
  *     the numerator was honest and the denominator was fiction. A user with 20
  *     forged tools reads "20/20" and stops forging. **A fabricated limit is worse
  *     than no limit: it is a rule the product appears to enforce and doesn't.**
@@ -145,7 +145,7 @@ enum Capacity {
  *  1. **`\(users.count) builders` is a PAGE LENGTH, printed beside a real
  *     total.** `CommunityFeed.url` asks `?limit=50`; the worker answers
  *     `totalUsers`, a plain `SELECT COUNT(*) FROM users`
- *     (chatgpt-plugin-tinyai/src/community.ts:114) — and `CommunityFeed.Feed`
+ *     (worker/src/community.ts:114) — and `CommunityFeed.Feed`
  *     never carried the field, so `statsLine` put a page length under the word
  *     "builders" immediately next to `totalPublicTinys`, which IS a COUNT(*).
  *     One line, two queries, one of them a page. Live worker right now:
@@ -1566,7 +1566,7 @@ private struct ToolboxRow: View {
 ///
 /// 🔑 `!enabled` is NOT evidence that a job ran. The scheduler clears the flag
 /// from two places and only one of them is a run (verified against the CURRENT
-/// `chatgpt-plugin-tinyai/src/scheduler.ts`, since its line numbers have moved
+/// `worker/src/scheduler.ts`, since its line numbers have moved
 /// since the web wrote this rule down):
 ///
 ///   • after a successful fire — `UPDATE jobs SET enabled = 0` (:238), preceded
@@ -3187,7 +3187,7 @@ enum DevicePresence {
 /// when it may not?
 ///
 /// The worker's own definition of a dial-in device answers it. `PULL_KINDS`
-/// (chatgpt-plugin-tinyai/src/devices.ts) is documented as the kinds that "hold a
+/// (worker/src/devices.ts) is documented as the kinds that "hold a
 /// `tind_` token, heartbeat, poll the relay" — one loop, both jobs. A device
 /// outside the 60s `PRESENCE_WINDOW_S` is therefore not reading the relay
 /// either, so an invoke posted to it can only wait out the caller's own poll
@@ -4919,7 +4919,7 @@ enum DevicesHarness {
 /// At the other end the two sentences contradicted each other: the count said
 /// the account was full while the line beneath it explained how to add another.
 /// The worker refuses that enrollment with "device limit reached (20) — revoke
-/// one first" (chatgpt-plugin-tinyai/src/devices.ts), so say the same thing here
+/// one first" (worker/src/devices.ts), so say the same thing here
 /// instead of instructions that can only end in that error.
 ///
 /// Pure, like `BleEmptyState` two rows down the same sheet: what a surface may

@@ -69,7 +69,7 @@ import Foundation
              "url": "https://fomo.example.com", "capabilities": "[\"chat\",\"telemetry\",\"camera\",\"arm\"]"],
             ["id": "dev_q", "name": "q-the-brain", "kind": "endpoint", "platform": "q-the-brain",
              "url": "https://q.example.com/", "capabilities": "[\"telemetry\",\"chat\",\"led\",\"mcu\",\"shell\"]"],
-            ["id": "dev_mac", "name": "cagatay-mac", "kind": "cli", "platform": "darwin-arm64"],
+            ["id": "dev_mac", "name": "studio-mac", "kind": "cli", "platform": "darwin-arm64"],
         ]
         let d = QBrainManager.pick(rows)
         #expect(d == QBrainDevice(id: "dev_q", name: "q-the-brain", url: "https://q.example.com"))

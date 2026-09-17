@@ -17,7 +17,7 @@ import org.junit.Test
  * and the biggest element on the sheet blamed the hardware that was working.
  *
  * The worker's own definition of a dial-in device settles it: PULL_KINDS
- * (chatgpt-plugin-tinyai/src/devices.ts) are the kinds that "hold a `tind_` token,
+ * (worker/src/devices.ts) are the kinds that "hold a `tind_` token,
  * heartbeat, poll the relay" — one loop, both jobs — so a device outside the 60s
  * PRESENCE_WINDOW_S is not reading the relay either.
  *

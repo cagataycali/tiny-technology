@@ -86,8 +86,8 @@ test('list: newest last_seen wins per duplicated name — older row is supersede
       '/api/devices': {
         ok: true,
         devices: [
-          { id: 'old', name: 'cagatay-iphone', kind: 'daemon', capabilities: '["chat"]', online: 0, last_seen: 100 },
-          { id: 'new', name: 'Cagatay-iPhone ', kind: 'daemon', capabilities: '["chat","screenshot"]', online: 1, last_seen: 200 },
+          { id: 'old', name: 'studio-iphone', kind: 'daemon', capabilities: '["chat"]', online: 0, last_seen: 100 },
+          { id: 'new', name: 'Studio-iPhone ', kind: 'daemon', capabilities: '["chat","screenshot"]', online: 1, last_seen: 200 },
           { id: 'solo', name: 'mac', kind: 'daemon', capabilities: '[]', online: 1, last_seen: 150 },
         ],
       },

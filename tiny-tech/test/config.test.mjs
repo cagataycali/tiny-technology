@@ -30,7 +30,7 @@ test('normalizeApiUrl: scheme added, path dropped, http only for local hosts', (
   assert.equal(cfg.normalizeApiUrl('my-tiny.vercel.app/devices'), 'https://my-tiny.vercel.app')
   assert.equal(cfg.normalizeApiUrl(' https://Example.COM/ '), 'https://example.com')
   assert.equal(cfg.normalizeApiUrl('http://localhost:3000'), 'http://localhost:3000')
-  assert.equal(cfg.normalizeApiUrl('http://192.168.1.5:8097'), 'http://192.168.1.5:8097')
+  assert.equal(cfg.normalizeApiUrl('http://192.168.0.20:8097'), 'http://192.168.0.20:8097')
   assert.throws(() => cfg.normalizeApiUrl('http://example.com'), /plain http/)
   assert.throws(() => cfg.normalizeApiUrl(''), /empty/)
   assert.throws(() => cfg.normalizeApiUrl('ftp://x'), /unsupported scheme/)
