@@ -16,9 +16,24 @@ repo_name: cagataycali/tiny-technology
 exclude_docs: |
   /*.md
   !/index.md
+  # The share cards' copy, for the checker that compares them with the pages
+  # (scripts/gen-og-cards.mjs) — a build input, not a page asset.
+  /assets/og/manifest.json
 
 extra_css:
   - stylesheets/extra.css
+  - stylesheets/landing.css
+  # The 3D/AR pendant on platform/devices.md. Class-scoped under .viewer, so a
+  # global stylesheet costs the other 20 pages nothing but a few hundred bytes —
+  # unlike its 956 KB runtime, which is loaded from that page's own markup and
+  # deliberately NOT from extra_javascript below.
+  - stylesheets/viewer.css
+
+# The mark on the landing page is a physics object, not an animation: seven peers
+# that pour when you tilt the phone. See the header of the file for why iOS makes
+# that ~300 lines instead of a CSS keyframe.
+extra_javascript:
+  - js/tiny-drop.js
 
 copyright: "tiny.technology — we're a software, together. 🤝"
 
@@ -57,14 +72,15 @@ nav:
       - Overview: business/index.md
       - How tiny is different: business/comparison.md
       - Pricing & economics: business/pricing.md
-      - Build a tiny — the creator's path: business/build-guide.md
-      - Integrate a tiny — the developer's path: business/integrate.md
-      - tiny for teams — the organization's path: business/enterprise.md
-      - Trust, security & sovereignty: business/trust.md
+      - Build a tiny: business/build-guide.md
+      - Integrate a tiny: business/integrate.md
+      - tiny for teams: business/enterprise.md
+      - Trust & sovereignty: business/trust.md
       - Roadmap: business/roadmap.md
   - Gallery: gallery/index.md
   - Developers:
       - Overview: developers/index.md
+      - Enroll a device: developers/enroll-a-device.md
       - Run a tiny node: developers/run-a-node.md
   - FAQ: faq/index.md
 
@@ -113,6 +129,11 @@ markdown_extensions:
       custom_checkbox: true
   - attr_list
   - md_in_html
+  # Without this, `:material-arrow-right:` renders as that literal text rather
+  # than an inline SVG — every icon shortcode on the site depends on it.
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
   - tables
   - def_list
   - footnotes

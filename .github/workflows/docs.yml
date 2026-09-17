@@ -62,10 +62,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # No `cache: pip`: setup-python's cache requires a requirements.txt or
+      # pyproject.toml in the tree and FAILS the job when it finds neither —
+      # which is exactly why every Docs run since Aug 4 went red before it
+      # reached mkdocs. Two wheels install in seconds; a cache buys nothing.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
 
       # Pinned deliberately: mkdocs-material's own maintainers have announced
       # that MkDocs 2.0 removes the plugin system and rewrites theming with no

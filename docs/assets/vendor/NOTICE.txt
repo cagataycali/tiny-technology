@@ -1,0 +1,21 @@
+model-viewer.min.js — <model-viewer> 4.0.0
+Copyright 2017 Google LLC
+SPDX-License-Identifier: BSD-3-Clause
+https://github.com/google/model-viewer  ·  https://modelviewer.dev
+
+VENDORED, NOT LOADED FROM A CDN, and that is a decision rather than a habit:
+
+· The docs are a static site with no build step of its own and no third-party
+  script anywhere else. One CDN tag would make every page load on this site
+  depend on a host nobody here controls, for a feature one page uses.
+· It is 956 KB — by far the heaviest thing published here. It is loaded from the
+  page that needs it (docs/platform/devices.md) with an ordinary relative
+  <script type="module">, NOT from mkdocs.yml's extra_javascript, which would put
+  it on all 21 pages including the ones that are three paragraphs of prose.
+· It comes byte-for-byte from ~/strands-nicla/docs/assets/vendor, where the same
+  runtime drives the necklace's own page and its checkers. Same bytes, same
+  version, one place to update.
+
+The BSD-3-Clause licence requires this notice and the copyright line above to
+travel with the copy, which is why this file sits beside it and is published with
+it rather than living in a repo-internal note.

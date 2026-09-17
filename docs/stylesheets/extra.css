@@ -1,33 +1,273 @@
-/* tiny brand — neon green on near-black (logo: #00FF88).
-   Material's palette.css sets link colors with double-attribute selectors
-   ([data-md-color-scheme][data-md-color-primary], specificity 0,2,0), so
-   single-attribute overrides lose no matter the load order — match it. */
+/*
+  tiny brand — the whole site, not just the landing.
+
+  The mark's palette is the source of truth: signal #00fd6f on void #040705.
+  Everything below either adopts those two, or gets out of the way.
+
+  Material's palette.css sets link colours with double-attribute selectors
+  ([data-md-color-scheme][data-md-color-primary], specificity 0,2,0), so a
+  single-attribute override loses no matter the load order — match it.
+*/
+
+/* Light mode does NOT get #00fd6f: on white it measures 1.4:1, which is a link
+   you cannot read. #007f45 is the same hue dropped to 4.6:1 (AA for body text);
+   the brighter tone is kept for hover/focus, where it sits on a tinted chip. */
 [data-md-color-scheme="default"][data-md-color-primary="white"] {
-  --md-accent-fg-color: #00b460;
-  --md-typeset-a-color: #00b460;
+  --md-accent-fg-color: #00a559;
+  --md-typeset-a-color: #007f45;
 }
 
 [data-md-color-scheme="slate"][data-md-color-primary="black"] {
-  --md-accent-fg-color: #00ff88;
-  --md-typeset-a-color: #00ff88;
-  --md-default-bg-color: #0a0d0b;
+  --md-accent-fg-color: #00fd6f;
+  --md-typeset-a-color: #00fd6f;
+  --md-default-bg-color: #080b09;
+  --md-code-bg-color: #0d120f;
 }
 
 [data-md-color-scheme="slate"] .md-header,
 [data-md-color-scheme="slate"] .md-tabs {
-  background-color: #020604;
+  background-color: #040705;
 }
 
-/* gallery frames — the SVGs are dark-native; keep them on brand-black in both schemes */
+::selection {
+  background: rgba(0, 253, 111, 0.28);
+}
+
+/* ── the mark in the header ───────────────────────────────────────────────── */
+
+/* The logo is an <img>, so its SMIL animation runs but no stylesheet reaches
+   inside it. The glow is therefore applied from out here, on the element. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  filter: drop-shadow(0 0 6px rgba(0, 253, 111, 0.45));
+  transition: filter 0.3s ease, transform 0.3s ease;
+}
+.md-header__button.md-logo:hover img,
+.md-header__button.md-logo:hover svg {
+  filter: drop-shadow(0 0 12px rgba(0, 253, 111, 0.75));
+  transform: scale(1.06);
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-header__button.md-logo img,
+  .md-header__button.md-logo svg {
+    transition: none;
+  }
+}
+
+/* ── the section eyebrow ─────────────────────────────────────────────────── */
+
+/* overrides/main.html prints the nav section above the h1. It is a sibling of
+   the <article>, not inside .md-typeset, so the horizontal margins have to match
+   .md-content__inner (0 .8rem, and 1.2rem on the wide breakpoints) by hand —
+   otherwise the label sits a few pixels left of the headline it labels. */
+.pagehead {
+  /* h1 carries `margin: 0 0 1.25em` and the article `padding-top: .6rem`, so the
+     label needs no negative pull — a negative bottom margin here lands it on top
+     of the headline. */
+  margin: 1.1rem 0.8rem 0;
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--md-accent-fg-color);
+}
+.pagehead::before {
+  content: "";
+  display: inline-block;
+  width: 0.34em;
+  height: 0.34em;
+  margin-right: 0.55em;
+  border-radius: 50%;
+  background: currentcolor;
+  vertical-align: middle;
+}
+@media screen and (min-width: 76.25em) {
+  .pagehead {
+    margin-left: 1.2rem;
+    margin-right: 1.2rem;
+  }
+}
+
+/* ── typography on the content pages ─────────────────────────────────────── */
+
+/* The first paragraph of a page is its promise. Sizing it up is the one change
+   that makes 20 pages read as designed without editing 20 pages. */
+.md-typeset h1 + p {
+  font-size: 0.94rem;
+  line-height: 1.72;
+  color: var(--md-default-fg-color--light);
+  max-width: 44rem;
+}
+
+/* Material's h1 is 300-weight and very light; these pages are dense technical
+   docs where the section you're in should be findable while scrolling fast. */
+.md-typeset h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--md-default-fg-color);
+}
+.md-typeset h2 {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 2.4em;
+  padding-top: 0.6em;
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+}
+.md-typeset h1 + h2 {
+  border-top: 0;
+  margin-top: 1.2em;
+  padding-top: 0;
+}
+.md-typeset h3 {
+  font-weight: 600;
+}
+
+/* A rule between sections should read as the brand, not as a scar. */
+.md-typeset hr {
+  border: 0;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    var(--md-accent-fg-color),
+    var(--md-default-fg-color--lightest) 45%,
+    transparent
+  );
+}
+
+/* ── tables ──────────────────────────────────────────────────────────────── */
+
+/* Half of this site's substance is in comparison tables (device kinds, status
+   codes, timeouts). Material's default is a plain bordered box; give the header
+   the mono/uppercase treatment so a table scans as data at a glance. */
+.md-typeset table:not([class]) {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--md-default-fg-color--lightest);
+}
+.md-typeset table:not([class]) th {
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: rgba(0, 253, 111, 0.07);
+  border-bottom: 1px solid rgba(0, 253, 111, 0.22);
+}
+.md-typeset table:not([class]) tr:hover > td {
+  background: rgba(0, 253, 111, 0.035);
+}
+
+/* ── code ────────────────────────────────────────────────────────────────── */
+
+.md-typeset pre > code {
+  border-radius: 10px;
+}
+.md-typeset .highlight {
+  border-radius: 10px;
+}
+[data-md-color-scheme="slate"] .md-typeset pre > code {
+  border: 1px solid rgba(0, 253, 111, 0.14);
+}
+
+/* ── admonitions ─────────────────────────────────────────────────────────── */
+
+/* Note/tip carry the product voice, so they take the brand colour. Warning and
+   danger deliberately keep Material's amber/red: the pages use them for things
+   that cost you a token or a device row, and those must not look like a tip. */
+.md-typeset .admonition,
+.md-typeset details {
+  border-width: 0 0 0 3px;
+  border-radius: 8px;
+  box-shadow: none;
+  background: var(--md-code-bg-color);
+}
+.md-typeset .admonition.note,
+.md-typeset .admonition.tip,
+.md-typeset details.note,
+.md-typeset details.tip {
+  border-left-color: var(--md-accent-fg-color);
+}
+.md-typeset .note > .admonition-title,
+.md-typeset .tip > .admonition-title,
+.md-typeset .note > summary,
+.md-typeset .tip > summary {
+  background: rgba(0, 253, 111, 0.09);
+}
+.md-typeset .note > .admonition-title::before,
+.md-typeset .note > summary::before,
+.md-typeset .tip > .admonition-title::before,
+.md-typeset .tip > summary::before {
+  background-color: var(--md-accent-fg-color);
+}
+
+/* ── buttons & nav ───────────────────────────────────────────────────────── */
+
+.md-typeset .md-button {
+  border-radius: 999px;
+  border-width: 1px;
+  font-weight: 600;
+  transition: background-color 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+}
+.md-nav__link--active,
+.md-nav__item--active > .md-nav__link {
+  font-weight: 700;
+}
+.md-footer-meta {
+  background: #040705;
+}
+
+/* ── gallery frames ──────────────────────────────────────────────────────── */
+
+/* The SVGs are dark-native; keep them on brand-black in both schemes. */
 .tiny-frame {
   margin: 0 0 1.2rem;
   border-radius: 10px;
   overflow: hidden;
-  background: #020604;
-  border: 1px solid rgba(0, 255, 136, 0.18);
+  background: #040705;
+  border: 1px solid rgba(0, 253, 111, 0.18);
 }
 .tiny-frame img,
 .tiny-frame video {
   display: block;
   width: 100%;
+}
+.md-typeset .tiny-frame > a {
+  display: block;   /* the whole plate is the hit target, not a text-sized line */
+}
+/* Material sets `width: fit-content` on every <figure>, so a plate would otherwise
+   size itself to its media's intrinsic width — 300px inside a 688px grid track for
+   a video, and 820px (an overflowing page) for the wider diagrams. */
+.md-typeset .tiny-frame {
+  width: auto;
+}
+
+/* A contact sheet, not a column: 16 diagrams stacked full-width was 8600px of
+   scroll. Two-up at reading width, and each plate opens the SVG full-size —
+   they're vector, so zooming in is the detail view. */
+.tiles {
+  display: grid;
+  /* 15rem, and the unit is the trap: Material sets the root font to 125%, so a
+     rem here is 20px, not 16. The content column is 688px at a 1280 desktop, so
+     anything above ~16.5rem quietly falls back to a single track — which is what
+     22rem and 18rem both did, at first-glance-plausible tile widths. */
+  grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr));
+  gap: 1rem;
+  margin: 1.1rem 0 1.4rem;
+}
+.md-typeset .tiles .tiny-frame {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+.md-typeset .tiles figcaption,
+.md-typeset .tiny-frame figcaption {
+  margin: 0;
+  padding: 0.5em 0.8em 0.6em;
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.66rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--md-accent-fg-color);
+  border-top: 1px solid rgba(0, 253, 111, 0.14);
+  text-align: left;
 }

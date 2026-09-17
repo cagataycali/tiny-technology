@@ -1,0 +1,550 @@
+/*
+  The landing. A docs theme that reads like a product page, without forking one.
+
+  Everything here is scoped to a class that only the homepage uses (.hero,
+  .band, .cards, …), so no other page in the site can be reshaped by it — and
+  the page keeps Material's header, search, palette toggle and nav for free.
+
+  Two structural notes:
+  · docs/index.md hides the sidebar and TOC (`hide: [navigation, toc]`), which
+    is what makes the full-bleed layout possible.
+  · The dark surfaces are pinned dark in BOTH palettes on purpose. The mark is
+    neon on near-black; rendering it on white would dim the one thing on the
+    page that is supposed to glow.
+*/
+
+:root {
+  --tiny-signal: #00fd6f;
+  --tiny-void: #040705;
+  --tiny-paper: #d8e6dd;
+  --tiny-mute: #4d6357;
+  --tiny-hair: rgba(0, 253, 111, 0.16);
+  --tiny-hair-strong: rgba(0, 253, 111, 0.34);
+}
+
+/* The content column is sized for prose. A landing needs the room the hidden
+   sidebar just freed — :has() so this can never leak onto a normal page, and
+   so a browser without it simply gets the ordinary width. */
+body:has(.hero) .md-main .md-grid {
+  max-width: 74rem;
+}
+body:has(.hero) .md-content__inner > :first-child {
+  margin-top: 0;
+}
+/* The hero headline IS the page's h1 — which is what stops Material injecting a
+   second one titled "Home". But that also means it gets a permalink ¶ on hover,
+   and a pilcrow floating beside a product headline reads as a glitch. */
+.md-typeset .hero__copy h1 .headerlink {
+  display: none;
+}
+
+/* ── hero ────────────────────────────────────────────────────────────────── */
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  align-items: center;
+  gap: clamp(1rem, 4vw, 3rem);
+  margin: 0.4rem 0 0;
+  padding: clamp(1.4rem, 4vw, 2.8rem);
+  border: 1px solid var(--tiny-hair);
+  border-radius: 18px;
+  background:
+    radial-gradient(120% 90% at 18% 30%, rgba(0, 253, 111, 0.13), transparent 62%),
+    radial-gradient(90% 120% at 100% 0%, rgba(0, 253, 111, 0.06), transparent 55%),
+    var(--tiny-void);
+  color: var(--tiny-paper);
+  overflow: hidden;
+}
+
+.hero__stage {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;   /* the caption belongs under the mark, not at the
+                              bottom of whatever height the copy column sets */
+  gap: 0.9rem;
+  color: var(--tiny-signal);          /* the blobs are fill: currentColor */
+  /* No touch-action override: a thumb landing on the mark must still scroll. */
+}
+
+.hero__stage .drop__svg {
+  width: min(62vw, 300px);
+  aspect-ratio: 1;
+  display: block;
+  filter: drop-shadow(0 0 26px rgba(0, 253, 111, 0.28));
+}
+
+.hero__sensor {
+  margin: 0;
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.66rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--tiny-mute);
+  min-height: 1.2em;
+  transition: color 0.4s ease;
+}
+.hero__sensor[data-live="yes"] {
+  color: var(--tiny-signal);
+}
+
+.hero__tilt {
+  font: inherit;
+  font-size: 0.74rem;
+  letter-spacing: 0.05em;
+  color: var(--tiny-void);
+  background: var(--tiny-signal);
+  border: 0;
+  border-radius: 999px;
+  padding: 0.6em 1.4em;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.hero__tilt:focus-visible {
+  outline: 2px solid var(--tiny-paper);
+  outline-offset: 3px;
+}
+.hero__tilt[hidden] {
+  display: none;
+}
+
+.hero__copy {
+  min-width: 0;
+}
+.md-typeset .hero__copy h1 {
+  font-size: clamp(1.9rem, 5.2vw, 3rem);
+  line-height: 1.06;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin: 0.1em 0 0.5em;
+  color: #fff;
+}
+.hero__copy p {
+  color: var(--tiny-paper);
+  font-size: 0.92rem;
+  line-height: 1.75;
+}
+.hero__copy strong {
+  color: var(--tiny-signal);
+  font-weight: 600;
+}
+/* The italic in the hero is the sentence you literally type into tiny, so it is
+   set as an input chip rather than as emphasis — an underline there reads as a
+   dead link, which is the one thing it must not look like. */
+.hero__copy em {
+  font-style: normal;
+  color: #eafff3;
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.86em;
+  background: rgba(0, 253, 111, 0.11);
+  border-radius: 6px;
+  padding: 0.12em 0.4em;
+  /* No border: on a phone this sentence wraps across three lines, and a bordered
+     inline box fragments into three separate-looking chips. */
+}
+.hero__copy .md-button {
+  margin: 0.5rem 0.4rem 0 0;
+  border-color: var(--tiny-hair-strong);
+  color: var(--tiny-signal);
+}
+.hero__copy .md-button--primary {
+  background: var(--tiny-signal);
+  border-color: var(--tiny-signal);
+  color: var(--tiny-void);
+}
+.hero__copy .md-button:hover {
+  background: var(--tiny-signal);
+  border-color: var(--tiny-signal);
+  color: var(--tiny-void);
+}
+
+.eyebrow {
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.68rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--tiny-mute);
+  margin: 0;
+}
+
+/* A caption for the mark, not a paragraph of the page: centred under the hero,
+   narrow, and quiet enough that the headline still wins. */
+.md-typeset .hero__hint {
+  margin: 1rem auto 0;
+  max-width: 44rem;
+  text-align: center;
+  font-size: 0.74rem;
+  line-height: 1.75;
+  color: var(--md-default-fg-color--light);
+}
+.hero__hint strong {
+  color: var(--md-default-fg-color);   /* accent here reads as a broken link */
+}
+
+@media screen and (max-width: 59.9em) {
+  .hero {
+    grid-template-columns: 1fr;
+    text-align: center;
+  }
+  /* Headline, eyebrow and buttons centre; the paragraphs do NOT. Centred body
+     copy with an inline code chip in it wraps into a ragged staircase. */
+  .md-typeset .hero__copy p:not(.eyebrow) {
+    text-align: left;
+  }
+  .md-typeset .hero__copy p:last-child {
+    text-align: center;
+  }
+  .hero__copy .md-button {
+    margin-inline: 0.2rem;
+  }
+}
+
+/* ── bands ───────────────────────────────────────────────────────────────── */
+
+.band {
+  padding: clamp(2rem, 5vw, 3.4rem) 0 clamp(1rem, 3vw, 2rem);
+  border-top: 1px solid var(--md-default-fg-color--lightest);
+}
+.band:first-of-type {
+  border-top: 0;
+}
+.band--tint {
+  border-radius: 16px;
+  padding-inline: clamp(1rem, 3vw, 2rem);
+  margin-top: 1.6rem;
+  background: linear-gradient(180deg, rgba(0, 253, 111, 0.045), transparent 70%);
+  border-top: 1px solid var(--tiny-hair);
+}
+.band--end {
+  text-align: center;
+  padding-bottom: 3rem;
+}
+
+.md-typeset .band > h2 {
+  font-size: clamp(1.35rem, 3.4vw, 2rem);
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  margin: 0 0 0.9rem;
+  /* The section rule that extra.css puts above every h2 is already drawn by the
+     band itself — keeping both draws two hairlines 20px apart. */
+  border-top: 0;
+  padding-top: 0;
+}
+.md-typeset .band > h2::before {
+  content: "";
+  display: inline-block;
+  width: 0.42em;
+  height: 0.42em;
+  margin-right: 0.5em;
+  border-radius: 50%;
+  background: var(--tiny-signal);
+  box-shadow: 0 0 12px rgba(0, 253, 111, 0.7);
+  vertical-align: middle;
+}
+.md-typeset .band > p {
+  max-width: 46rem;
+}
+
+/* ── the one-message proof ───────────────────────────────────────────────── */
+
+.wire {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0 0 1.2rem;
+  padding: clamp(0.9rem, 2.5vw, 1.4rem);
+  border: 1px solid var(--tiny-hair);
+  border-radius: 14px;
+  background: var(--tiny-void);
+}
+.md-typeset .wire__line {
+  margin: 0;
+  padding: 0.7em 1em;
+  border-radius: 13px;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  max-width: min(46ch, 88%);
+}
+.md-typeset .wire__line--you {
+  justify-self: end;
+  background: rgba(216, 230, 221, 0.08);
+  color: var(--tiny-paper);
+  border: 1px solid rgba(216, 230, 221, 0.14);
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.78rem;
+}
+.md-typeset .wire__line--tiny {
+  justify-self: start;
+  background: rgba(0, 253, 111, 0.1);
+  color: #eafff3;
+  border: 1px solid var(--tiny-hair-strong);
+}
+.md-typeset .wire__line--tiny b {
+  color: var(--tiny-signal);
+}
+
+/* ── cards ───────────────────────────────────────────────────────────────── */
+
+.cards {
+  display: grid;
+  /* min() inside minmax(), not a bare 15.5rem: an auto-fit track cannot shrink
+     below its minimum, so on a 320px phone the plain version pushes 26px of the
+     card off-screen and takes the whole document with it. */
+  grid-template-columns: repeat(auto-fit, minmax(min(15.5rem, 100%), 1fr));
+  gap: 0.9rem;
+  margin: 1.2rem 0 0;
+}
+.card {
+  position: relative;
+  padding: 1.1rem 1.15rem 1.15rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 14px;
+  background: var(--md-default-bg-color);
+  transition: border-color 0.25s ease, transform 0.25s ease, box-shadow 0.25s ease;
+}
+.card:hover {
+  border-color: var(--tiny-hair-strong);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px -18px rgba(0, 253, 111, 0.5);
+}
+/* A card title is `<p class="card__t">`, not an `<h3>`, on every page that shows
+   a table of contents: Material's toc walks the rendered tree, so four card
+   headings and two door headings would file themselves under whatever h2 came
+   last — the memory page's TOC listed "Why revision, not deletion" as a
+   subsection of "Local layers". The h3 selector stays for the landing, which
+   hides its toc and can afford real headings. */
+.md-typeset .card h3,
+.md-typeset .card p.card__t {   /* p.card__t, so it outranks `.md-typeset .card p` below */
+  margin: 0.1rem 0 0.4rem;
+  font-size: 1.02rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  color: var(--md-default-fg-color);
+}
+.md-typeset .card p {
+  margin: 0 0 0.35rem;
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: var(--md-default-fg-color--light);
+}
+.md-typeset .card__n {
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.68rem;
+  letter-spacing: 0.16em;
+  color: var(--md-accent-fg-color);
+}
+.md-typeset .card code {
+  font-size: 0.78em;
+}
+.card--quiet {
+  background: transparent;
+  border-style: dashed;
+}
+
+/* ── chips ───────────────────────────────────────────────────────────────── */
+
+/* `:not([hidden])` is not decoration — Material sets `display: flow-root` with
+   exactly that selector, so a plain `.md-typeset .chips` loses on specificity and
+   the pills stack as full-width rows. */
+.md-typeset ul.chips:not([hidden]) {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 1rem 0 1.2rem;
+  padding: 0;
+}
+.md-typeset ul.chips li {
+  display: block;   /* no list marker, and flex sizes it to its content */
+  margin: 0;
+  padding: 0.32em 0.8em;
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 999px;
+  color: var(--md-default-fg-color--light);
+}
+
+/* ── the "keep going" link ───────────────────────────────────────────────── */
+
+/* A card's closing link is a call to action, not the last clause of its
+   paragraph — trailing it inline reads as a footnote and gets skipped. It sits
+   in its own paragraph (a blank line before it in the markdown) and is sized
+   like a control. */
+.md-typeset .go {
+  display: inline-block;
+  margin-top: 0.15rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--md-accent-fg-color);
+}
+.md-typeset .go .twemoji,
+.md-typeset .go svg {
+  height: 0.95em;
+  vertical-align: -0.15em;
+  transition: transform 0.2s ease;
+}
+.md-typeset .go:hover .twemoji,
+.md-typeset .go:hover svg {
+  transform: translateX(3px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .md-typeset .go:hover .twemoji,
+  .md-typeset .go:hover svg {
+    transform: none;
+  }
+}
+
+/* A chip can also be a jump link (the FAQ's section index). It has to read as
+   clickable without turning the row into a stripe of underlined blue. */
+.md-typeset ul.chips li:has(a) {
+  padding: 0;
+  border-color: var(--tiny-hair-strong);
+}
+.md-typeset ul.chips li a {
+  display: block;
+  padding: 0.32em 0.8em;
+  color: var(--md-accent-fg-color);
+  text-decoration: none;
+  border-radius: 999px;
+}
+.md-typeset ul.chips li a:hover {
+  background: rgba(0, 253, 111, 0.12);
+}
+
+/* ── doors ───────────────────────────────────────────────────────────────── */
+
+.doors {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(17rem, 100%), 1fr));
+  gap: 1rem;
+  margin-top: 1.2rem;
+}
+/* Four doors, so 2×2 — auto-fit would give three and leave one alone on a row,
+   which reads as a fifth door that failed to load. */
+@media screen and (min-width: 60em) {
+  .doors {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.2rem;
+  }
+}
+.door {
+  padding: 1.15rem 1.2rem;
+  border-radius: 14px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-left: 2px solid var(--tiny-hair-strong);
+}
+.md-typeset .door h3,
+.md-typeset .door p.door__t {
+  margin: 0 0 0.35rem;
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--md-default-fg-color);
+}
+.md-typeset .door p {
+  margin: 0 0 0.3rem;
+  font-size: 0.82rem;
+  line-height: 1.65;
+  color: var(--md-default-fg-color--light);
+}
+
+/* ── the plain-speaking block ────────────────────────────────────────────── */
+
+.plain {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 1.1rem;
+}
+.plain__item {
+  padding: 0.2rem 0 0.2rem 1rem;
+  border-left: 2px solid var(--tiny-signal);
+}
+.md-typeset .plain__item {
+  font-size: 0.86rem;
+}
+.md-typeset .plain__item p {
+  margin: 0;
+  line-height: 1.7;
+  color: var(--md-default-fg-color--light);
+}
+.md-typeset .plain__item strong {
+  color: var(--md-default-fg-color);
+}
+@media screen and (min-width: 60em) {
+  /* Three columns is a landing measurement: the homepage hides its sidebar and
+     runs a 74rem grid. A content page has 688px, where three tracks are ~120px
+     wide and a two-line statement becomes an eight-line ribbon — so out here the
+     count is whatever fits, and the landing keeps its three below. */
+  .plain {
+    grid-template-columns: repeat(auto-fit, minmax(min(14rem, 100%), 1fr));
+    gap: 1.4rem;
+  }
+  body:has(.hero) .plain {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+/* ── the 404 ─────────────────────────────────────────────────────────────── */
+
+/* overrides/404.html. Everything below the mark is ordinary components — the
+   doors and .go are shared with every other page — so this is only the block that
+   introduces the page: a mark big enough to be the first thing seen, and copy
+   centred because a lost reader has no column to follow. */
+.md-typeset .lost {
+  max-width: 34rem;
+  margin: 1.2rem auto 0;
+  text-align: center;
+}
+.lost__mark {
+  width: 5.6rem;
+  height: 5.6rem;
+  border-radius: 22px;
+  /* logo.svg carries its own near-black plate, so the glow needs somewhere to
+     land — on white it would otherwise stop dead at the plate's edge. */
+  box-shadow: 0 0 44px rgba(0, 253, 111, 0.22);
+}
+.md-typeset p.lost__brow {
+  margin: 1rem 0 0.2rem;
+  font-family: var(--md-code-font-family, ui-monospace, monospace);
+  font-size: 0.7rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--md-accent-fg-color);
+}
+.md-typeset .lost h1 {
+  margin: 0 0 0.6rem;
+  font-size: 1.9rem;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.md-typeset p.lost__lede {
+  font-size: 0.92rem;
+  line-height: 1.7;
+  color: var(--md-default-fg-color--light);
+}
+/* The doors carry their own copy left-aligned; centring their paragraphs would
+   turn each one into a poster. Only the page's own text is centred. */
+.md-typeset .lost .doors {
+  text-align: left;
+}
+.md-typeset p.lost__foot {
+  margin-top: 1.4rem;
+  font-size: 0.8rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* ── motion ──────────────────────────────────────────────────────────────── */
+
+@media (prefers-reduced-motion: reduce) {
+  .card,
+  .hero__sensor {
+    transition: none;
+  }
+  .card:hover {
+    transform: none;
+  }
+}

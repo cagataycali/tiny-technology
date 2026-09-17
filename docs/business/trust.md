@@ -1,22 +1,27 @@
+---
+description: >-
+  The security answers in mechanism form — sandboxed tools, an SSRF guard, visible device traces, ledger invariants, and the edges we don't claim.
+---
+
 # Trust, security & sovereignty
 
-*How tiny.technology keeps you in control — the questions enterprises, security
-teams, and cautious builders ask before they join. Every claim here maps to a real
-mechanism in the codebase; nothing is aspirational. Companion to the
-[FAQ](../faq/index.md) (plain-language) and [Pricing & economics](pricing.md)
-(money mechanics).*
+The questions enterprises, security teams and cautious builders ask before they
+join — answered with mechanisms, not intentions. Every claim on this page maps to
+something in the codebase. Companion to the [FAQ](../faq/index.md) for plain
+language and [Pricing & economics](pricing.md) for the money side.
 
----
+<div class="cards" markdown="1">
 
-## The one-line version
-
-**Your tiny can never act on you invisibly, spend without your say-so, run
-agent-authored code on your device, or lock you to one vendor.** Those aren't
+<div class="card card--quiet" markdown="1">
+<p class="card__n">THE ONE-LINE VERSION</p>
+Your tiny can never **act on you invisibly**, **spend without your say-so**, **run
+agent-authored code on your device**, or **lock you to one vendor**. Those aren't
 policies — they're how the system is built.
+</div>
 
----
+</div>
 
-## 1. Agent code never runs where it could hurt you
+## 1 · Agent code never runs where it could hurt you
 
 An AI that writes code is only safe if that code can't reach past your turn.
 
@@ -30,7 +35,7 @@ An AI that writes code is only safe if that code can't reach past your turn.
   reach your internal network or cloud metadata endpoints, and can't escape its
   sandbox to touch the host.
 
-## 2. Every device action leaves a visible trace
+## 2 · Every device action leaves a visible trace
 
 Embodiment is the most powerful — and most abusable — attribute, so it's the most
 constrained.
@@ -43,7 +48,7 @@ constrained.
 - Scheduled jobs run with *your* toolset under *your* account — they are your
   standing instructions executing on time, not a third party reaching in.
 
-## 3. Money moves only on your explicit confirmation
+## 3 · Money moves only on your explicit confirmation
 
 The economy is real USDC on Base, so the guardrails are ledger-grade.
 
@@ -57,7 +62,7 @@ The economy is real USDC on Base, so the guardrails are ledger-grade.
 - The ledger is **append-only and idempotent by reference** — the same payment
   reference can't double-spend, and history is never rewritten.
 
-## 4. You own the tiny, the data, and the exit
+## 4 · You own the tiny, the data, and the exit
 
 - **Ownership is your GitHub login.** No separate account to lose; the identity you
   already trust is the key.
@@ -70,30 +75,77 @@ The economy is real USDC on Base, so the guardrails are ledger-grade.
 - **The code is open** at `github.com/cagataycali/tiny-technology` — the reference
   implementation is public, so the guarantees above are auditable, not asserted.
 
-## 5. Sovereign by design — for teams too
+## 5 · Sovereign by design — for teams too
 
-The same properties that protect an individual scale to an organization:
+The same properties that protect one person scale to an organization:
 
-- **A private universe.** A tiny per product or team, discoverable only inside your
-  own namespace — your society graph, your ledger, your memory, not the public one.
-- **White-label — "universe in a box."** Run the whole stack under your own brand
-  and infrastructure.
-- **Self-host the model path.** BYOK or on-device means sensitive prompts need
-  never leave hardware you control.
+<div class="cards" markdown="1">
+
+<div class="card" markdown="1">
+<p class="card__n">PRIVATE</p>
+<p class="card__t">Your own universe</p>
+A tiny per product or team, discoverable only inside your namespace — your society
+graph, your ledger, your memory. Not the public one.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">BRANDED</p>
+<p class="card__t">Universe in a box</p>
+Run the whole stack white-label, under your own brand and on your own
+infrastructure.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">CONTAINED</p>
+<p class="card__t">Self-host the model path</p>
+BYOK or on-device means sensitive prompts need never leave hardware you control.
+</div>
+
+</div>
 
 ## What we *don't* claim
 
-Honesty is part of trust.
+Honesty is part of trust. Three edges, stated plainly:
 
-- We don't train frontier models — tiny is **model-agnostic and BYOK**; the
-  intelligence is whichever provider (or on-device model) you point it at.
-- USDC custody and withdrawals carry a **regulatory surface**; the ledger
-  invariants are strong (idempotent references, never-auto-reverse-after-broadcast),
-  and a formal compliance review is on the roadmap, not yet done.
-- The free tier rides a **fail-open** rate limiter today (economically bounded by
-  spawn backstops); failing *closed* at scale is planned.
+<div class="plain" markdown="1">
+
+<div class="plain__item" markdown="1">
+**We don't train frontier models.** tiny is model-agnostic and BYOK — the
+intelligence is whichever provider, or on-device model, you point it at.
+</div>
+
+<div class="plain__item" markdown="1">
+**USDC custody carries a regulatory surface.** The ledger invariants are strong
+(idempotent references, never-auto-reverse-after-broadcast); a formal compliance
+review is on the roadmap, not yet done.
+</div>
+
+<div class="plain__item" markdown="1">
+**The free tier rides a fail-open rate limiter** today, economically bounded by
+spawn backstops. Failing *closed* at scale is planned.
+</div>
+
+</div>
 
 We'd rather tell you the edges than oversell the middle.
+
+<div class="doors" markdown="1">
+
+<div class="door" markdown="1">
+<p class="door__t">The money mechanics</p>
+Settle before serve, refund on empty, and the flat `$0.001` fee in full.
+
+[Pricing & economics :material-arrow-right:](pricing.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">For an organization</p>
+Private universes, white-label deployments and what a rollout looks like.
+
+[Enterprise :material-arrow-right:](enterprise.md){ .go }
+</div>
+
+</div>
 
 ---
 

@@ -1,0 +1,355 @@
+/*
+  The 3D/AR viewer, on one page: docs/platform/devices.md.
+
+  A tiny's body is the one claim on this site a reader cannot check by reading —
+  so that page carries the actual object: 271 KB of measured geometry you can spin
+  with a thumb, and 538 KB of USDZ that stands it on your desk at true 32 mm.
+  Ported from ~/strands-nicla/docs (assets/style.css, assets/app.js), where the
+  same runtime, the same GLB and the same hard-won details are held by two dozen
+  checkers. The comments that came with those details came with it.
+
+  Three things are specific to living inside mkdocs-material rather than in a
+  hand-written page:
+
+  · SCOPED UNDER .viewer. `.seg`, `.bar`, `.hotspot` are generic enough to collide
+    with something Material adds later; nothing here matches outside the block.
+  · THE STAGE IS DARK IN BOTH PALETTES, like the hero and the `.wire` on the
+    landing. The model is a black case with a neon inlay; on a white stage the one
+    thing meant to glow is the one thing that disappears.
+  · SIZED FOR A CONTENT COLUMN, not a full-bleed section. Material gives 688px at
+    1280 with the sidebar and toc up, so the height is capped by vh AND px — a
+    620px-tall canvas in a 688px column frames a 32 mm pendant like a portrait.
+*/
+
+/* ── the stage ───────────────────────────────────────────────────────────── */
+
+.md-typeset .viewer {
+  margin: 1.4rem 0 0;
+}
+
+.md-typeset .viewer model-viewer {
+  width: 100%;
+  height: min(58vh, 26rem);
+  min-height: 17rem;
+  display: block;
+  background:
+    radial-gradient(72% 62% at 50% 42%, #16211a 0%, #0a0e0b 58%, var(--tiny-void) 100%);
+  border: 1px solid var(--tiny-hair);
+  border-radius: 16px;
+  overflow: hidden;
+  /* The model IS the interactive surface: a drag on it must not scroll the page.
+     The landing's mark deliberately does the opposite (a thumb there has to be
+     able to scroll past the hero) — the difference is that this element is the
+     only thing on the page you are meant to grab. */
+  touch-action: none;
+  --poster-color: transparent;
+  --progress-bar-color: var(--tiny-signal);
+}
+.md-typeset .viewer model-viewer:focus-visible {
+  outline: 2px solid var(--tiny-signal);
+  outline-offset: 3px;
+}
+
+/* Until the 956 KB module lands, <model-viewer> is an unknown element and its
+   children render as ordinary flow content. `.ar-btn` and `.bar` are absolute
+   with no positioned ancestor, so on slow 4G a live "View in your room" button
+   sat over the page for seven seconds and the hotspots each took 36px of flow.
+   Measured with the element still undefined, which is why no screenshot taken
+   after load could show it. :defined exists for this. */
+.viewer model-viewer:not(:defined) > * {
+  display: none;
+}
+
+/* ── the controls under it ───────────────────────────────────────────────── */
+
+.viewer__bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.8rem;
+}
+/* The selection is ONE PILL that slides between items and morphs to the width of
+   the label it lands on, the way a native segmented control does. Three things
+   follow from that, and each of them is a bug that was in here first:
+
+   · CSS cannot place it alone. "Assembled" and "Camera" are different widths, so
+     there is no fixed step to translate by — tiny-viewer.js measures the chosen
+     button and writes `--thumb-x` / `--thumb-w`. `overflow: hidden` is gone with
+     the old solid fill: the pill is inset by the 3px track padding instead, so
+     there is nothing to clip.
+   · NO JAVASCRIPT, NO PILL. `data-thumb` is only ever set by a measurement, so
+     `:not([data-thumb])` keeps the plain neon fill for a reader whose JS never
+     ran. A selection that is visible only when a script works is worse than no
+     pill at all.
+   · The transition lives on `[data-thumb]::before` and `opacity` is deliberately
+     NOT in it — opacity is the one property that legitimately changes on the first
+     placement. Every other property has to be allowed to change silently too,
+     whenever the move is not a selection: tiny-viewer.js holds `data-quiet` (below)
+     across a style resolution for that. Without it the pill glides in from the left
+     edge of the track on every page load, because CSS compares the before-change
+     style with the after-change style rather than the order of two mutations inside
+     one task. */
+.viewer .seg {
+  position: relative;
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 12px;
+}
+.viewer .seg::before {
+  content: "";
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 0;
+  width: var(--thumb-w, 0);
+  transform: translate3d(var(--thumb-x, 0), 0, 0);
+  border-radius: 9px;
+  background: var(--tiny-signal);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  opacity: 0;
+  pointer-events: none;
+}
+.viewer .seg[data-thumb]::before {
+  opacity: 1;
+}
+/* Reduced motion means the pill JUMPS to the new item, not that it glides more
+   slowly. Same duration and curve as the landing mark's entrance. */
+@media (prefers-reduced-motion: no-preference) {
+  .viewer .seg[data-thumb]::before {
+    transition:
+      transform 380ms cubic-bezier(0.22, 1, 0.36, 1),
+      width 380ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+}
+/* And a re-measure that nobody asked for jumps as well. tiny-viewer.js re-places the
+   pill on a resize, a rotation, and when the webfont lands — none of which is a
+   selection, and the last of which arrives seconds late on a slow connection: with
+   the font held 2.5s, the label went 107.03px → 104.20px and the pill visibly morphed
+   to match, 2.7s in. `data-quiet` is held across one style resolution so the new
+   geometry is adopted with the transition off.
+
+   AFTER the media query on purpose, not inside it. Both selectors are (0,3,1), so
+   order is the only thing that decides, and this must win in the case that has a
+   transition to suppress — which is precisely no-preference. */
+.viewer .seg[data-quiet]::before {
+  transition: none;
+}
+.viewer .seg button {
+  position: relative;
+  z-index: 1;                 /* above the pill, which is a ::before on the group */
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  color: var(--md-default-fg-color--light);
+  font: 500 0.76rem/1.2 var(--md-text-font-family, sans-serif);
+  padding: 0.55em 0.9em;
+  border-radius: 9px;
+  border-right: 1px solid var(--md-default-fg-color--lightest);
+  -webkit-tap-highlight-color: transparent;
+  transition: color 0.18s ease, border-color 0.18s ease;
+}
+.viewer .seg button:last-child {
+  border-right: 0;
+}
+/* The separators either side of the selection go, the way iOS hides the two beside
+   its thumb: a hairline running into the pill reads as a seam across it. */
+.viewer .seg button.on,
+.viewer .seg button:has(+ button.on) {
+  border-right-color: transparent;
+}
+/* Selection follows focus inside a radiogroup, so the pill is already under the
+   focused item and a ring drawn on the button would sit on top of it. Draw the
+   ring around the whole group instead — one strip, one Tab stop, one outline. */
+.viewer .seg button:focus-visible {
+  outline: none;
+}
+.viewer .seg:has(button:focus-visible) {
+  outline: 2px solid var(--tiny-signal);
+  outline-offset: 2px;
+}
+/* Gated, and excluding the selected one. `:hover:not(:disabled)` is one
+   specificity step above `.on` (0,3,1 against 0,2,1), so it won — the button you
+   had just pressed lost its green fill while the pointer still sat on it, i.e.
+   the selected view rendered as unselected in the one moment you were looking at
+   it. Caught in a screenshot: "Logo" was the live view and read as inactive. The
+   @media is the same iOS sticky-hover problem the hotspot tips have below: a tap
+   leaves the button hovered, so ungated this would persist after your finger
+   left. */
+@media (hover: hover) and (pointer: fine) {
+  .viewer .seg button:hover:not(:disabled):not(.on) {
+    color: var(--md-default-fg-color);
+    background: var(--md-default-fg-color--lightest);
+  }
+}
+/* Dark ink on the neon pill — and NO font-weight step. Bolding the selection
+   reflows every label beside it, which on a native control never happens, and here
+   it also means the pill is chasing a target that shifts underneath it mid-glide.
+   Dark-on-neon carries far more contrast than a weight change ever did. */
+.viewer .seg button.on {
+  color: #001a0d;
+}
+/* The fallback fill, for the reader whose JS never ran and who therefore has no
+   pill. Scoped to `:not([data-thumb])` so it is not painted UNDER the pill as well. */
+.viewer .seg:not([data-thumb]) button.on {
+  background: var(--tiny-signal);
+}
+/* A control that cannot work yet must not look pressable: tiny-viewer.js disables
+   the bar until <model-viewer> upgrades. Pressing "Exploded" before the module
+   arrived moved the highlight and nothing else — a UI asserting a view change
+   that had not happened, for seven seconds on slow 4G.
+   Fading the selected BUTTON is not enough once there is a pill: a 0.4 label over
+   a full-strength neon pill still reads as live. The pill itself goes quiet. */
+.viewer .seg button:disabled {
+  cursor: default;
+}
+.viewer .seg button:disabled:not(.on) {
+  opacity: 0.4;
+}
+.viewer .seg:not([data-thumb]) button:disabled.on {
+  background: var(--md-default-fg-color--lightest);
+  color: var(--md-default-fg-color--light);
+}
+.viewer .seg[data-thumb] button:disabled.on {
+  color: var(--md-default-fg-color--light);
+}
+.viewer .seg[data-thumb]:has(button.on:disabled)::before {
+  background: var(--md-default-fg-color--lightest);
+  box-shadow: none;
+}
+.md-typeset p.viewer__note {
+  flex-basis: 100%;
+  text-align: center;
+  margin: 0.3rem 0 0;
+  font-size: 0.76rem;
+  line-height: 1.6;
+  color: var(--md-default-fg-color--light);
+}
+
+/* ── inside the canvas ───────────────────────────────────────────────────── */
+
+.viewer .ar-btn {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45em;
+  white-space: nowrap;
+  padding: 0.62em 1.1em;
+  border: 0;
+  border-radius: 999px;
+  background: var(--tiny-signal);
+  color: #001a0d;
+  font: 600 0.8rem/1 var(--md-text-font-family, sans-serif);
+  cursor: pointer;
+  box-shadow: 0 6px 26px rgba(0, 253, 111, 0.3);
+  -webkit-tap-highlight-color: transparent;
+}
+.viewer .ar-btn svg {
+  fill: currentColor;
+}
+.viewer .ar-btn:hover {
+  background: #4dffab;
+}
+
+.viewer .bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.07);
+}
+.viewer .bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--tiny-signal);
+  transition: width 0.2s;
+}
+.viewer .bar[hidden] {
+  display: none;
+}
+
+/* The pan indicator, ours instead of model-viewer's, purely so it cannot be
+   pressed: its own `.slot.pan-target` dot is an 8×8 hit target at the exact
+   centre of the canvas that swallows any drag starting there — neither rotate nor
+   pan, on the one element this block exists for. Kept visually identical to the
+   built-in one: 6px, white hairline, dark halo so it reads on a light model. */
+.viewer .pan-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px solid #fff;
+  box-shadow: 0 0 2px 1px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+}
+
+/* Annotations pinned to real coordinates on the model — the positions come out of
+   the same measured board geometry the case is cut from, not off a screenshot. */
+.viewer .hotspot {
+  /* The dot is 14px because a bigger one hides the feature it points at, but a
+     14px tap target on glass is a miss waiting to happen. The button is 36px and
+     mostly transparent: aim area and dot are deliberately different sizes. */
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+}
+.viewer .hotspot:not([data-visible]) {
+  opacity: 0;
+  pointer-events: none;
+}
+.viewer .hotspot .dot {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--tiny-signal);
+  border: 2px solid rgba(0, 0, 0, 0.55);
+  box-shadow: 0 0 0 4px rgba(0, 253, 111, 0.18);
+}
+.viewer .hotspot .tip {
+  position: absolute;
+  left: 50%;
+  bottom: calc(50% + 16px);
+  transform: translateX(-50%);
+  padding: 0.4em 0.7em;
+  border-radius: 8px;
+  white-space: nowrap;
+  background: #0d1410;
+  border: 1px solid var(--tiny-hair-strong);
+  color: var(--tiny-paper);
+  font: 500 0.7rem/1.3 var(--md-code-font-family, ui-monospace, monospace);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+.viewer .hotspot:focus-visible .tip,
+.viewer .hotspot.open .tip {
+  opacity: 1;
+}
+/* :hover must be gated. iOS leaves a tapped element in the hover state, so an
+   ungated rule pins the tip open forever and the second tap appears to do nothing
+   — the .open class toggles correctly underneath and nothing changes. */
+@media (hover: hover) and (pointer: fine) {
+  .viewer .hotspot:hover .tip {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viewer .bar-fill,
+  .viewer .hotspot .tip {
+    transition: none;
+  }
+}

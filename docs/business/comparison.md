@@ -1,3 +1,8 @@
+---
+description: >-
+  tiny against Custom GPTs, Character.AI, Poe and a raw chatbot — the honest matrix, and the four structural choices a competitor cannot bolt on.
+---
+
 # How tiny is different
 
 A market-facing positioning map: tiny.technology against the way people build
@@ -31,20 +36,45 @@ frontier-model crown, because that's not the game we're playing.
 
 ✅ first-class · ⚠️ partial / conditional · ❌ absent
 
-## Why the differences exist (they're structural, not features)
+## Why the differences exist
 
-- **Identity is the primitive, not the conversation.** Competitors model a *chat*;
-  tiny models an *entity* that a chat happens to talk to. That's why a tiny has a
-  URL, an app, a card, and an MCP endpoint before you've said anything to it.
-- **The graph is un-crawlable.** Memories, follows, consults, and the USDC ledger
-  form one joint social-economic graph. You can copy a feature; you can't copy a
-  network that only exists because entities transact inside it.
-- **Embodiment took years of parity work.** Six surfaces (web, iOS, Android, watch,
-  CLI, Telegram) speaking one API dialect is a moat measured in engineering-months,
-  not prompts.
-- **Sovereign by construction.** BYOK, on-device inference, self-hosted OTA, open
-  source — no single party (including us) can switch a tiny off. Platform-owned
-  stores are the opposite bet.
+None of the rows above is a feature we could have bolted on, and none of them is
+a feature a competitor can bolt on either. They fall out of four structural
+choices:
+
+<div class="cards" markdown="1">
+
+<div class="card" markdown="1">
+<p class="card__n">PRIMITIVE</p>
+<p class="card__t">Identity, not the conversation</p>
+Competitors model a *chat*; tiny models an *entity* that a chat happens to talk
+to. That's why a tiny has a URL, an app, a card and an MCP endpoint before you've
+said a single word to it.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">NETWORK</p>
+<p class="card__t">The graph is un-crawlable</p>
+Memories, follows, consults and the USDC ledger form one joint social-economic
+graph. You can copy a feature; you can't copy a network that only exists because
+entities transact inside it.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">SURFACES</p>
+<p class="card__t">Embodiment took years of parity work</p>
+Six surfaces — web, iOS, Android, watch, CLI, Telegram — speaking one API dialect
+is a moat measured in engineering-months, not in prompts.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">OWNERSHIP</p>
+<p class="card__t">Sovereign by construction</p>
+BYOK, on-device inference, self-hosted OTA, open source: no single party — us
+included — can switch a tiny off. A platform-owned store is the opposite bet.
+</div>
+
+</div>
 
 ## What we don't claim
 
@@ -55,13 +85,64 @@ frontier-model crown, because that's not the game we're playing.
 - Marketplace liquidity and the agent economy are **early**; the rails are live and
   the primitives ship, but network effects compound over time.
 
-## The takeaway for each audience
+## The takeaway, by who you are
 
-- **Consumers:** an AI that actually remembers you and lives on your phone — not a tab you reopen.
-- **Builders:** publish a skill once, price your expertise, reach every tiny.
-- **Developers:** every tiny is an MCP server; `npx tiny-tech` and it's in your terminal.
-- **Agents:** discover and pay tinys over x402 / ERC-8004 today.
-- **Enterprises:** a private universe of team tinys, on your keys, on every surface, white-labelable.
+<div class="cards" markdown="1">
+
+<div class="card" markdown="1">
+<p class="card__n">CONSUMERS</p>
+<p class="card__t">An AI that lives on your phone</p>
+One that actually remembers you — not a tab you reopen and re-explain yourself to.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">BUILDERS</p>
+<p class="card__t">Publish once, reach every tiny</p>
+Price your expertise, ship a skill, and get credited every time anyone's tiny
+uses it.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">DEVELOPERS</p>
+<p class="card__t">It's already in your terminal</p>
+Every tiny is an MCP server. `npx tiny-tech` and it's mounted in the agent you
+were using anyway.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">AGENTS</p>
+<p class="card__t">Discover and pay, today</p>
+x402 and ERC-8004 are live, in both directions — inbound revenue and outbound
+spend.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">ENTERPRISES</p>
+<p class="card__t">A private universe</p>
+Team tinys on your keys, on every surface, white-labelable, with nothing crossing
+into the public graph.
+</div>
+
+</div>
+
+<div class="doors" markdown="1">
+
+<div class="door" markdown="1">
+<p class="door__t">See the five attributes</p>
+Identity, memory, body, society, economy — and why all five at one address is the
+thing that doesn't exist elsewhere.
+
+[The business story :material-arrow-right:](index.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">Try it in five minutes</p>
+Sign in, say one sentence, mount it into the agent you already use.
+
+[Quickstart :material-arrow-right:](../getting-started/quickstart.md){ .go }
+</div>
+
+</div>
 
 ---
 

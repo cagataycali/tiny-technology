@@ -23,7 +23,7 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Files this repo deliberately changed for open-sourcing (template hygiene,
 # layout fixes, scrubbed fixtures). Extend when a cycle adds one ON PURPOSE.
-DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$|web/SECURITY\.md$|web/\.env\.example$|web/package(-lock)?\.json$|web/next\.config\.js$|web/tsconfig\.json$|web/vitest\.config\.ts$|FleetHarness\.kt$|gen-store-composites\.mjs$|web/tests/(wearables-ios|wearables-web|android-ota-integrity|chain-calldata)\.test\.ts$'
+DELIBERATE='README\.md$|BETA_PIPELINE\.md$|project\.yml$|project\.pbxproj$|auto-enroll\.sh$|build-on-device\.sh$|push-ota\.sh$|ContinuityTest\.kt$|NormalizeTinySlugTest\.kt$|pay-e2e\.mjs$|settle-policy\.mjs$|wrangler\.toml$|worker/package(-lock)?\.json$|worker/config\.ts$|0029_endpoint_devices\.sql$|worker/src/index\.ts$|web/SECURITY\.md$|web/\.env\.example$|web/package(-lock)?\.json$|web/next\.config\.js$|web/tsconfig\.json$|web/vitest\.config\.ts$|FleetHarness\.kt$|gen-store-composites\.mjs$|web/tests/(wearables-ios|wearables-web|android-ota-integrity|chain-calldata|flipper-ble)\.test\.ts$|^mkdocs\.yml$'
 # `(^|/)\.gradle/` — the CACHE dir, not build.gradle.kts / settings.gradle.kts:
 # the old `\.gradle` matched both and the gradle files were never compared,
 # which is how a ported DmMedia.kt met a build.gradle.kts without media3.
@@ -34,7 +34,8 @@ JUNK='(^|/)\.gradle/|/build/|node_modules|\.wrangler'
 # docs/assets/video/tiny-hero-15s.mp4 (removed here in 6c93dc1). The
 # film-*/store-* suites read business/ and store-assets/ — the private
 # marketing tree that is not part of this repo — so they cannot run here.
-EXCLUDE='^web/public/(android/manifest\.json|ios/manifest\.plist|tiny-hero\.mp4)$|^web/tests/(film|store)-[a-z-]+\.test\.ts$'
+EXCLUDE='^web/public/(android/manifest\.json|ios/manifest\.plist|tiny-hero\.mp4)$|^web/tests/(film|store)-[a-z-]+\.test\.ts$|^docs/[^/]+\.md$|^docs/audits/'
+EXEMPT='^docs/index\.md$'   # the one root-level page that IS the site
 
 # SCRUB — the mechanical part of open-sourcing, applied to every upstream blob
 # BEFORE comparing (the port applies the same rules, so a scrubbed file is not
@@ -45,7 +46,7 @@ EXCLUDE='^web/public/(android/manifest\.json|ios/manifest\.plist|tiny-hero\.mp4)
 # substituted fixture reports as DIFF — loud, not wrong. Binaries pass through
 # untouched (sed would eat their bytes).
 SCRUB="${SYNC_SCRUB:-$HOME/.tiny/sync-scrub.sed}"
-BINARY='\.(png|jpe?g|gif|ico|webp|heic|pdf|mp4|mov|wav|mp3|ipa|apk|aab|jar|woff2?|ttf|otf|glb|stl|zip|p12|mobileprovision|bin|dat)$'
+BINARY='\.(png|jpe?g|gif|ico|webp|heic|pdf|mp4|mov|wav|mp3|ipa|apk|aab|jar|woff2?|ttf|otf|glb|usdz|stl|zip|p12|mobileprovision|bin|dat)$'
 scrub() { # scrub <path>
   if [ ! -f "$SCRUB" ] || echo "$1" | grep -qiE "$BINARY"; then cat; return; fi
   sed -f "$SCRUB"
@@ -63,7 +64,7 @@ scan() { # scan <upstream-git-dir> <upstream-prefix> <local-prefix>
     listed=1
     rel="${f#"$pre"}"
     local_path="$HERE/$loc$rel"
-    if echo "$loc$rel" | grep -qE "$EXCLUDE"; then
+    if echo "$loc$rel" | grep -qE "$EXCLUDE" && ! echo "$loc$rel" | grep -qE "$EXEMPT"; then
       : # deployment state / dead weight — never mirrored
     elif [ ! -f "$local_path" ]; then
       echo "NEW-AT-HEAD: $loc$rel"
@@ -106,6 +107,13 @@ for it in .env.example .npmrc AGENTS.md SECURITY.md app components.json componen
     scan "$SOURCE" "$it/" "web/$it/"
   fi
 done
+
+echo "── docs site (root-level docs/*.md are upstream working notes, never mirrored;"
+echo "   docs/audits/ likewise; CONCEPTS/FINE_PRINT/SELF_HOSTING/brand/screenshots are"
+echo "   public-authored; mkdocs.yml is a template pin — repo URLs and nav copy)"
+scan "$SOURCE" "docs/" "docs/"
+scan "$SOURCE" "overrides/" "overrides/"
+scan "$SOURCE" "mkdocs.yml" "mkdocs.yml"
 
 if [ "$drift" -eq 0 ]; then
   echo "✓ no unexplained drift against upstream HEAD"

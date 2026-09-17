@@ -1,0 +1,68 @@
+{#
+  The one page every stale link in the world lands on, and the only one Material
+  ships as a bare `<h1>404 - Not found</h1>`. A reader who gets here has already
+  been let down once; sending them to a dead end is the second time.
+
+  Two things are deliberate:
+
+  · URLS GO THROUGH THE `url` FILTER, which is root-absolute here. GitHub Pages
+    serves this one file for /tinyai-id/anything/at/any/depth, so a relative href
+    would resolve against whatever path the reader mistyped — `../` from a URL
+    three levels deep lands outside the site. The filter is what the theme itself
+    uses for its own stylesheets on this page, and on the 404 it emits the site
+    root rather than "one level up from wherever we appear to be".
+
+  · THE NAV AND THE SEARCH STAY. Every other "designed 404" instinct says strip
+    the chrome; here the chrome is the answer — a reader who mistyped a URL gets
+    the whole table of contents down the left and a search box in the header,
+    which between them beat any two doors this page could offer.
+
+  · THE MARK IS AN <img>, not the interactive drop. docs/js/tiny-drop.js builds
+    itself into the landing's stage; there is no stage here, and the SMIL inside
+    logo.svg animates fine through <img> — which is the whole reason the mark is
+    authored with SMIL rather than CSS (see the file's header).
+#}
+{% extends "main.html" %}
+
+{#
+  A 404 arrives with the reader's mistyped URL in the address bar and lands in
+  their history. "tiny.technology" there — which is what the theme's fallback
+  gives a page with no `page` object — is indistinguishable from the homepage.
+#}
+{% block htmltitle %}
+  <title>Page not found - {{ config.site_name }}</title>
+{% endblock %}
+
+{% block content %}
+<div class="lost">
+  <img class="lost__mark" src="{{ 'assets/logo.svg' | url }}"
+       alt="The tiny mark — seven blobs fused into one surface" width="112" height="112">
+  {# Short on purpose: the eyebrow is uppercase mono at 0.16em tracking, and
+     "404 · nothing at this address" needs 307px of a 288px column on a 320px
+     phone — where it wrapped to a two-word second line. #}
+  <p class="lost__brow">404 · nothing lives here</p>
+  <h1>That page doesn't exist.</h1>
+  <p class="lost__lede">Unusual, around here — every tiny gets a real address the
+  moment someone names it. This URL never got one, so it was either renamed or it
+  was a typo. Two doors back in:</p>
+
+  {# Two, not three: `.doors` is a two-column grid above 60em, and a third door
+     would sit alone on the next row looking like one that failed to load. #}
+  <div class="doors">
+    <div class="door">
+      <p class="door__t">Start at the beginning</p>
+      What a tiny is, and why an AI with an address is a different thing from a chat.
+      <p><a class="go" href="{{ '' | url }}">The landing →</a></p>
+    </div>
+    <div class="door">
+      <p class="door__t">Skip to doing it</p>
+      Sign in, say one sentence, mount it into the agent you already run.
+      <p><a class="go" href="{{ 'getting-started/quickstart/' | url }}">Quickstart →</a></p>
+    </div>
+  </div>
+
+  <p class="lost__foot">Looking for an answer rather than a page? The
+  <a href="{{ 'faq/' | url }}">FAQ</a> is written as questions, and the search in
+  the header indexes every word on this site.</p>
+</div>
+{% endblock %}

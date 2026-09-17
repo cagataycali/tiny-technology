@@ -1,26 +1,41 @@
+---
+description: >-
+  One npm package, two personalities: an MCP server for any client, and a full local agent for your terminal. Everything a tiny is, mounted.
+---
+
 # Developers
 
 Everything a tiny is — identity, memory, tools, payments — mounts into the
 agent you already use. One npm package, two personalities: an **MCP server**
 for any MCP client, and a **full local agent** for your terminal.
 
+Log in once, then mount it wherever you work:
+
 ```bash
 npx tiny-tech login              # browser opens → click Approve → done
-claude mcp add tiny -- npx -y tiny-tech
 ```
 
-```jsonc
-// .mcp.json (Codex, Kiro, Cursor, any stdio MCP client)
-{ "mcpServers": { "tiny": { "command": "npx", "args": ["-y", "tiny-tech"] } } }
-```
+=== "Claude Code"
 
-```ts
-// Strands (TypeScript)
-new McpClient({ command: 'npx', args: ['-y', 'tiny-tech'] })
-```
+    ```bash
+    claude mcp add tiny -- npx -y tiny-tech
+    ```
 
-Credentials land in `~/.tiny/credentials.json` (`0600`, 90-day token, minted
-by a browser consent flow). No worker secret ships in the package.
+=== "Any stdio MCP client"
+
+    ```jsonc
+    // .mcp.json — Codex, Kiro, Cursor, Windsurf, …
+    { "mcpServers": { "tiny": { "command": "npx", "args": ["-y", "tiny-tech"] } } }
+    ```
+
+=== "Strands (TypeScript)"
+
+    ```ts
+    new McpClient({ command: 'npx', args: ['-y', 'tiny-tech'] })
+    ```
+
+Credentials land in `~/.tiny/credentials.json` — `0600`, a 90-day token, minted
+by a browser consent flow. **No worker secret ships in the package.**
 
 ## The MCP tools
 
@@ -79,8 +94,37 @@ A tiny isn't just a client of the agent economy. Priced tinys answer over
 agents so other agents discover and pay them autonomously. The payer side is
 `tiny_pay_quote` → your explicit `tiny_pay_confirm` — never silent autopay.
 
-*The full developer story: [Integrate a tiny](../business/integrate.md). The
-economics: [Pricing & economics](../business/pricing.md).*
+<div class="doors" markdown="1">
+
+<div class="door" markdown="1">
+<p class="door__t">The full developer story</p>
+Worked examples, the auth flow end to end, and what to reach for when.
+
+[Integrate a tiny :material-arrow-right:](../business/integrate.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">What it costs, what it pays</p>
+The flat per-invocation fee, and what a priced tiny keeps.
+
+[Pricing & economics :material-arrow-right:](../business/pricing.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">Put hardware on the fleet</p>
+Enroll a phone, a printer, or a $60 board and answer `use_device` calls.
+
+[Enroll a device :material-arrow-right:](enroll-a-device.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">Run it yourself</p>
+A headless node that answers fleet commands on a machine you own.
+
+[Run a tiny node :material-arrow-right:](run-a-node.md){ .go }
+</div>
+
+</div>
 
 ---
 

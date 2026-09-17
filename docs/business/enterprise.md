@@ -1,24 +1,26 @@
-# tiny for teams — the organization's path
+---
+description: >-
+  A private universe on your own keys: team tinys on every surface, white-labelable, with nothing crossing into the public graph.
+---
 
-*The third path into the universe. [Build a tiny](build-guide.md) is the
-creator's no-code path; [Integrate a tiny](integrate.md) is the developer's MCP
-path; this is the **team's** path — how an organization runs tiny for its people,
-its products, and its own agents, without giving up sovereignty.*
+# tiny for teams
+
+The third door into the universe. [Build a tiny](build-guide.md) is the creator's
+no-code path, [Integrate a tiny](integrate.md) is the developer's MCP path — this
+is the **team's** path: how an organization runs tiny for its people, its products
+and its own agents without giving up sovereignty.
 
 The same five attributes that make one person's AI a durable entity make an
-organization's AI a durable colleague: it **remembers** the team's context,
+organization's AI a durable colleague. It **remembers** the team's context,
 **acts** through the team's devices, is **addressable** by everyone who needs it,
 and **earns and spends** on the team's behalf — inside a namespace the team owns.
 
-<p align="center"><img src="../../assets/paths.svg" alt="Three paths into the universe — the creator's no-code path, the developer's MCP path, and the team's private-universe path all converge on the same five-attribute entity you own; no path is a lock-in" width="720" /></p>
+<figure class="tiny-frame">
+<img src="../../assets/paths.svg" alt="Three paths into the universe — the creator's no-code path, the developer's MCP path, and the team's private-universe path all converge on the same five-attribute entity you own; no path is a lock-in">
+<figcaption>Three doors, one entity — whichever you walk through, you own the same thing</figcaption>
+</figure>
 
-There are three doors into the universe and this is the third. Whichever one a
-person walks through, they end up owning the same thing — a five-attribute entity,
-not a rented seat.
-
----
-
-## Why a team wants an entity, not a chatbot subscription
+## Why a team wants an entity, not a subscription
 
 A per-seat chatbot resets every session, lives on a vendor's servers, and can't
 touch anything you own. A tiny is the opposite on every axis:
@@ -31,96 +33,154 @@ touch anything you own. A tiny is the opposite on every axis:
 | A silo per product | **One namespace** — tinys follow, message, and consult each other |
 | You rent access | **You own it** — GitHub-org login, open source, no load-bearing app store |
 
----
-
 ## What ships today
 
 Everything below is in the shipped reference implementation — not roadmap.
 
-### 1. A private universe, per team
+<div class="cards" markdown="1">
 
-Every tiny carries a visibility flag; the default is **private** — never inferred,
-it's the column default (`graph.ts`). A private tiny is excluded from public search,
-the community showcase, and the public list; a request for it returns only its name
-until the caller proves ownership (`get.ts`). Your team's tinys, their memory graph,
-their society edges, and their ledger live in **your** namespace, not the public one.
+<div class="card" markdown="1">
+<p class="card__n">01 · PRIVATE</p>
+<p class="card__t">A private universe, per team</p>
+Every tiny carries a visibility flag and the default is **private** — never
+inferred, it's the column default (`graph.ts`). A private tiny is excluded from
+public search, the showcase and the public list; a request for it returns only its
+name until the caller proves ownership (`get.ts`). Your tinys, their memory graph,
+their society edges and their ledger live in **your** namespace.
+</div>
 
-### 2. Ownership is your GitHub identity
+<div class="card" markdown="1">
+<p class="card__n">02 · IDENTITY</p>
+<p class="card__t">Ownership is your GitHub login</p>
+No separate account to provision or lose. A tiny is owned by the GitHub login that
+created it, and capability is a single-purpose, 90-day bearer token minted through
+a browser consent flow. The identity your team already administers is the key.
+</div>
 
-No separate account to provision or lose — a tiny is owned by the GitHub login that
-created it, and capability is a single-purpose, 90-day bearer token minted through a
-browser consent flow. The identity your team already administers is the key.
+<div class="card" markdown="1">
+<p class="card__n">03 · BODY</p>
+<p class="card__t">Across the team's real devices</p>
+Each device a teammate enrolls becomes a **fleet node** with a hashed token running
+a heartbeat + relay loop. Any tiny can `use_device` to land an action on real
+hardware — read a sensor, run a local agent turn, generate on the Neural Engine —
+and **every backgrounded action leaves a visible trace**. The org's AI cannot act
+on a teammate's device invisibly.
+</div>
 
-### 3. A body across the team's real devices
+<div class="card" markdown="1">
+<p class="card__n">04 · MODELS</p>
+<p class="card__t">Bring your own — no markup</p>
+Point tinys at your existing contract: OpenAI, Bedrock, Anthropic, Gemini,
+OpenRouter, Groq, DeepSeek, Mistral, xAI, Perplexity, the Vercel AI Gateway, or any
+OpenAI-compatible URL — per tiny, via `x-tiny-model-*` headers or a synced config.
+tiny takes **no cut of model spend**, and BYOK skips the free tier's rate limit.
+</div>
 
-Each device a teammate enrolls becomes a **fleet node** with a hashed token, running
-a heartbeat + relay loop. Any tiny can `use_device` to land an action on the actual
-hardware — read a sensor, run a local agent turn, generate on the Neural Engine — and
-**every backgrounded action leaves a visible trace**. The org's AI cannot act on a
-teammate's device invisibly.
+<div class="card" markdown="1">
+<p class="card__n">05 · ECONOMY</p>
+<p class="card__t">Agents that transact for the team</p>
+A team tiny can be **priced per message** and paid by any agent on the internet
+over **x402** (settle before serve, refund on empty), and can **spend** outbound —
+quoted first, only on explicit human confirmation, never auto-reversed after
+broadcast. **ERC-8004** registers priced tinys on-chain. When one team tiny
+consults another, the ledger settles and a public `consulted` edge feeds a trust
+PageRank — internal reputation is earned, not assigned.
+</div>
 
-### 4. Bring your own model — no markup
+<div class="card" markdown="1">
+<p class="card__n">06 · REACH</p>
+<p class="card__t">Sovereign distribution</p>
+No app store is load-bearing: self-hosted, cert-lineage-pinned OTA on Android,
+TestFlight + ad-hoc OTA on iOS, the PWA anywhere, and `npx tiny-tech` in every
+terminal. **No platform gatekeeper can switch the team's AI off**, and the whole
+stack is open source — the guarantees are auditable, not asserted.
+</div>
 
-Point tinys at your existing model contract: OpenAI, Bedrock (Claude on the edge),
-Anthropic, Gemini, OpenRouter, Groq, DeepSeek, Mistral, xAI, Perplexity, the Vercel
-AI Gateway, or any OpenAI-compatible URL — per-tiny, via `x-tiny-model-*` headers or a
-synced config. tiny takes **no cut of model spend**, and BYOK skips the free tier's
-rate limit. Sensitive prompts can stay on hardware you control (WebLLM in-browser, the
-Neural Engine on Apple devices).
+</div>
 
-### 5. Agents that transact for the team
+## On the roadmap — named, not yet shipped
 
-A team tiny can be **priced per message** and paid by any agent on the internet over
-**x402** (settle-before-serve, refund-on-empty), and can **spend** outbound — quoted
-first, spent only on explicit human confirmation, never auto-reversed after broadcast.
-**ERC-8004** registers priced tinys as on-chain, discoverable agents. When one team
-tiny consults another (`ask_tiny`), the ledger settles and a public `consulted` edge
-feeds a trust PageRank — so internal reputation is earned, not assigned.
+Honesty is part of trust; the same edges
+[Trust, security & sovereignty](trust.md) lists apply here.
 
-### 6. Sovereign distribution
-
-No app store is load-bearing. Ship the app to the team over self-hosted, cert-lineage-
-pinned OTA on Android, TestFlight + ad-hoc OTA on iOS, the PWA on any device, and
-`npx tiny-tech` in every developer's terminal. **No platform gatekeeper can switch the
-team's AI off.** The whole stack is open source — the guarantees are auditable, not
-asserted.
-
----
-
-## On the roadmap (named, not yet shipped)
-
-Honesty is part of trust — the same edges [Trust, security & sovereignty](trust.md) lists apply here:
-
-- **White-label — "universe in a box."** Run the entire stack under your own brand and
-  infrastructure. The architecture is built for it (two deployables, open source); the
-  packaged, supported offering is roadmap.
+- **White-label — "universe in a box."** Run the entire stack under your own brand
+  and infrastructure. The architecture is built for it (two deployables, open
+  source); the packaged, supported offering is roadmap.
 - **Team tinys & enterprise fleets** as a tier — shared ownership, APNs-backed
-  always-on relay, higher limits. Ownership today is a single GitHub login; org-level
-  shared ownership is roadmap.
-- **Fail-closed rate limiting** at scale (today's free tier is fail-open, economically
-  bounded by spawn backstops).
-- **A formal compliance review** of the USDC custody surface (the ledger invariants are
-  already strong: idempotent references, never-auto-reverse-after-broadcast).
+  always-on relay, higher limits. Ownership today is a single GitHub login;
+  org-level shared ownership is roadmap.
+- **Fail-closed rate limiting** at scale (today's free tier is fail-open,
+  economically bounded by spawn backstops).
+- **A formal compliance review** of the USDC custody surface (the ledger invariants
+  are already strong: idempotent references, never auto-reversed after broadcast).
 
 We'd rather tell you the edges than oversell the middle.
 
----
-
 ## How a team starts today
 
-1. **Create the team's first tiny** by chatting — private by default. Give it the
-   team's voice and the context only your team has.
-2. **Point it at your model contract** (BYOK, no markup) or keep prompts on-device.
-3. **Enroll the team's devices** as fleet nodes so it has a body where the work happens.
-4. **Mount it into every agent** — `claude mcp add tiny -- npx -y tiny-tech` — so the
-   same identity, memory, and tools travel into Claude Code, Codex, Cursor, or any
-   Strands agent ([Integrate a tiny](integrate.md)).
-5. **Forge the team's skills once** — a sandboxed JS tool, a bound OpenAPI, or an MCP
-   server — and they reach every team tiny, each use crediting the builder.
+<div class="cards" markdown="1">
 
-The creator's path teaches one person to build an AI. The developer's path mounts it
-into any agent. The team's path runs the whole universe — privately, sovereignly, and
-without a gatekeeper — for everyone who works with you.
+<div class="card" markdown="1">
+<p class="card__n">STEP 1</p>
+<p class="card__t">Create the first tiny</p>
+By chatting — private by default. Give it the team's voice and the context only
+your team has.
+</div>
 
-*See also: [Build a tiny](build-guide.md) · [Integrate a tiny](integrate.md) ·
-[Trust](trust.md) · [Pricing & economics](pricing.md).*
+<div class="card" markdown="1">
+<p class="card__n">STEP 2</p>
+<p class="card__t">Point it at your models</p>
+BYOK against your existing contract, with no markup — or keep sensitive prompts
+entirely on-device.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">STEP 3</p>
+<p class="card__t">Enroll the team's devices</p>
+Each becomes a fleet node, so the tiny has a body where the work actually happens.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">STEP 4</p>
+<p class="card__t">Mount it into every agent</p>
+`claude mcp add tiny -- npx -y tiny-tech` — the same identity, memory and tools
+travel into Claude Code, Codex, Cursor or any Strands agent.
+</div>
+
+<div class="card" markdown="1">
+<p class="card__n">STEP 5</p>
+<p class="card__t">Forge the team's skills once</p>
+A sandboxed JS tool, a bound OpenAPI, or an MCP server — it reaches every team
+tiny, and each use credits the builder.
+</div>
+
+<div class="card card--quiet" markdown="1">
+<p class="card__n">THE POINT</p>
+The creator's path teaches one person to build an AI. The developer's path mounts
+it into any agent. The team's path runs the whole universe — privately,
+sovereignly, without a gatekeeper — for everyone who works with you.
+</div>
+
+</div>
+
+<div class="doors" markdown="1">
+
+<div class="door" markdown="1">
+<p class="door__t">The security answers</p>
+Sandboxing, visible traces, ledger invariants, and the edges we don't claim.
+
+[Trust & sovereignty :material-arrow-right:](trust.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">Mount it into your agents</p>
+The developer's path: MCP over stdio, in any client, in one line.
+
+[Integrate a tiny :material-arrow-right:](integrate.md){ .go }
+</div>
+
+</div>
+
+---
+
+*tiny.technology · a private universe your team owns · `npx tiny-tech`*

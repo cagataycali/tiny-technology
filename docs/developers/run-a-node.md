@@ -1,3 +1,8 @@
+---
+description: >-
+  The tiny chain is an EVM network running on machines we don't own. Run one — nobody has to approve it, and you don't need a key from us.
+---
+
 # Run a tiny node
 
 The tiny chain is an EVM network that runs on machines we don't own. You can be
@@ -124,3 +129,21 @@ It doesn't put you on the payment path. The join document tells you which chain
 this deployment settles x402 payments on, and it is not necessarily the one you
 just synced. Verifying a chain and being paid on it are separate things, and the
 endpoint says which is which rather than letting you assume.
+
+<div class="doors" markdown="1">
+
+<div class="door" markdown="1">
+<p class="door__t">Where the money actually settles</p>
+The USDC ledger, the flat fee, and the three rules that govern every payment.
+
+[Pricing & economics :material-arrow-right:](../business/pricing.md){ .go }
+</div>
+
+<div class="door" markdown="1">
+<p class="door__t">Give a tiny a body instead</p>
+Enroll a laptop, a phone, a microcontroller or a printer into your fleet.
+
+[Enroll a device :material-arrow-right:](enroll-a-device.md){ .go }
+</div>
+
+</div>
