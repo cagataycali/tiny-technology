@@ -70,6 +70,9 @@ export const ROUTE_DEADLINE_MS: Record<string, number> = {
   // Client deadline sits above the whole chain so the SERVER decides the
   // outcome — the device firmware should use ≥90s on its own socket too.
   '/api/devices/ask': 105_000,
+  // maxDuration = 35, 30s internal: R2 read + one speech-to-text call, no
+  // agent turn. Same mapping as the 30s media proxy below.
+  '/api/devices/transcribe': 45_000,
   // maxDuration = 60 (signs + broadcasts a payout on-chain).
   '/api/wallet/withdraw': 75_000,
   // maxDuration = 60 (executes a user tool, which may call out).

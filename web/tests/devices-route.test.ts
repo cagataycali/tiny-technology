@@ -5,6 +5,7 @@ beforeAll(() => { process.env.AUTH_JWT_SECRET = 'test-secret' })
 
 import { GET, POST, DELETE } from '../app/api/devices/route'
 import { POST as heartbeat } from '../app/api/devices/heartbeat/route'
+import { workerFile, workerPresent } from './_worker'
 import { issueSession } from '../lib/auth'
 
 const req = (method: string, body: string | object | null, cookie?: string) =>
@@ -190,5 +191,45 @@ describe('POST /api/devices/heartbeat — device token, no session', () => {
     }) as any
     await heartbeat(req('POST', { deviceId: 'd1', token: 'tind_ok', lanUrl: 'http://8.8.8.8:8080' }))
     expect(sentBody.lanUrl).toBe('http://8.8.8.8:8080')
+  })
+
+  it('wantFeatures is forwarded, and features[] is lifted back as short strings only', async () => {
+    // The rebuilt-reply rule (see the route header): a worker field this hop
+    // does not lift does not reach the device. features[] is how firmware
+    // learns an optional route (transcribe) exists before offering it.
+    let sentBody: any = null
+    global.fetch = vi.fn(async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({
+        ok: true, unread: 2, features: ['transcribe', { evil: 1 }, 'x'.repeat(33)],
+      }), { status: 200 })
+    }) as any
+    const res = await heartbeat(req('POST', { deviceId: 'd1', token: 'tind_ok', wantFeatures: '1', wantUnread: '1' }))
+    expect(sentBody.wantFeatures).toBe('1')
+    expect(await res.json()).toEqual({ ok: true, unread: 2, features: ['transcribe'] })
+  })
+
+  it('no features key when the device did not ask, or an older worker sent none', async () => {
+    let sentBody: any = null
+    global.fetch = vi.fn(async (_url: any, init: any) => {
+      sentBody = JSON.parse(init.body)
+      return new Response(JSON.stringify({ ok: true }), { status: 200 })
+    }) as any
+    const res = await heartbeat(req('POST', { deviceId: 'd1', token: 'tind_ok' }))
+    expect(sentBody).not.toHaveProperty('wantFeatures')
+    expect('features' in (await res.json())).toBe(false)
+  })
+})
+
+describe.skipIf(!workerPresent)('worker DEVICE_FEATURES — advertised only what is mounted', () => {
+  it('every advertised feature has its /device/<name> route in the router', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { DEVICE_FEATURES } = await import(workerFile('devices.ts') /* @vite-ignore */)
+    const index = readFileSync(workerFile('index.ts'), 'utf8')
+    expect(DEVICE_FEATURES.length).toBeGreaterThan(0)
+    for (const f of DEVICE_FEATURES) {
+      expect(index, `features[] advertises "${f}" but /device/${f} is not mounted`)
+        .toContain(`router.post('/device/${f}'`)
+    }
   })
 })

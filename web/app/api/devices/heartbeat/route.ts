@@ -24,7 +24,7 @@ const json = (body: any, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
 export async function POST(req: Request) {
-  const { deviceId, token, capabilities, lanUrl, wantUnread } = await req.json().catch(() => ({} as any))
+  const { deviceId, token, capabilities, lanUrl, wantUnread, wantFeatures } = await req.json().catch(() => ({} as any))
   if (!deviceId || !token) return json({ ok: false, error: 'deviceId and token required' }, 400)
 
   // 10s bound — a daemon heartbeats continuously, so a connect-but-never-
@@ -49,6 +49,8 @@ export async function POST(req: Request) {
       // Forwarded for the same reason lanUrl is (see header): a field this hop
       // does not pass does not exist. Opt-in DM badge for glass devices.
       ...(wantUnread ? { wantUnread: '1' } : {}),
+      // Same rule: the feature list (DEVICE_FEATURES) is opt-in per device.
+      ...(wantFeatures ? { wantFeatures: '1' } : {}),
     }),
     signal: AbortSignal.timeout(10_000),
   }).catch(() => null)
@@ -59,5 +61,14 @@ export async function POST(req: Request) {
   // `unread` rides back only when the worker computed it (wantUnread set).
   // Rebuilt-reply rule: any worker field the device needs must be lifted
   // explicitly HERE — this return is why extra fields don't pass by default.
-  return json({ ok: true, ...(typeof data.unread === 'number' ? { unread: data.unread } : {}) })
+  // `features` likewise: lifted only as a list of short strings, so the worker
+  // can never smuggle an object into a firmware JSON parser through this hop.
+  const features = Array.isArray(data.features)
+    ? data.features.filter((f: unknown) => typeof f === 'string' && f.length <= 32).slice(0, 16)
+    : null
+  return json({
+    ok: true,
+    ...(typeof data.unread === 'number' ? { unread: data.unread } : {}),
+    ...(features ? { features } : {}),
+  })
 }

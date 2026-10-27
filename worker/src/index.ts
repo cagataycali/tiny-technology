@@ -36,6 +36,7 @@ import { DeviceEnrollCall, DeviceHeartbeatCall, DevicesListCall, DeviceRevokeCal
 import { FirmwarePublishCall, FirmwareCurrentCall, FirmwareDeviceCurrentCall } from "./firmware";
 import { TranscriptAddCall, TranscriptListCall, TranscriptGetCall } from "./transcripts";
 import { DeviceAskCall } from "./ask";
+import { DeviceTranscribeCall } from "./transcribe";
 import { LocationBeatCall, LocationsListCall, LocationDeleteCall, LOCATION_SWEEP_SQL, LOCATION_SWEEP_AGE_S } from "./locations";
 import { PayBalanceCall, PayInvokeCall, PayTransferCall, PayRefundCall, PayPriceSetCall, PayPricingCall, PayCreditCall, PaySpendCall, PaySpendReverseCall, PaySpendSentCall, PaySettleUnknownCall, PayReconcileStatusCall, reconcileSentSpends, reconcileSettleUnknown } from "./payments";
 import { PayLinkAddressCall, PayClaimCall, PayDepositInfoCall, PayFaucetCall } from "./deposits";
@@ -150,6 +151,10 @@ router.post('/device/event', DeviceEventCall)
 // renders the answer + optional card. Auth like /device/event; the agent turn
 // reuses the scheduled-job pipeline (see ask.ts).
 router.post('/device/ask', DeviceAskCall)
+// 🎙️ Speech-to-text alone — the transcription half of /device/ask with no
+// agent turn, so every device text field (DM reply, composer) can dictate.
+// Only the owner's own /media upload is accepted (see transcribe.ts).
+router.post('/device/transcribe', DeviceTranscribeCall)
 // 🤖 Endpoint devices dial OUT: the worker holds the bearer and makes the call,
 // so the credential never reaches the edge app (docs/endpoint-devices-vision).
 router.post('/device/endpoint/call', DeviceEndpointCallRoute)

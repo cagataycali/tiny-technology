@@ -383,6 +383,15 @@ export class DeviceEnrollCall extends OpenAPIRoute {
   }
 }
 
+/** Optional device routes this backend serves, advertised on the heartbeat
+ *  when a device sends wantFeatures. Add a name here in the SAME change that
+ *  mounts its route — an advertised feature that 404s is the failure this list
+ *  exists to prevent.
+ *    transcribe — POST /device/transcribe (speech-to-text, no agent turn) */
+export const DEVICE_FEATURES: readonly string[] = ["transcribe"];
+
+const truthy = (v: unknown) => !!v && String(v) !== "0" && String(v) !== "false";
+
 export class DeviceHeartbeatCall extends OpenAPIRoute {
   static schema = {
     tags: ["Devices"],
@@ -393,13 +402,14 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
       capabilities: new Str({ required: false }),
       lanUrl: new Str({ required: false, description: "http://<private-ip>:<port> the owner's own clients can dial directly" }),
       wantUnread: new Str({ required: false, description: "truthy → reply carries the owner's unread DM count (opt-in: the badge poll for glass devices, free for the rest of the fleet)" }),
+      wantFeatures: new Str({ required: false, description: "truthy → reply carries features[]: the optional device routes this backend serves (see DEVICE_FEATURES)" }),
     },
     responses: { "200": { description: "Alive", schema: { response: "Alive" } } },
   };
 
   async handle(request: Request, env: any, _ctx: any, data: Record<string, any>) {
     if (!checkInternalKey(request, env)) return json({ error: "unauthorized" }, 401);
-    const { deviceId, token, capabilities, lanUrl, wantUnread } = data.body;
+    const { deviceId, token, capabilities, lanUrl, wantUnread, wantFeatures } = data.body;
     if (!deviceId || !token) return json({ error: "deviceId and token required" }, 400);
 
     // A bad lanUrl is DROPPED, never a 400: the heartbeat's job is presence, and
@@ -424,6 +434,13 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
     // no oracle for probing which device ids exist
     if (!res?.meta?.changes) return json({ error: "unknown device" }, 401);
 
+    // 🧭 Opt-in feature list: which optional device routes THIS backend serves,
+    // so firmware can offer an affordance (a dictation key) only where pressing
+    // it can work, instead of learning from a 404 after the human has already
+    // spoken. A constant: it costs no query, and a missing field (older
+    // backend, or not asked) means "assume none".
+    const extra = truthy(wantFeatures) ? { features: DEVICE_FEATURES } : {};
+
     // 💬 Opt-in unread badge (docs/research/MESSAGES_TRANSPORT.md in
     // sticky-the-reterminal): the relay poll is a device's push channel and the
     // heartbeat is its clock, so the cheapest possible DM badge is one COUNT
@@ -432,7 +449,7 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
     // 30s); the fleet that doesn't render badges pays nothing. Failure is a
     // MISSING field, never a failed heartbeat: presence must not die over a
     // badge, and the device treats absence as "keep last known".
-    if (wantUnread && String(wantUnread) !== "0" && String(wantUnread) !== "false") {
+    if (truthy(wantUnread)) {
       try {
         const owner = await env.DB.prepare(
           "SELECT user_id FROM devices WHERE id = ?1 AND revoked = 0"
@@ -441,11 +458,11 @@ export class DeviceHeartbeatCall extends OpenAPIRoute {
           const cnt = await env.DB.prepare(
             "SELECT COUNT(*) AS c FROM messages WHERE to_user = ? AND read = 0"
           ).bind(owner.user_id).first();
-          return json({ ok: true, unread: Number(cnt?.c || 0) });
+          return json({ ok: true, unread: Number(cnt?.c || 0), ...extra });
         }
       } catch { /* badge is best-effort; presence already succeeded */ }
     }
-    return json({ ok: true });
+    return json({ ok: true, ...extra });
   }
 }
 

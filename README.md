@@ -98,7 +98,7 @@ every tool and the defects behind each row.
 
 The right kind of question. **68 built-in tools** ([the full table](docs/FINE_PRINT.md#the-capability-table)), and
 [`readme-claims.test.ts`](web/tests/readme-claims.test.ts) fails this page if that
-number drifts from the code. Under it: **36 D1 migrations**, **315 test files** in
+number drifts from the code. Under it: **36 D1 migrations**, **316 test files** in
 the web suite alone, sessions in httpOnly cookies for 30 days, and one identity that
 is the same object from a phone, a watch, a CLI, or another agent's `ask_tiny`.
 Every claim traces to code in [**docs/CONCEPTS.md**](docs/CONCEPTS.md), and the
